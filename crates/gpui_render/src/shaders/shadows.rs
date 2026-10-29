@@ -16,6 +16,10 @@ pub mod shadow {
         pub element_corner_radii: Corners,
         pub inset: ShaderBool,
         pub corner_smoothing: f32,
+        /// A drop shadow clipped to outside the element (CSS box-shadow), so it never shows
+        /// through a translucent element or under a backdrop lens.
+        pub clip_outside: ShaderBool,
+        pub padding: u32,
     }
     storage!(group(1), binding(0), SHADOWS: RuntimeArray<Shadow>);
 
@@ -91,6 +95,14 @@ pub mod shadow {
                     shadow.element_bounds,
                     shadow.element_corner_radii,
                 ));
+        } else if is_enabled(shadow.clip_outside) {
+            coverage = coverage
+                * (1.0
+                    - antialiased_coverage(rounded_rectangle_signed_distance(
+                        position,
+                        shadow.element_bounds,
+                        shadow.element_corner_radii,
+                    )));
         }
         coverage
     }
@@ -157,6 +169,16 @@ pub mod shadow {
                     shadow.corner_smoothing,
                     prepared_element,
                 ));
+        } else if is_enabled(shadow.clip_outside) {
+            coverage = coverage
+                * (1.0
+                    - antialiased_coverage(prepared_corner_signed_distance(
+                        position,
+                        shadow.element_bounds,
+                        shadow.element_corner_radii,
+                        shadow.corner_smoothing,
+                        prepared_element,
+                    )));
         }
 
         coverage

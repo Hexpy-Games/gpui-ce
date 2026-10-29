@@ -848,6 +848,9 @@ pub struct Shadow {
     /// Whether this shadow is rendered inside the element instead of outside it.
     pub inset: ShaderBool,
     pub corner_smoothing: f32,
+    /// A drop shadow clipped to outside the element (CSS box-shadow semantics).
+    pub clip_outside: ShaderBool,
+    pub padding: u32,
 }
 
 impl From<Shadow> for Primitive {
@@ -1333,6 +1336,8 @@ mod tests {
             element_corner_radii: Corners::default(),
             inset: ShaderBool::Disabled,
             corner_smoothing: 0.0,
+            clip_outside: ShaderBool::Disabled,
+            padding: 0,
         }
     }
 

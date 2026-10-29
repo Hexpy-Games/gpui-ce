@@ -4498,7 +4498,26 @@ impl Window {
         corner_smoothing: f32,
         shadows: &[BoxShadow],
     ) {
-        self.paint_shadows(bounds, corner_radii, corner_smoothing, shadows, false);
+        self.paint_shadows(
+            bounds,
+            corner_radii,
+            corner_smoothing,
+            shadows,
+            false,
+            false,
+        );
+    }
+
+    /// [`Self::paint_drop_shadows`] clipped to outside the element, as CSS box-shadow is: for
+    /// translucent elements and glass, whose backdrop must not include their own shadow.
+    pub fn paint_drop_shadows_outside(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_smoothing: f32,
+        shadows: &[BoxShadow],
+    ) {
+        self.paint_shadows(bounds, corner_radii, corner_smoothing, shadows, false, true);
     }
 
     /// Paint the inset shadows from `shadows` into the scene at the current z-index. Should
@@ -4512,7 +4531,7 @@ impl Window {
         corner_smoothing: f32,
         shadows: &[BoxShadow],
     ) {
-        self.paint_shadows(bounds, corner_radii, corner_smoothing, shadows, true);
+        self.paint_shadows(bounds, corner_radii, corner_smoothing, shadows, true, false);
     }
 
     fn paint_shadows(
@@ -4522,6 +4541,7 @@ impl Window {
         corner_smoothing: f32,
         shadows: &[BoxShadow],
         inset: bool,
+        clip_outside: bool,
     ) {
         self.invalidator.debug_assert_paint();
 
@@ -4558,6 +4578,8 @@ impl Window {
                 element_corner_radii,
                 inset: inset.into(),
                 corner_smoothing,
+                clip_outside: clip_outside.into(),
+                padding: 0,
             });
         }
     }
