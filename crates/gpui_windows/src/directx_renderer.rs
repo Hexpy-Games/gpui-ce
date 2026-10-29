@@ -10,7 +10,8 @@ use gpui_render::{
     artifacts::{Dx11DrawConstants, Dx11DrawConstantsBinding},
     blur::{
         BlurAxis, BlurKernel, BlurUniforms, FilterCompositeClip,
-        GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, downsampled_dimension,
+        GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle, backdrop_snapshot_region,
+        downsampled_dimension,
     },
     path_types::{PathRasterizationVertex, PathSprite},
     shaders::{
@@ -90,6 +91,8 @@ pub(crate) struct DirectXRenderer {
     active_render_target: Option<ID3D11RenderTargetView>,
     path_rasterization_vertices: Vec<PathRasterizationVertex>,
     path_sprites: Vec<PathSprite>,
+    /// Cached wallpaper pass targets and noise textures (wallpapers.rs).
+    wallpapers: wallpapers::DxWallpaperCacheCell,
 }
 
 /// Direct3D objects
@@ -188,6 +191,11 @@ struct DirectXRenderPipelines {
     blur_params_buffer: ID3D11Buffer,
     blur_blend_replace: ID3D11BlendState,
     blur_blend_composite: ID3D11BlendState,
+    wallpaper_vertex: ID3D11VertexShader,
+    wallpaper_fragment: ID3D11PixelShader,
+    /// The default rasterizer state, and the same with the scissor test on (blur passes).
+    plain_rasterizer: ID3D11RasterizerState,
+    scissor_rasterizer: ID3D11RasterizerState,
 }
 
 /// The generated `surfaces` pipeline: one draw per surface, per-draw uniforms.
@@ -317,6 +325,7 @@ impl DirectXRenderer {
             active_render_target: None,
             path_rasterization_vertices: Vec::new(),
             path_sprites: Vec::new(),
+            wallpapers: Default::default(),
         })
     }
 
@@ -404,6 +413,7 @@ impl DirectXRenderer {
             }
 
             self.resources.take();
+            self.wallpapers.borrow_mut().clear();
             if let Some(devices) = &self.devices {
                 devices.device_context.OMSetRenderTargets(None, None);
                 devices.device_context.ClearState();
@@ -606,10 +616,26 @@ impl DirectXRenderer {
                     let (current_rtv, current_srv) = targets.current();
                     let result = (|| {
                         for filter in &scene.backdrop_filters[range.clone()] {
+                            if let Some(paint) = &filter.wallpaper {
+                                self.dx_draw_wallpaper(current_rtv, filter, paint)?;
+                                continue;
+                            }
+                            let region = backdrop_snapshot_region(
+                                filter.bounds,
+                                filter.max_blur_radius(),
+                                &filter.lens,
+                                self.width,
+                                self.height,
+                            );
+                            // A lens reads the sharp full-resolution backdrop, so it needs a copy
+                            // even when the backdrop is the target it composites into.
                             let source = if targets.inherits_backdrop() {
                                 self.dx_snapshot_backdrop(
                                     targets.backdrop_layers().map(|(_, source)| source),
+                                    region,
                                 )?
+                            } else if filter.lens.is_active() {
+                                self.dx_snapshot_backdrop(std::iter::once(current_srv), region)?
                             } else {
                                 current_srv.clone()
                             };
@@ -623,6 +649,7 @@ impl DirectXRenderer {
                                 filter.max_blur_radius(),
                                 filter.opacity,
                                 true,
+                                filter.lens,
                             )?;
                         }
                         Ok::<(), anyhow::Error>(())
@@ -671,6 +698,7 @@ impl DirectXRenderer {
                         boundary.max_blur_radius(),
                         boundary.opacity,
                         false,
+                        BackdropLens::default(),
                     );
                     self.active_render_target = parent_rtv.clone();
                     unsafe {
@@ -1229,6 +1257,33 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    /// Runs `pass` with the scissor test limited to `scissor` (half-resolution blur passes only
+    /// shade the blurred bounds, as on wgpu), then restores the plain rasterizer state.
+    fn dx_scissored(
+        &self,
+        scissor: &ScissorRectangle,
+        pass: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let ctx = &self
+            .devices
+            .as_ref()
+            .context("devices missing")?
+            .device_context;
+        let rect = windows::Win32::Foundation::RECT {
+            left: scissor.x as i32,
+            top: scissor.y as i32,
+            right: (scissor.x + scissor.width) as i32,
+            bottom: (scissor.y + scissor.height) as i32,
+        };
+        unsafe {
+            ctx.RSSetState(&self.pipelines.scissor_rasterizer);
+            ctx.RSSetScissorRects(Some(slice::from_ref(&rect)));
+        }
+        let result = pass();
+        unsafe { ctx.RSSetState(&self.pipelines.plain_rasterizer) };
+        result
+    }
+
     /// Blur `source_srv` (full-resolution) using the half-res ping/pong textures and composite the
     /// result into `target_rtv`, clipped to `bounds`/`corner_radii`/`content_mask` and modulated
     /// by `opacity`. Shared by the backdrop and content-filter paths.
@@ -1245,8 +1300,9 @@ impl DirectXRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
+        lens: BackdropLens,
     ) -> Result<()> {
-        if clip_rounded && blur_radius <= 0.0 {
+        if clip_rounded && blur_radius <= 0.0 && !lens.is_active() {
             return Ok(());
         }
 
@@ -1272,14 +1328,26 @@ impl DirectXRenderer {
         let resources = self.resources.as_ref().context("resources missing")?;
 
         let full_size = [full_width as f32, full_height as f32];
-        let (composite_source, source_size) =
-            if let Some(kernel) = BlurKernel::for_radius(blur_radius) {
-                let [ping, pong] = resources
-                    .blur
-                    .as_ref()
-                    .and_then(|blur| blur.scratch.as_ref())
-                    .context("blur resources were not prepared")?;
-                // Downsample source -> ping, then separable gaussian ping -> pong -> ping.
+        let (composite_source, source_size) = if let Some(kernel) =
+            BlurKernel::for_radius(blur_radius)
+        {
+            let [ping, pong] = resources
+                .blur
+                .as_ref()
+                .and_then(|blur| blur.scratch.as_ref())
+                .context("blur resources were not prepared")?;
+            let scissor = ScissorRectangle::for_blurred_bounds(
+                bounds,
+                GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
+                full_width,
+                full_height,
+            );
+            if scissor.is_empty() {
+                return Ok(());
+            }
+            // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
+            // shading only the blurred bounds.
+            self.dx_scissored(&scissor, || {
                 self.dx_blur_pass(
                     &self.pipelines.blur_downsample_vertex,
                     &self.pipelines.blur_downsample_fragment,
@@ -1290,7 +1358,10 @@ impl DirectXRenderer {
                     &half_vp,
                     D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     3,
-                    true,
+                    // Backdrops skip the clear: each pass writes its whole scissor and the
+                    // composite only reads texels the passes wrote (as on wgpu); content blurs
+                    // composite out to the scissor's edge and keep it.
+                    !clip_rounded,
                 )?;
 
                 for (axis, source, target) in [
@@ -1307,14 +1378,16 @@ impl DirectXRenderer {
                         &half_vp,
                         D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                         3,
-                        true,
+                        !clip_rounded,
                     )?;
                 }
+                Ok(())
+            })?;
 
-                (&ping.source, blur_size)
-            } else {
-                (source_srv, full_size)
-            };
+            (&ping.source, blur_size)
+        } else {
+            (source_srv, full_size)
+        };
 
         // Content blur bleeds ~3·radius past the box; composite over a dilated rect.
         let composite_bounds = if clip_rounded {
@@ -1333,7 +1406,8 @@ impl DirectXRenderer {
             clip,
             source_size,
             full_size,
-        );
+        )
+        .with_lens(lens);
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -1358,12 +1432,42 @@ impl DirectXRenderer {
             4,
             false,
         )?;
+        // A lens's sharp-rim pass: the fold band again from the sharp source, over the blur.
+        if lens.is_active() && lens.sharp_rim > 0.0 && source_size != full_size {
+            self.dx_blur_pass(
+                composite_vertex,
+                composite_fragment,
+                &self.pipelines.blur_blend_composite,
+                target_rtv,
+                source_srv,
+                BlurUniforms::composite(
+                    composite_bounds,
+                    content_mask,
+                    corner_radii,
+                    corner_smoothing,
+                    opacity,
+                    clip,
+                    full_size,
+                    full_size,
+                )
+                .with_lens(lens)
+                .with_sharp_rim_pass(lens.sharp_rim),
+                &resources.viewport,
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+                4,
+                false,
+            )?;
+        }
         Ok(())
     }
 
+    /// Copies `region` of the backdrop (what one filter reads, `backdrop_snapshot_region`) into
+    /// the snapshot; the rest is cleared and never read, so a lens costs in proportion to its
+    /// own size instead of a whole-target copy.
     fn dx_snapshot_backdrop<'a>(
         &self,
         sources: impl Iterator<Item = &'a Option<ID3D11ShaderResourceView>>,
+        region: Bounds<ScaledPixels>,
     ) -> Result<Option<ID3D11ShaderResourceView>> {
         let resources = self.resources.as_ref().context("resources missing")?;
         let snapshot = resources
@@ -1372,26 +1476,38 @@ impl DirectXRenderer {
             .and_then(|blur| blur.snapshot.as_ref())
             .context("backdrop snapshot missing")?;
         let target = &snapshot.target;
-        let bounds = Bounds::new(
-            point(ScaledPixels(0.0), ScaledPixels(0.0)),
-            size(
-                ScaledPixels(self.width as f32),
-                ScaledPixels(self.height as f32),
-            ),
-        );
-        let ctx = &self
-            .devices
-            .as_ref()
-            .context("devices missing")?
-            .device_context;
-        unsafe {
-            ctx.ClearRenderTargetView(
-                target.as_ref().context("backdrop snapshot missing")?,
-                &[0.0; 4],
-            );
+        let bounds = region;
+        let scissor = ScissorRectangle {
+            x: region.origin.x.0 as u32,
+            y: region.origin.y.0 as u32,
+            width: region.size.width.0 as u32,
+            height: region.size.height.0 as u32,
+        };
+        if scissor.is_empty() {
+            return Ok(snapshot.source.clone());
         }
+        let full_vp = resources.viewport;
 
-        for source in sources {
+        for (index, source) in sources.enumerate() {
+            // The first layer overwrites the region (a scissored copy, no clear); the rest of
+            // the snapshot keeps stale texels that are never read.
+            if index == 0 {
+                self.dx_scissored(&scissor, || {
+                    self.dx_blur_pass(
+                        &self.pipelines.blur_downsample_vertex,
+                        &self.pipelines.blur_downsample_fragment,
+                        &self.pipelines.blur_blend_replace,
+                        target,
+                        source,
+                        BlurUniforms::copy([self.width as f32, self.height as f32]),
+                        &full_vp,
+                        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                        3,
+                        false,
+                    )
+                })?;
+                continue;
+            }
             self.dx_blur_and_composite(
                 source,
                 target,
@@ -1402,6 +1518,7 @@ impl DirectXRenderer {
                 0.0,
                 1.0,
                 false,
+                BackdropLens::default(),
             )?;
         }
 
@@ -1566,10 +1683,10 @@ impl DirectXResources {
             ]);
         }
 
-        if requirements.backdrop_filter_count > 0
-            && requirements.isolated_target_count > 0
-            && blur.snapshot.is_none()
-        {
+        let needs_snapshot = (requirements.backdrop_filter_count > 0
+            && requirements.isolated_target_count > 0)
+            || requirements.backdrop_lens_count > 0;
+        if needs_snapshot && blur.snapshot.is_none() {
             blur.snapshot = Some(create_color_target(device, width, height)?);
         }
 
@@ -1683,12 +1800,17 @@ impl DirectXRenderPipelines {
             create_vertex_shader(device, smoothed_blur_composite.vertex)?;
         let smoothed_blur_composite_fragment =
             create_fragment_shader(device, smoothed_blur_composite.fragment)?;
+        let wallpaper = ShaderModule::Wallpaper.bytecode()?;
+        let wallpaper_vertex = create_vertex_shader(device, wallpaper.vertex)?;
+        let wallpaper_fragment = create_fragment_shader(device, wallpaper.fragment)?;
         let blur_params_buffer =
             create_constant_buffer(device, std::mem::size_of::<BlurUniforms>())?;
         let blur_blend_replace = create_blend_state_no_blend(device)?;
         // Premultiplied (One / InvSrcAlpha) — the composite outputs a premultiplied blurred sample;
         // straight-alpha blending would darken the faded edges.
         let blur_blend_composite = create_premultiplied_blend_state(device)?;
+        let plain_rasterizer = create_rasterizer_state(device, false)?;
+        let scissor_rasterizer = create_rasterizer_state(device, true)?;
 
         let surface = ShaderModule::Surface.bytecode()?;
         let surfaces = SurfacePipeline {
@@ -1719,6 +1841,10 @@ impl DirectXRenderPipelines {
             blur_params_buffer,
             blur_blend_replace,
             blur_blend_composite,
+            wallpaper_vertex,
+            wallpaper_fragment,
+            plain_rasterizer,
+            scissor_rasterizer,
         })
     }
 }
@@ -2262,6 +2388,12 @@ fn set_viewport(device_context: &ID3D11DeviceContext, width: f32, height: f32) -
 
 #[inline]
 fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Result<()> {
+    let rasterizer_state = create_rasterizer_state(device, false)?;
+    unsafe { device_context.RSSetState(&rasterizer_state) };
+    Ok(())
+}
+
+fn create_rasterizer_state(device: &ID3D11Device, scissor: bool) -> Result<ID3D11RasterizerState> {
     let desc = D3D11_RASTERIZER_DESC {
         FillMode: D3D11_FILL_SOLID,
         CullMode: D3D11_CULL_NONE,
@@ -2270,17 +2402,16 @@ fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceCont
         DepthBiasClamp: 0.0,
         SlopeScaledDepthBias: 0.0,
         DepthClipEnable: true.into(),
-        ScissorEnable: false.into(),
+        ScissorEnable: scissor.into(),
         MultisampleEnable: true.into(),
         AntialiasedLineEnable: false.into(),
     };
     let rasterizer_state = unsafe {
         let mut state = None;
         device.CreateRasterizerState(&desc, Some(&mut state))?;
-        state.unwrap()
+        state.context("rasterizer state")?
     };
-    unsafe { device_context.RSSetState(&rasterizer_state) };
-    Ok(())
+    Ok(rasterizer_state)
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_blend_desc
@@ -2490,6 +2621,8 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 
 const BUFFER_COUNT: usize = 3;
 
+mod wallpapers;
+
 pub(crate) mod shader_resources {
     //! D3D11 bytecode generated from the shared Rust shader sources at build time.
 
@@ -2514,6 +2647,7 @@ pub(crate) mod shader_resources {
         Blur,
         BlurComposite,
         SmoothedBlurComposite,
+        Wallpaper,
     }
 
     impl ShaderModule {
@@ -2535,6 +2669,7 @@ pub(crate) mod shader_resources {
                 Self::Blur => "blur",
                 Self::BlurComposite => "blur_composite",
                 Self::SmoothedBlurComposite => "smoothed_blur_composite",
+                Self::Wallpaper => "wallpaper",
             };
             NATIVE_SHADERS
                 .iter()

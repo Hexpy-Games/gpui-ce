@@ -174,11 +174,19 @@ impl Scene {
             };
             self.primitive_bounds.insert_above_all(order_bounds)
         } else {
+            // A backdrop reads past its bounds; order it above everything it samples.
+            let order_bounds = match &primitive {
+                Primitive::BackdropFilter(filter) => filter
+                    .bounds
+                    .dilate(ScaledPixels(filter.sampling_margin()))
+                    .intersect(&filter.content_mask.bounds),
+                _ => clipped_bounds,
+            };
             self.layer_stack
                 .last()
                 .copied()
                 .flatten()
-                .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds))
+                .unwrap_or_else(|| self.primitive_bounds.insert(order_bounds))
         };
         match &mut primitive {
             Primitive::Shadow(shadow) => {
@@ -879,12 +887,152 @@ pub struct BackdropFilter {
     pub filters: SmallVec<[ScaledFilter; 4]>,
     /// Element opacity captured at paint time, multiplied into the composited result.
     pub opacity: f32,
+    /// Optional liquid-glass lens applied while compositing.
+    pub lens: BackdropLens,
+    /// A procedural wallpaper drawn here instead of filtering the backdrop.
+    pub wallpaper: Option<WallpaperPaint>,
+}
+
+/// One fullscreen shader pass of a [`WallpaperPaint`], rendered into its own cached texture of
+/// `width` x `height` device pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallpaperPass {
+    /// The renderer's wallpaper shader to run (see gpui_render's `fragment_wallpaper`).
+    pub module: u32,
+    /// Width of the pass's target, in device pixels.
+    pub width: u32,
+    /// Height of the pass's target, in device pixels.
+    pub height: u32,
+    /// What the pass samples: 0 the engine noise texture, 1 the print noise texture, 2 the
+    /// previous pass's output.
+    pub source: u32,
+    /// The pass's shader uniforms (`wp_mode` .. `wp_p5`, see gpui_render's `BlurUniforms`).
+    pub uniforms: [[f32; 4]; 15],
+}
+
+/// A wallpaper: a chain of fullscreen shader passes into cached textures, the last one
+/// composited into the primitive's rounded bounds. The renderer re-runs the passes only when
+/// `generation` changes for `key`, so frames that redraw other content reuse the textures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallpaperPaint {
+    /// Cache identity of the wallpaper's textures.
+    pub key: u64,
+    /// The passes re-run when this changes for `key`.
+    pub generation: u64,
+    /// The passes, in order; the last one is composited.
+    pub passes: SmallVec<[WallpaperPass; 2]>,
 }
 
 impl BackdropFilter {
     /// Largest gaussian blur radius in this filter chain, in device pixels.
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
+    }
+
+    /// How far outside `bounds` compositing reads the backdrop, in device pixels: the blur runs
+    /// at half resolution with sigma = radius/2 texels, reaching 3 sigma, i.e. 3 * radius here.
+    /// A lens reads only its frost radius past the rim.
+    pub fn sampling_margin(&self) -> f32 {
+        let radius = self.max_blur_radius();
+        let blur = if radius > 0.0 {
+            3.0 * radius + 2.0
+        } else {
+            0.0
+        };
+        blur.max(self.lens.sampling_margin())
+    }
+}
+
+/// A liquid-glass lens for a [`BackdropFilter`], in device pixels, after the height-field
+/// refraction of LiquidGlass by ybouane (MIT) and liquidGL (MIT, (c) NaughtyDuk). The shape is
+/// a slab whose edge is rounded over a circular bevel of radius `bezel`: height
+/// h(d) = sqrt(d * (2 * bezel - d)) at depth d inside the edge, flat beyond it. Each sample
+/// moves inward along the edge normal by `refraction` times the bevel's slope, tapered to zero
+/// where the bevel ends and softly capped at `depth`, so the backdrop is squashed toward the
+/// rim, the middle stays 1:1, and the mapping only folds within about a pixel of the rim
+/// (a thin, smooth sliver, as in the references). The edge is lit, not stroked: a thin
+/// specular core whose brightness follows the edge normal against a light direction (a key
+/// lobe on the lit side, a weaker opposite lobe, after Liquid Glass Studio's two-sided glare),
+/// Fresnel whitening over the steep bevel and a soft inner shade on the side away from the
+/// light. A zero `bezel` disables the lens.
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
+pub struct BackdropLens {
+    /// Radius of the circular bevel, measured inward from the edge (capped at the half size).
+    pub bezel: f32,
+    /// Inward shift per unit of bevel slope (ybouane's refraction strength).
+    pub refraction: f32,
+    /// Rim highlight and Fresnel strength, 0 to 1.
+    pub specular: f32,
+    /// Relative per-channel spread of the shift (chromatic dispersion), e.g. 0.1.
+    pub dispersion: f32,
+    /// Radius of a light disc frost of the backdrop; 0 keeps it clear. A Gaussian frost comes
+    /// from the filter's blur instead.
+    pub frost: f32,
+    /// Luminance lift of the flat middle, fading in across the bezel: positive values mix
+    /// toward white, negative toward black (-1 to 1). It calms the backdrop under content.
+    pub lift: f32,
+    /// Width of the specular core at the rim (Gaussian falloff inward).
+    pub rim: f32,
+    /// Soft cap on the inward shift: the rim samples at most this far inside the edge.
+    pub depth: f32,
+    /// Direction the light comes from, in radians: 0 from the right, pi/2 from the top.
+    pub light_angle: f32,
+    /// Strength of the highlight on the edge facing away from the light, relative to the key.
+    pub opposite: f32,
+    /// Darkening a few pixels inside the edge facing away from the light, 0 to 1.
+    pub shade: f32,
+    /// Fresnel whitening over the steep bevel, mixed toward white by this times (1 - n.z)^4.
+    pub fresnel: f32,
+    /// Exponent of the light lobe around the perimeter; larger values narrow the lit arc.
+    pub focus: f32,
+    /// Share of the highlight lit all the way round, whatever the light direction (-1 to 1);
+    /// negative values darken the rim where the light lobe is weak.
+    pub ambient: f32,
+    /// Soft glow inside the specular core (three core widths), relative to the core.
+    pub halo: f32,
+    /// Exponent p of the fold mapping, inward shift = fold_depth * h * (1 - d / (fold_band * h))^p
+    /// with h the shape's smaller half size; 0 keeps the circular-bevel refraction instead.
+    pub fold: f32,
+    /// Width of the fold zone (where the shift reaches zero), relative to h.
+    pub fold_band: f32,
+    /// How deep the rim samples, relative to h.
+    pub fold_depth: f32,
+    /// How much curved edges thin the rim line: its width is divided by 1 + curvature * curve
+    /// (curvature in 1/px, so `curve` is a length).
+    pub curve: f32,
+    /// 0..1: how much of the fold band shows the sharp backdrop instead of the blurred one (a
+    /// second composite of the band over the blurred glass): a frosted sheet keeps a clear,
+    /// refracting rim. 0 (default): one source for the whole shape.
+    pub sharp_rim: f32,
+    /// With `sharp_rim` > 0: the sharp second composite covers the whole shape at that weight
+    /// (no band fade), so the glass is (1 - w) frosted + w sharp: low frequencies pass through
+    /// the frost, fine detail stays sharp at weight w (native Liquid Glass's small regular glass).
+    pub sharp_full: bool,
+    /// A tone curve on the sampled backdrop, per channel in 0..1 code values:
+    /// out = a + b x + c x^2 (native Liquid Glass's fill, measured over black, grey and white).
+    /// All zero: off (the `lift` stage applies instead).
+    pub tone: [f32; 3],
+    /// With the tone on: the native hairline's black alpha on the left/right edges and on the
+    /// top/bottom, drawn in the one device pixel just outside the silhouette.
+    pub hairline: [f32; 2],
+    /// Paint at the given (float) bounds instead of snapping them to device pixels, so a shape
+    /// that grows or moves by fractions of a pixel stays smooth (its edge is anti-aliased).
+    pub exact: bool,
+}
+
+impl BackdropLens {
+    /// Whether the lens changes anything.
+    pub fn is_active(&self) -> bool {
+        self.bezel > 0.0
+    }
+
+    /// How far outside the shape the lens reads the backdrop, in device pixels: its samples
+    /// move inward, so only the frost disc reaches past the rim.
+    pub fn sampling_margin(&self) -> f32 {
+        if !self.is_active() {
+            return 0.0;
+        }
+        self.frost + 2.0
     }
 }
 

@@ -87,6 +87,17 @@ struct StorageArray {
 }
 
 fn main() {
+    // The shader modules (with the wallpaper passes) recurse deeper in Naga's parser and
+    // backends than Windows' 1 MB main-thread stack allows in an unoptimized build script.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(build_shaders)
+        .expect("spawn shader build")
+        .join()
+        .expect("shader build panicked");
+}
+
+fn build_shaders() {
     println!("cargo:rerun-if-changed=src/shaders");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
@@ -870,6 +881,12 @@ fn write_native_shaders(out_dir: &std::path::Path) {
         NativeShaderModule {
             pipeline: &SMOOTHED_BLUR_COMPOSITE,
             pipeline_path: "SMOOTHED_BLUR_COMPOSITE",
+            source: &shaders::blur::WGSL_SOURCE,
+            requires_dual_source_lowering: false,
+        },
+        NativeShaderModule {
+            pipeline: &WALLPAPER,
+            pipeline_path: "WALLPAPER",
             source: &shaders::blur::WGSL_SOURCE,
             requires_dual_source_lowering: false,
         },

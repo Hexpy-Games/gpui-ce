@@ -112,6 +112,7 @@ define_pipelines! {
     BLUR: "blur", vertex_blur_fullscreen, fragment_blur, TriangleList, Blur, FullscreenTriangle;
     BLUR_COMPOSITE: "blur_composite", vertex_blur_composite, fragment_blur_composite, TriangleStrip, Blur, Rectangle;
     SMOOTHED_BLUR_COMPOSITE: "smoothed_blur_composite", vertex_smoothed_blur_composite, fragment_smoothed_blur_composite, TriangleStrip, Blur, Rectangle;
+    WALLPAPER: "wallpaper", vertex_blur_fullscreen, fragment_wallpaper, TriangleList, Blur, FullscreenTriangle;
 }
 
 pub const EMOJI_RASTERIZATION: Pipeline = Pipeline {
@@ -228,9 +229,44 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         source_size,
         target_size,
         corner_smoothing,
+        lens_bezel,
+        lens_refraction,
+        lens_specular,
+        lens_dispersion,
+        lens_frost,
+        lens_lift,
+        lens_rim,
+        lens_depth,
+        lens_light_x,
+        lens_light_y,
+        lens_opposite,
+        lens_shade,
+        lens_fresnel,
+        lens_focus,
+        lens_ambient,
+        lens_halo,
+        lens_fold,
+        lens_fold_band,
+        lens_fold_depth,
+        lens_curve,
         padding0,
         padding1,
-        padding2
+        padding2,
+        wp_mode,
+        wp_frame,
+        wp_env,
+        wp_rect,
+        wp_css,
+        wp_print,
+        wp_drop,
+        wp_col,
+        wp_rect2,
+        wp_p0,
+        wp_p1,
+        wp_p2,
+        wp_p3,
+        wp_p4,
+        wp_p5
     ),
     render_layout!(crate::path_types::PathSprite, "PathSprite", bounds),
     render_layout!(

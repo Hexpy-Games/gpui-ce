@@ -51,6 +51,7 @@ pub(super) struct WgpuResources {
     pub(super) surface_cache: RefCell<SurfaceCache>,
     pub(super) filter_uniforms: DynamicUniformBuffer<BlurUniforms>,
     blur_bind_groups: RefCell<BlurBindGroups>,
+    pub(super) wallpapers: super::wallpapers::WallpaperCacheCell,
     pub(super) globals_buffer: wgpu::Buffer,
     pub(super) globals_bind_group: wgpu::BindGroup,
     pub(super) path_globals_bind_group: wgpu::BindGroup,
@@ -187,6 +188,7 @@ impl WgpuResources {
             surface_cache: RefCell::new(surface_cache),
             filter_uniforms,
             blur_bind_groups: RefCell::default(),
+            wallpapers: RefCell::default(),
             globals_buffer,
             globals_bind_group,
             path_globals_bind_group,
@@ -304,10 +306,10 @@ impl WgpuRenderer {
             resources.blur_pong_view = Some(view);
         }
 
-        if requirements.backdrop_filter_count > 0
-            && requirements.isolated_target_count > 0
-            && resources.backdrop_snapshot_texture.is_none()
-        {
+        let needs_snapshot = (requirements.backdrop_filter_count > 0
+            && requirements.isolated_target_count > 0)
+            || requirements.backdrop_lens_count > 0;
+        if needs_snapshot && resources.backdrop_snapshot_texture.is_none() {
             let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
             resources.backdrop_snapshot_texture = Some(texture);
             resources.backdrop_snapshot_view = Some(view);
@@ -358,6 +360,15 @@ impl WgpuRenderer {
         }
         true
     }
+}
+
+pub(super) fn sampled_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    sampled_render_texture(device, format, width, height)
 }
 
 fn sampled_render_texture(

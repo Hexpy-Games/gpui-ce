@@ -303,6 +303,7 @@ impl FrameRequirements {
                 filter_count: FILTER_UNIFORMS_PER_COMPOSITE
                     * (planned.backdrop_filter_count + planned.isolated_filter_count) as u64
                     + u64::from(planned.uses_offscreen_target)
+                    + planned.backdrop_lens_count as u64
                     + if planned.isolated_target_count > 0 {
                         (planned.backdrop_filter_count * (planned.isolated_target_count + 1)) as u64
                     } else {
@@ -423,12 +424,39 @@ impl<'a> FrameEncoder<'a> {
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     drop(pass);
                     for filter in &self.scene.backdrop_filters[range.clone()] {
-                        let snapshot = self.targets.inherits_backdrop().then(|| {
-                            self.renderer.snapshot_backdrop(
+                        if let Some(paint) = &filter.wallpaper {
+                            self.renderer.draw_wallpaper(
+                                &mut self.encoder,
+                                self.targets.current(),
+                                filter,
+                                paint,
+                            );
+                            continue;
+                        }
+                        let region = gpui_render::blur::backdrop_snapshot_region(
+                            filter.bounds,
+                            filter.max_blur_radius(),
+                            &filter.lens,
+                            self.renderer.target.width(),
+                            self.renderer.target.height(),
+                        );
+                        // A lens reads the sharp full-resolution backdrop, so it needs a copy even
+                        // when the backdrop is the target it composites into.
+                        let snapshot = if self.targets.inherits_backdrop() {
+                            Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
-                            )
-                        });
+                                region,
+                            ))
+                        } else if filter.lens.is_active() {
+                            Some(self.renderer.snapshot_backdrop(
+                                &mut self.encoder,
+                                std::iter::once(self.targets.current()),
+                                region,
+                            ))
+                        } else {
+                            None
+                        };
                         let source = snapshot.as_ref().unwrap_or_else(|| self.targets.current());
                         self.renderer.blur_and_composite(
                             &mut self.encoder,
@@ -442,6 +470,7 @@ impl<'a> FrameEncoder<'a> {
                                 blur_radius: filter.max_blur_radius(),
                                 opacity: filter.opacity,
                                 clip: FilterCompositeClip::RoundedBounds,
+                                lens: filter.lens,
                             },
                         );
                     }
@@ -504,6 +533,7 @@ impl<'a> FrameEncoder<'a> {
                             blur_radius: boundary.max_blur_radius(),
                             opacity: boundary.opacity,
                             clip: FilterCompositeClip::ContentShape,
+                            lens: Default::default(),
                         },
                     );
                     pass = begin_scene_render_pass(

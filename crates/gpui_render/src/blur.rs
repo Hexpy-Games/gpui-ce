@@ -5,7 +5,7 @@ pub use crate::shaders::{
         Corners as ShaderCorners, DownsampleMode,
     },
 };
-use gpui::{Bounds, Corners, ScaledPixels};
+use gpui::{BackdropLens, Bounds, Corners, ScaledPixels, WallpaperPass};
 use wgsl_rs::std::vec2f;
 
 pub const DOWNSAMPLE_FACTOR: u32 = 2;
@@ -39,6 +39,7 @@ pub struct FilterCompositeParameters {
     pub blur_radius: f32,
     pub opacity: f32,
     pub clip: FilterCompositeClip,
+    pub lens: BackdropLens,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +97,94 @@ impl BlurUniforms {
         }
     }
 
+    /// Adds a liquid-glass lens to composite uniforms; a zero bezel leaves them unchanged.
+    pub fn with_lens(mut self, lens: BackdropLens) -> Self {
+        self.lens_bezel = lens.bezel;
+        self.lens_refraction = lens.refraction;
+        self.lens_specular = lens.specular;
+        self.lens_dispersion = lens.dispersion;
+        self.lens_frost = lens.frost;
+        self.lens_lift = lens.lift;
+        self.lens_rim = lens.rim;
+        self.lens_depth = lens.depth;
+        self.lens_light_x = lens.light_angle.cos();
+        self.lens_light_y = -lens.light_angle.sin();
+        self.lens_opposite = lens.opposite;
+        self.lens_shade = lens.shade;
+        self.lens_fresnel = lens.fresnel;
+        self.lens_focus = lens.focus;
+        self.lens_ambient = lens.ambient;
+        self.lens_halo = lens.halo;
+        self.lens_fold = lens.fold;
+        self.lens_fold_band = lens.fold_band;
+        self.lens_fold_depth = lens.fold_depth;
+        self.lens_curve = lens.curve;
+        // padding2 flags (no layout change): bit 0 tone curve, bit 1 full-shape sharp pass. With
+        // the tone on, its coefficients ride in lens_refraction, lens_depth and lens_shade, which
+        // only the v5 bevel (fold off) and the inner shade read; the tone forces both off.
+        let tone_on = lens.tone.iter().any(|c| *c != 0.0);
+        self.padding2 = u32::from(tone_on) | (u32::from(lens.sharp_full) << 1);
+        if tone_on {
+            self.lens_refraction = lens.tone[0];
+            self.lens_depth = lens.tone[1];
+            self.lens_shade = lens.tone[2];
+            // The rim thinning and Fresnel are off with the tone on; their slots carry the
+            // hairline (see lens_hairline in the shader).
+            self.lens_curve = lens.hairline[0];
+            self.lens_fresnel = lens.hairline[1];
+        }
+        self
+    }
+
+    /// The sharp-rim pass of a lens (`BackdropLens::sharp_rim`): composites only the fold band,
+    /// from the sharp snapshot, over the blurred glass. padding1 carries its weight in percent.
+    pub fn with_sharp_rim_pass(mut self, sharp_rim: f32) -> Self {
+        self.padding1 = (sharp_rim.clamp(0.0, 1.0) * 100.0).round() as u32;
+        self
+    }
+
+    /// Uniforms of one wallpaper pass: its own `wp_*` values (filled by the app).
+    pub fn wallpaper_pass(pass: &WallpaperPass) -> Self {
+        let v = |i: usize| {
+            wgsl_rs::std::vec4f(
+                pass.uniforms[i][0],
+                pass.uniforms[i][1],
+                pass.uniforms[i][2],
+                pass.uniforms[i][3],
+            )
+        };
+        let mut u = with_texture_sizes(
+            empty_uniforms(DownsampleMode::Copy),
+            [pass.width as f32, pass.height as f32],
+            [pass.width as f32, pass.height as f32],
+        );
+        u.wp_mode = v(0);
+        u.wp_frame = v(1);
+        u.wp_env = v(2);
+        u.wp_rect = v(3);
+        u.wp_css = v(4);
+        u.wp_print = v(5);
+        u.wp_drop = v(6);
+        u.wp_col = v(7);
+        u.wp_rect2 = v(8);
+        u.wp_p0 = v(9);
+        u.wp_p1 = v(10);
+        u.wp_p2 = v(11);
+        u.wp_p3 = v(12);
+        u.wp_p4 = v(13);
+        u.wp_p5 = v(14);
+        u.wp_mode.x = 1.0;
+        u.wp_mode.y = pass.module as f32;
+        u
+    }
+
+    /// Turns composite uniforms into a wallpaper composite of a `size` texture.
+    pub fn with_wallpaper_texture(mut self, size: [f32; 2]) -> Self {
+        self.wp_mode = wgsl_rs::std::vec4f(2.0, 0.0, 0.0, 0.0);
+        self.wp_frame = wgsl_rs::std::vec4f(size[0], size[1], 0.0, 0.0);
+        self
+    }
+
     pub fn composite(
         bounds: Bounds<ScaledPixels>,
         content_mask: Bounds<ScaledPixels>,
@@ -131,6 +220,42 @@ pub struct ScissorRectangle {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// The full-resolution part of the backdrop a backdrop filter at `bounds` can read, so its
+/// snapshot copies only that instead of the whole target: the bounds grown by the blur's reach
+/// (rounded out to the half-resolution grid the blur runs on), the frost disc, the v5 bevel's
+/// shift cap and how far a fold (with its colour split) can shift a sample past the far side.
+pub fn backdrop_snapshot_region(
+    bounds: Bounds<ScaledPixels>,
+    blur_radius: f32,
+    lens: &BackdropLens,
+    full_width: u32,
+    full_height: u32,
+) -> Bounds<ScaledPixels> {
+    let short = bounds.size.width.0.min(bounds.size.height.0) * 0.5;
+    let fold_reach = if lens.is_active() {
+        (lens.fold_depth.max(0.0) * (1.0 + lens.dispersion.abs()) - 1.0).max(0.0) * short
+    } else {
+        0.0
+    };
+    let margin = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius
+        + lens.sampling_margin()
+        + lens.depth.max(0.0)
+        + fold_reach
+        + 4.0;
+    let half = ScissorRectangle::for_blurred_bounds(bounds, margin, full_width, full_height);
+    let x0 = (half.x * DOWNSAMPLE_FACTOR).min(full_width);
+    let y0 = (half.y * DOWNSAMPLE_FACTOR).min(full_height);
+    let x1 = ((half.x + half.width) * DOWNSAMPLE_FACTOR).min(full_width);
+    let y1 = ((half.y + half.height) * DOWNSAMPLE_FACTOR).min(full_height);
+    Bounds::new(
+        gpui::point(ScaledPixels(x0 as f32), ScaledPixels(y0 as f32)),
+        gpui::size(
+            ScaledPixels((x1 - x0) as f32),
+            ScaledPixels((y1 - y0) as f32),
+        ),
+    )
 }
 
 impl ScissorRectangle {
@@ -226,9 +351,44 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         source_size: vec2f(1.0, 1.0),
         target_size: vec2f(1.0, 1.0),
         corner_smoothing: 0.0,
+        lens_bezel: 0.0,
+        lens_refraction: 0.0,
+        lens_specular: 0.0,
+        lens_dispersion: 0.0,
+        lens_frost: 0.0,
+        lens_lift: 0.0,
+        lens_rim: 0.0,
+        lens_depth: 0.0,
+        lens_light_x: 0.0,
+        lens_light_y: 0.0,
+        lens_opposite: 0.0,
+        lens_shade: 0.0,
+        lens_fresnel: 0.0,
+        lens_focus: 0.0,
+        lens_ambient: 0.0,
+        lens_halo: 0.0,
+        lens_fold: 0.0,
+        lens_fold_band: 0.0,
+        lens_fold_depth: 0.0,
+        lens_curve: 0.0,
         padding0: 0,
         padding1: 0,
         padding2: 0,
+        wp_mode: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_frame: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_env: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_rect: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_css: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_print: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_drop: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_col: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_rect2: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p0: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p1: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p2: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p3: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p4: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        wp_p5: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
     }
 }
 

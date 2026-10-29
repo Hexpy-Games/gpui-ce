@@ -444,6 +444,8 @@ fn smoothed_primitives_share_one_contour() {
         corner_smoothing: 1.0,
         filters: smallvec![ScaledFilter::Blur(ScaledPixels(5.0))],
         opacity: 1.0,
+        lens: Default::default(),
+        wallpaper: None,
     });
 
     scene.finish();

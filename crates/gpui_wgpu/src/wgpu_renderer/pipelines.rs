@@ -75,6 +75,7 @@ pub(super) struct WgpuPipelines {
     pub(super) blur: WgpuRenderPipeline,
     pub(super) blur_composite: WgpuRenderPipeline,
     pub(super) smoothed_blur_composite: WgpuRenderPipeline,
+    pub(super) wallpaper: WgpuRenderPipeline,
 }
 
 pub(super) struct WgpuRenderPipeline {
@@ -480,6 +481,7 @@ impl WgpuPipelines {
                 1,
                 &shader_module,
             ),
+            wallpaper: create(shader::WALLPAPER, &overwrite_target, 1, &shader_module),
         }
     }
 }

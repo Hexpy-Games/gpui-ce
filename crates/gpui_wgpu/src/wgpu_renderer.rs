@@ -29,6 +29,7 @@ mod resources;
 mod settings;
 mod surfaces;
 mod target;
+mod wallpapers;
 
 #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
 pub use headless::WgpuHeadlessRenderer;

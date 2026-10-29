@@ -41,6 +41,8 @@ pub struct ScenePlanRequirements {
     pub path_sprite_count: usize,
     pub surface_count: usize,
     pub backdrop_filter_count: usize,
+    /// Backdrop filters with an active lens; each samples a full-resolution backdrop copy.
+    pub backdrop_lens_count: usize,
     pub isolated_filter_count: usize,
     pub isolated_target_count: usize,
     pub uses_path_target: bool,
@@ -125,9 +127,13 @@ impl ScenePlan {
                 }
                 batch => {
                     if let PrimitiveBatch::BackdropFilters(range) = &batch {
-                        requirements.uses_blur_target |= scene.backdrop_filters[range.clone()]
+                        let filters = &scene.backdrop_filters[range.clone()];
+                        requirements.uses_blur_target |=
+                            filters.iter().any(|filter| filter.max_blur_radius() > 0.0);
+                        requirements.backdrop_lens_count += filters
                             .iter()
-                            .any(|filter| filter.max_blur_radius() > 0.0);
+                            .filter(|filter| filter.lens.is_active())
+                            .count();
                     }
 
                     requirements.include_batch(&batch);

@@ -1,16 +1,16 @@
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId, Global, GlobalElementId,
-    GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero, KeyBinding, KeyContext,
-    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, BackdropLens, Background,
+    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
+    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
+    Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
+    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
+    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
+    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
+    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
     Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
     Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
@@ -4601,6 +4601,21 @@ impl Window {
         corner_smoothing: f32,
         filters: &[Filter],
     ) {
+        let lens = BackdropLens::default();
+        self.paint_backdrop_lens(bounds, corner_radii, corner_smoothing, filters, lens);
+    }
+
+    /// [`Self::paint_backdrop_filter`] seen through a liquid-glass [`BackdropLens`], whose
+    /// `bezel`, `refraction`, `frost`, `rim` and `depth` are given here in logical pixels. An
+    /// active lens paints even without filters (a clear glass).
+    pub fn paint_backdrop_lens(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_smoothing: f32,
+        filters: &[Filter],
+        lens: BackdropLens,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -4609,18 +4624,57 @@ impl Window {
             .filter(|filter| !filter.is_identity())
             .map(|filter| filter.scale(scale_factor))
             .collect();
-        if filters.is_empty() {
+        if filters.is_empty() && !lens.is_active() {
             return;
         }
+        let lens = BackdropLens {
+            bezel: lens.bezel * scale_factor,
+            refraction: lens.refraction * scale_factor,
+            frost: lens.frost * scale_factor,
+            rim: lens.rim * scale_factor,
+            depth: lens.depth * scale_factor,
+            curve: lens.curve * scale_factor,
+            ..lens
+        };
 
         self.next_frame.scene.insert_primitive(BackdropFilter {
             order: 0,
-            bounds: self.snap_bounds(bounds),
+            bounds: if lens.exact {
+                bounds.scale(scale_factor)
+            } else {
+                self.snap_bounds(bounds)
+            },
             content_mask: self.snapped_content_mask(),
             corner_radii: corner_radii.scale(scale_factor),
             corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
             filters,
             opacity: 1.0,
+            lens,
+            wallpaper: None,
+        });
+    }
+
+    /// Paint a procedural [`WallpaperPaint`] into `bounds` (clipped to `corner_radii` and the
+    /// content mask), at `opacity`. Its passes run only when its generation changes.
+    pub fn paint_wallpaper(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        opacity: f32,
+        wallpaper: crate::WallpaperPaint,
+    ) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: self.snap_bounds(bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: corner_radii.scale(scale_factor),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: opacity.clamp(0.0, 1.0),
+            lens: BackdropLens::default(),
+            wallpaper: Some(wallpaper),
         });
     }
 
