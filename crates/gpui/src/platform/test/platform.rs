@@ -42,6 +42,8 @@ pub(crate) struct TestPlatform {
     pub expect_restart:
         RefCell<Option<oneshot::Sender<(Option<PathBuf>, Vec<std::ffi::OsString>)>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
+    /// The scale factor of windows opened from now on (2 by default).
+    pub(crate) window_scale_factor: std::cell::Cell<f32>,
     weak: Weak<Self>,
 }
 
@@ -161,6 +163,7 @@ impl TestPlatform {
             system_notifications: Default::default(),
             text_system,
             headless_renderer_factory,
+            window_scale_factor: std::cell::Cell::new(2.0),
         })
     }
 
@@ -452,6 +455,7 @@ impl Platform for TestPlatform {
             self.weak.clone(),
             self.active_display.clone(),
             renderer,
+            self.window_scale_factor.get(),
         );
         Ok(Box::new(window))
     }

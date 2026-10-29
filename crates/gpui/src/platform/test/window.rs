@@ -22,6 +22,7 @@ use std::{
 pub(crate) struct TestWindowState {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) handle: AnyWindowHandle,
+    scale_factor: f32,
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
     pub(crate) edited: bool,
@@ -80,6 +81,7 @@ impl TestWindow {
         platform: Weak<TestPlatform>,
         display: Rc<dyn PlatformDisplay>,
         renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
+        scale_factor: f32,
     ) -> Self {
         let sprite_atlas: Arc<dyn PlatformAtlas> = match &renderer {
             Some(r) => r.sprite_atlas(),
@@ -87,6 +89,7 @@ impl TestWindow {
         };
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
+            scale_factor,
             display,
             platform,
             handle,
@@ -248,7 +251,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn scale_factor(&self) -> f32 {
-        2.0
+        self.0.lock().scale_factor
     }
 
     fn appearance(&self) -> WindowAppearance {

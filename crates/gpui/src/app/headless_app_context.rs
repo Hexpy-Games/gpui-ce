@@ -46,6 +46,7 @@ pub struct HeadlessAppContext {
     pub foreground_executor: ForegroundExecutor,
     dispatcher: TestDispatcher,
     text_system: Arc<TextSystem>,
+    platform: Rc<TestPlatform>,
 }
 
 impl HeadlessAppContext {
@@ -91,7 +92,7 @@ impl HeadlessAppContext {
         let text_system = Arc::new(TextSystem::new(platform_text_system));
         let http_client = crate::http_client::FakeHttpClient::with_404_response();
         let app = App::new_app(
-            platform,
+            platform.clone(),
             AssetRegistry::from(asset_source).into(),
             http_client,
         );
@@ -103,7 +104,14 @@ impl HeadlessAppContext {
             foreground_executor,
             dispatcher,
             text_system,
+            platform,
         }
+    }
+
+    /// Sets the scale factor of windows opened from now on (2 by default), e.g. 1 to render as
+    /// on a 100% display.
+    pub fn set_window_scale_factor(&mut self, scale_factor: f32) {
+        self.platform.window_scale_factor.set(scale_factor);
     }
 
     /// Opens a window for headless rendering.
