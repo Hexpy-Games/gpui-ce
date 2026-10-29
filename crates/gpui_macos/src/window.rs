@@ -38,9 +38,9 @@ use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
     NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
-    NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -816,7 +816,8 @@ struct MacWindowState {
     background_executor: BackgroundExecutor,
     native_window: ObjcId,
     native_view: NonNull<Objc2Object>,
-    blurred_view: Option<ObjcId>,
+    /// The material view under the content and the appearance it draws.
+    blurred_view: Option<(ObjcId, WindowBackgroundAppearance)>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
@@ -1898,30 +1899,21 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            // Acrylic is a blur material: macOS draws it with its vibrancy blur.
-            let blurred = matches!(
+            let material = matches!(
                 background_appearance,
                 WindowBackgroundAppearance::Blurred | WindowBackgroundAppearance::Acrylic
-            );
-            if !blurred {
-                if let Some(blur_view) = this.blurred_view {
-                    let _: () = msg_send![blur_view, removeFromSuperview];
-                    this.blurred_view = None;
+            )
+            .then_some(background_appearance);
+            let current = this.blurred_view.map(|(_, appearance)| appearance);
+            if current != material {
+                if let Some((view, _)) = this.blurred_view.take() {
+                    let _: () = msg_send![view, removeFromSuperview];
                 }
-            } else if this.blurred_view.is_none() {
-                let content_view = this.native_window.contentView();
-                let frame: Objc2NSRect = msg_send![content_view, bounds];
-                let mut blur_view: ObjcId = msg_send![&*BLURRED_VIEW_CLASS, alloc];
-                blur_view = msg_send![blur_view, initWithFrame: frame];
-                blur_view.setAutoresizingMask_(VIEW_WIDTH_SIZABLE | VIEW_HEIGHT_SIZABLE);
-
-                let _: () = msg_send![
-                    content_view,
-                    addSubview: blur_view,
-                    positioned: NSWindowOrderingMode::Below,
-                    relativeTo: NIL
-                ];
-                this.blurred_view = Some(blur_view.autorelease());
+                if let Some(material) = material {
+                    let content_view = this.native_window.contentView();
+                    let view = new_material_view(content_view, material);
+                    this.blurred_view = Some((view, material));
+                }
             }
         }
     }
@@ -3869,6 +3861,36 @@ fn display_id_for_screen(screen: ObjcId) -> Option<CGDirectDisplayID> {
             .cast::<NSScreen>()
             .as_ref()
             .and_then(crate::display::screen_id)
+    }
+}
+
+/// A view under `content_view`'s subviews that draws the window's material:
+/// - `Blurred`: [`BLURRED_VIEW_CLASS`], the selection material without its tint;
+/// - `Acrylic`: a tinted, heavily blurred material like Windows' Acrylic, drawn as
+///   the native sidebar vibrancy with its own tint (as in Finder's sidebar). The
+///   selection material draws no blur behind the window on macOS 27.
+unsafe fn new_material_view(content_view: ObjcId, material: WindowBackgroundAppearance) -> ObjcId {
+    unsafe {
+        let frame: Objc2NSRect = msg_send![content_view, bounds];
+        let view: ObjcId = if material == WindowBackgroundAppearance::Acrylic {
+            let view: ObjcId = msg_send![class!(NSVisualEffectView), alloc];
+            let view: ObjcId = msg_send![view, initWithFrame: frame];
+            let _: () = msg_send![view, setMaterial: NSVisualEffectMaterial::Sidebar];
+            let _: () = msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
+            let _: () = msg_send![view, setState: NSVisualEffectState::Active];
+            view
+        } else {
+            let view: ObjcId = msg_send![&*BLURRED_VIEW_CLASS, alloc];
+            msg_send![view, initWithFrame: frame]
+        };
+        view.setAutoresizingMask_(VIEW_WIDTH_SIZABLE | VIEW_HEIGHT_SIZABLE);
+        let _: () = msg_send![
+            content_view,
+            addSubview: view,
+            positioned: NSWindowOrderingMode::Below,
+            relativeTo: NIL
+        ];
+        view.autorelease()
     }
 }
 

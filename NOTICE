@@ -29,8 +29,8 @@ changed file starts with a notice line.
   util and display).
 - Native window buttons: whether the platform draws the window's own
   minimize, zoom and close buttons (gpui platform.rs and window.rs;
-  gpui_macos window.rs), and Acrylic drawn as the macOS vibrancy blur
-  (gpui_macos window.rs).
+  gpui_macos window.rs), and Acrylic drawn as the macOS sidebar
+  vibrancy (gpui_macos window.rs).
 - Headless tests: a configurable window scale factor (gpui test
   platform and window, HeadlessAppContext).
 
