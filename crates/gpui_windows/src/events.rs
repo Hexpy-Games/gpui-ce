@@ -29,6 +29,7 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_APPEARANCE_CHANGED: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -162,6 +163,7 @@ impl WindowsWindowInner {
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_APPEARANCE_CHANGED => self.handle_appearance_changed(handle),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
             _ => None,
@@ -1238,19 +1240,25 @@ impl WindowsWindowInner {
         {
             log::info!("System settings changed: {}", parameter_string);
             if parameter_string.as_str() == "ImmersiveColorSet" {
-                let new_appearance = system_appearance()
-                    .context("unable to get system appearance when handling ImmersiveColorSet")
-                    .log_err()?;
-
-                if new_appearance != self.state.appearance.get() {
-                    self.state.appearance.set(new_appearance);
-                    let mut callback = self.state.callbacks.appearance_changed.take()?;
-
-                    callback();
-                    self.state.callbacks.appearance_changed.set(Some(callback));
-                    configure_dwm_dark_mode(handle, new_appearance);
-                }
+                self.handle_appearance_changed(handle)?;
             }
+        }
+        Some(0)
+    }
+
+    /// Applies the appearance windows use now: the app's override, else the system's.
+    fn handle_appearance_changed(&self, handle: HWND) -> Option<isize> {
+        let new_appearance = effective_appearance()
+            .context("unable to get the window appearance")
+            .log_err()?;
+
+        if new_appearance != self.state.appearance.get() {
+            self.state.appearance.set(new_appearance);
+            configure_dwm_dark_mode(handle, new_appearance);
+            let mut callback = self.state.callbacks.appearance_changed.take()?;
+
+            callback();
+            self.state.callbacks.appearance_changed.set(Some(callback));
         }
         Some(0)
     }

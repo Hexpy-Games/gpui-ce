@@ -198,10 +198,11 @@ pub trait Platform: 'static {
     /// of the OS-wide setting. Pass `None` to clear the override and follow the system
     /// again. The override is reflected by [`Platform::window_appearance`].
     ///
-    /// Currently only implemented on macOS, where it sets `NSApplication.appearance` so
-    /// the native window chrome (the window border and titlebar) of every window matches
-    /// a dark app theme even when the system is in light mode (or vice versa). A no-op on
-    /// other platforms.
+    /// Implemented on macOS, where it sets `NSApplication.appearance` so the native window
+    /// chrome (the window border and titlebar) of every window matches a dark app theme even
+    /// when the system is in light mode (or vice versa), and on Windows, where it sets each
+    /// window's immersive dark mode, which the title bar and the system backdrop materials
+    /// follow. A no-op on other platforms.
     fn set_window_appearance(&self, _appearance: Option<WindowAppearance>) {}
 
     /// Returns the window button layout configuration when supported.
@@ -396,6 +397,11 @@ pub trait PlatformDisplay: Debug {
 
     /// Get the bounds for this display
     fn bounds(&self) -> Bounds<Pixels>;
+
+    /// The display's current refresh rate in whole hertz, when the platform reports it.
+    fn refresh_rate(&self) -> Option<u32> {
+        None
+    }
 
     /// Get the visible bounds for this display, excluding taskbar/dock areas.
     /// This is the usable area where windows can be placed without being obscured.
@@ -930,6 +936,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// changing window visibility at runtime.
     fn set_visible(&self, _visible: bool) {}
     fn minimize(&self);
+    /// Whether the window is minimized (iconic). Platforms that cannot tell report `false`.
+    fn is_minimized(&self) -> bool {
+        false
+    }
     fn zoom(&self);
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
@@ -2993,6 +3003,10 @@ pub enum WindowBackgroundAppearance {
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.
     MicaAltBackdrop,
+    /// The Acrylic backdrop material (the one Windows uses for transient windows such as
+    /// menus), supported on Windows 11 22H2 and later. Older Windows versions get
+    /// [`Self::Blurred`] instead, and the window reports that.
+    Acrylic,
 }
 
 impl WindowBackgroundAppearance {
@@ -3023,6 +3037,7 @@ mod window_background_appearance_tests {
             WindowBackgroundAppearance::Blurred,
             WindowBackgroundAppearance::MicaBackdrop,
             WindowBackgroundAppearance::MicaAltBackdrop,
+            WindowBackgroundAppearance::Acrylic,
         ] {
             assert!(appearance.is_transparent());
             assert!(!appearance.is_opaque());
@@ -3063,6 +3078,9 @@ pub enum WindowsWindowBackground {
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.
     MicaAltBackdrop,
+    /// The Acrylic backdrop material, supported on Windows 11 22H2 and later; older versions
+    /// get [`WindowsWindowBackground::Blurred`] instead.
+    Acrylic,
 }
 
 /// The background appearance of a Linux window, set through
@@ -3113,6 +3131,7 @@ impl From<WindowsWindowBackground> for WindowBackgroundAppearance {
             WindowsWindowBackground::Blurred => Self::Blurred,
             WindowsWindowBackground::MicaBackdrop => Self::MicaBackdrop,
             WindowsWindowBackground::MicaAltBackdrop => Self::MicaAltBackdrop,
+            WindowsWindowBackground::Acrylic => Self::Acrylic,
         }
     }
 }
@@ -3162,6 +3181,10 @@ mod platform_window_background_tests {
         assert_eq!(
             WindowBackgroundAppearance::from(WindowsWindowBackground::MicaAltBackdrop),
             WindowBackgroundAppearance::MicaAltBackdrop
+        );
+        assert_eq!(
+            WindowBackgroundAppearance::from(WindowsWindowBackground::Acrylic),
+            WindowBackgroundAppearance::Acrylic
         );
         assert_eq!(
             WindowBackgroundAppearance::from(WindowsWindowBackground::default()),

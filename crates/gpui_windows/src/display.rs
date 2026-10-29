@@ -27,6 +27,7 @@ pub(crate) struct WindowsDisplay {
     visible_bounds: Bounds<Pixels>,
     physical_bounds: Bounds<DevicePixels>,
     uuid: Uuid,
+    refresh_rate: Option<u32>,
 }
 
 // The `HMONITOR` is thread-safe.
@@ -40,6 +41,7 @@ impl WindowsDisplay {
         let monitor_size = info.monitorInfo.rcMonitor;
         let work_area = info.monitorInfo.rcWork;
         let uuid = generate_uuid(&info.szDevice);
+        let refresh_rate = current_refresh_rate(&info.szDevice);
         let scale_factor = get_scale_factor_for_monitor(handle).log_err()?;
         let physical_size = size(
             (monitor_size.right - monitor_size.left).into(),
@@ -71,6 +73,7 @@ impl WindowsDisplay {
                 size: physical_size,
             },
             uuid,
+            refresh_rate,
         })
     }
 
@@ -149,6 +152,22 @@ impl PlatformDisplay for WindowsDisplay {
     fn visible_bounds(&self) -> Bounds<Pixels> {
         self.visible_bounds
     }
+
+    fn refresh_rate(&self) -> Option<u32> {
+        self.refresh_rate
+    }
+}
+
+/// The current display mode's refresh rate of the monitor device `device` (None when the
+/// driver reports the hardware default, 0 or 1).
+fn current_refresh_rate(device: &[u16; 32]) -> Option<u32> {
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let found =
+        unsafe { EnumDisplaySettingsW(PCWSTR(device.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode) };
+    (found.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
 }
 
 fn available_monitors() -> SmallVec<[HMONITOR; 4]> {

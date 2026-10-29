@@ -500,7 +500,7 @@ impl WindowsWindow {
         }
         .or_else(WindowsDisplay::primary_monitor)
         .context("failed to find any monitor")?;
-        let appearance = system_appearance().unwrap_or_default();
+        let appearance = effective_appearance().unwrap_or_default();
         let mut context = WindowCreateContext {
             inner: None,
             handle,
@@ -944,6 +944,15 @@ impl PlatformWindow for WindowsWindow {
                 // DWMSBT_TABBEDWINDOW => MicaAlt
                 dwm_set_window_composition_attribute(hwnd, 4);
             }
+            WindowBackgroundAppearance::Acrylic => {
+                // DWMSBT_TRANSIENTWINDOW => Acrylic; blur behind where DWM lacks it.
+                if !dwm_set_window_composition_attribute(hwnd, 3) {
+                    set_window_composition_attribute(hwnd, Some((0, 0, 0, 0)), 4);
+                    self.state
+                        .background_appearance
+                        .set(WindowBackgroundAppearance::Blurred);
+                }
+            }
         }
     }
 
@@ -974,6 +983,10 @@ impl PlatformWindow for WindowsWindow {
 
     fn minimize(&self) {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
+    }
+
+    fn is_minimized(&self) -> bool {
+        unsafe { IsIconic(self.0.hwnd) }.as_bool()
     }
 
     fn zoom(&self) {
@@ -1659,27 +1672,25 @@ fn retrieve_window_placement(
     Ok(placement)
 }
 
-fn dwm_set_window_composition_attribute(hwnd: HWND, backdrop_type: u32) {
+/// Sets the DWM system backdrop; false where DWM does not support it.
+fn dwm_set_window_composition_attribute(hwnd: HWND, backdrop_type: u32) -> bool {
     let mut version = unsafe { std::mem::zeroed() };
     let status = unsafe { windows::Wdk::System::SystemServices::RtlGetVersion(&mut version) };
 
     // DWMWA_SYSTEMBACKDROP_TYPE is available only on version 22621 or later
     // using SetWindowCompositionAttributeType as a fallback
     if !status.is_ok() || version.dwBuildNumber < 22621 {
-        return;
+        return false;
     }
 
     unsafe {
-        let result = DwmSetWindowAttribute(
+        DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE,
             &backdrop_type as *const _ as *const _,
             std::mem::size_of_val(&backdrop_type) as u32,
-        );
-
-        if !result.is_ok() {
-            return;
-        }
+        )
+        .is_ok()
     }
 }
 

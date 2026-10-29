@@ -153,6 +153,27 @@ pub(crate) fn logical_point(x: f32, y: f32, scale_factor: f32) -> Point<Pixels> 
     }
 }
 
+/// The app's light/dark override (`Platform::set_window_appearance`); `None` follows the system.
+static APPEARANCE_OVERRIDE: std::sync::Mutex<Option<WindowAppearance>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn set_appearance_override(appearance: Option<WindowAppearance>) {
+    *APPEARANCE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = appearance;
+}
+
+/// The appearance windows use: the app's override, else the system's.
+pub(crate) fn effective_appearance() -> Result<WindowAppearance> {
+    let appearance = *APPEARANCE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match appearance {
+        Some(appearance) => Ok(appearance),
+        None => system_appearance(),
+    }
+}
+
 // https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/apply-windows-themes
 #[inline]
 pub(crate) fn system_appearance() -> Result<WindowAppearance> {

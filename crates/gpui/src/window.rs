@@ -2459,6 +2459,11 @@ impl Window {
         self.platform_window.is_maximized()
     }
 
+    /// Check if the platform window is minimized. Platforms that cannot tell report `false`.
+    pub fn is_minimized(&self) -> bool {
+        self.platform_window.is_minimized()
+    }
+
     /// request a certain window decoration (Wayland)
     pub fn request_decorations(&self, decorations: WindowDecorations) {
         self.platform_window.request_decorations(decorations);
@@ -2939,6 +2944,12 @@ impl Window {
     pub fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.platform_window
             .set_background_appearance(background_appearance);
+    }
+
+    /// The window background appearance in effect, which can differ from the one requested
+    /// when the platform substitutes an unsupported material.
+    pub fn background_appearance(&self) -> WindowBackgroundAppearance {
+        self.platform_window.background_appearance()
     }
 
     /// Mark the window as dirty at the platform level.
