@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use super::{
     WgpuRenderer, begin_color_render_pass,
     buffers::{InstanceTransport, InstanceUpload},

@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, BackdropLens, Background,

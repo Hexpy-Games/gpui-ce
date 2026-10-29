@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 // todo("windows"): remove
 #![cfg_attr(windows, allow(dead_code))]
 

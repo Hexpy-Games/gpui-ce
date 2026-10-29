@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use smallvec::SmallVec;

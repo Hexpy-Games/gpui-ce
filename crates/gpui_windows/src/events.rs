@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use anyhow::Context as _;

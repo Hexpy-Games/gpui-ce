@@ -1,0 +1,41 @@
+gpui-ce, Butler fork
+Copyright 2026 HexpyGames (헥스피게임즈)
+
+This repository is a fork of gpui-ce (https://github.com/gpui-ce/gpui-ce),
+which derives from GPUI by Zed Industries. gpui-ce and this fork are
+licensed under the Apache License, Version 2.0 (LICENSE.md and the
+LICENSE-APACHE files of the crates). The fork's base is gpui-ce commit
+94791b8882f88c126b3089759cb7829a9c1de1a2; its changes are on the
+butler/lens branch, under the same license.
+
+Changes made by HexpyGames (Apache License 2.0, section 4(b)). Every
+changed file starts with a notice line.
+
+- Backdrop lens: liquid-glass refraction through a continuous distance
+  field, dispersion, frost, rim light, tone curve, full-shape detail
+  pass and hairline ring, with per-lens backdrop snapshots (gpui scene,
+  plan and window; gpui_render blur, build and shaders; gpui_wgpu
+  renderer; gpui_windows DirectX renderer).
+- Procedural wallpaper passes, run only when a wallpaper's generation
+  changes (gpui scene and window; gpui_render shaders; gpui_wgpu and
+  gpui_windows wallpapers.rs, added).
+- Drop shadows clipped to outside their element (gpui scene and window;
+  gpui_render shadows shader).
+- DirectWrite: grayscale and colour glyphs rasterized unhinted with
+  symmetric anti-aliasing (gpui_windows direct_write.rs).
+- Windows window: the Acrylic backdrop, the minimized state, the
+  display refresh rate and the app's light/dark override (gpui
+  platform.rs and window.rs; gpui_windows window, platform, events,
+  util and display).
+- Headless tests: a configurable window scale factor (gpui test
+  platform and window, HeadlessAppContext).
+
+The lens model was written with reference to these MIT-licensed
+projects; no code was copied from them:
+- LiquidGlass by ybouane, https://github.com/ybouane/liquidglass
+- liquidGL by NaughtyDuk, https://github.com/naughtyduk/liquidGL
+- Liquid Glass Studio by iyinchao,
+  https://github.com/iyinchao/liquid-glass-studio
+
+Third-party notices that came with gpui-ce remain in place, for example
+crates/gpui_render/THIRD_PARTY_NOTICES.md.

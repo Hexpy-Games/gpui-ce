@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! Renders one of every primitive kind through the headless WGPU renderer and checks
 //! that each one actually lands on the target. This is the cross-platform smoke test for
 //! the shared render plan, instance transport, and generated shaders.

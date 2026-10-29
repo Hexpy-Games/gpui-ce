@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{

@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! Cross-platform headless app context for tests that need real text shaping.
 //!
 //! This replaces the macOS-only `HeadlessMetalAppContext` with a platform-neutral

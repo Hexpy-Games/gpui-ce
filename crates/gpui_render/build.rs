@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! Build-time shader pipeline.
 //!
 //! Compiles the Rust-authored shaders in `src/shaders` into one artifact per dialect

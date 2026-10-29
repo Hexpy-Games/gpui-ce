@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use gpui::{Bounds, Corners, ScaledPixels};
 use gpui_render::shaders::interface as shader_interface;
 use gpui_render::{

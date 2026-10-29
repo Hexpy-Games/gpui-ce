@@ -1,3 +1,4 @@
+// Added by HexpyGames for Butler (2026), under the Apache License 2.0; see NOTICE.
 //! Procedural wallpapers ([`gpui::WallpaperPaint`]): each pass runs the `wallpaper` pipeline into
 //! a cached texture of its own size (the passes re-run only when the paint's generation changes),
 //! and the last texture is composited into the rounded bounds with the blur-composite pipeline.

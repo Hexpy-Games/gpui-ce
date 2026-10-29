@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
     DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,

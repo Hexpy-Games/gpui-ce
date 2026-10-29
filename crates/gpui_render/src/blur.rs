@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 pub use crate::shaders::{
     blur::BlurUniforms,
     common::{

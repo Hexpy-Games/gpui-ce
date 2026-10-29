@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use super::{AtlasTextureId, BatchIterator, FilterBoundary, Scene};
 use smallvec::SmallVec;
 use std::ops::Range;

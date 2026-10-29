@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 mod app_menu;
 mod keyboard;
 mod keystroke;

@@ -1,3 +1,4 @@
+// Added by HexpyGames for Butler (2026), under the Apache License 2.0; see NOTICE.
 //! DirectX side of procedural wallpapers ([`gpui::WallpaperPaint`]), mirroring the wgpu path:
 //! each pass runs the `wallpaper` shader into a cached color target of its own size (only when
 //! the paint's generation changes), and the last target is composited into the rounded bounds.

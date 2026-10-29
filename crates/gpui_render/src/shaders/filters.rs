@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 #[wgsl_rs::wgsl]
 pub mod surface {
     use super::super::common::*;

@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 /// Shader-declared data that can be uploaded without serialization.
 ///
 /// # Safety
