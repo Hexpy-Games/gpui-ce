@@ -295,9 +295,21 @@ impl DirectWriteGlyphRenderer {
                 &mut grid_fit_mode,
             )?;
         }
+        // Grayscale and colour glyphs are rasterized unhinted with symmetric anti-aliasing in
+        // both axes. The mode DirectWrite recommends at 96 dpi is hinted (stems and horizontals
+        // snapped to whole pixels, horizontal anti-aliasing only), which reads as aliased over
+        // translucent backgrounds, where grayscale is chosen because subpixel masks need an
+        // opaque one. Subpixel (ClearType) text keeps the recommended mode.
+        let grayscale = params.raster_style.mode != GlyphRenderMode::Subpixel;
         let rendering_mode = match rendering_mode {
+            _ if grayscale => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
             DWRITE_RENDERING_MODE1_OUTLINE => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
             m => m,
+        };
+        let grid_fit_mode = if grayscale {
+            DWRITE_GRID_FIT_MODE_DISABLED
+        } else {
+            grid_fit_mode
         };
 
         let antialias_mode = if params.raster_style.mode == GlyphRenderMode::Subpixel {
