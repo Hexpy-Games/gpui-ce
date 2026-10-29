@@ -2924,6 +2924,12 @@ impl Window {
         self.platform_window.window_controls()
     }
 
+    /// Whether the platform draws this window's minimize, zoom and close buttons itself (the
+    /// macOS traffic lights), so the app should not draw its own.
+    pub fn has_native_window_buttons(&self) -> bool {
+        self.platform_window.has_native_window_buttons()
+    }
+
     /// Updates the window's title at the platform level.
     pub fn set_window_title(&mut self, title: &str) {
         self.platform_window.set_title(title);

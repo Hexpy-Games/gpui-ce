@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     MacDisplay, TISCopyCurrentKeyboardInputSource, TISGetInputSourceProperty, WindowFrameSource,
     events::platform_input_from_native, kTISPropertyInputSourceIsASCIICapable,
@@ -1897,7 +1898,12 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if background_appearance != WindowBackgroundAppearance::Blurred {
+            // Acrylic is a blur material: macOS draws it with its vibrancy blur.
+            let blurred = matches!(
+                background_appearance,
+                WindowBackgroundAppearance::Blurred | WindowBackgroundAppearance::Acrylic
+            );
+            if !blurred {
                 if let Some(blur_view) = this.blurred_view {
                     let _: () = msg_send![blur_view, removeFromSuperview];
                     this.blurred_view = None;
@@ -2052,6 +2058,14 @@ impl PlatformWindow for MacWindow {
         let window = this.native_window;
 
         unsafe { window.styleMask().contains(NSWindowStyleMask::FullScreen) }
+    }
+
+    fn has_native_window_buttons(&self) -> bool {
+        let this = self.0.lock();
+        let window = this.native_window;
+
+        // A titled window keeps its traffic lights, transparent titlebar or not.
+        unsafe { window.styleMask().contains(NSWindowStyleMask::Titled) }
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

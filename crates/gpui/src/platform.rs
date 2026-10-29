@@ -1030,6 +1030,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn window_controls(&self) -> WindowControls {
         WindowControls::default()
     }
+    /// Whether the platform draws the window's own minimize, zoom and close buttons (the
+    /// macOS traffic lights), even with a transparent titlebar, so the app should not draw
+    /// its own. Platforms where the app draws them report `false`.
+    fn has_native_window_buttons(&self) -> bool {
+        false
+    }
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
@@ -3006,7 +3012,8 @@ pub enum WindowBackgroundAppearance {
     MicaAltBackdrop,
     /// The Acrylic backdrop material (the one Windows uses for transient windows such as
     /// menus), supported on Windows 11 22H2 and later. Older Windows versions get
-    /// [`Self::Blurred`] instead, and the window reports that.
+    /// [`Self::Blurred`] instead, and the window reports that; macOS draws it with its
+    /// vibrancy blur.
     Acrylic,
 }
 
