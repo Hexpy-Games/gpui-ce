@@ -157,6 +157,7 @@ impl WindowsWindowInner {
             WM_CHAR => self.handle_char_msg(wparam),
             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
+            WM_IME_REQUEST => self.handle_ime_request(handle, wparam, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
@@ -653,27 +654,27 @@ impl WindowsWindowInner {
         if handled { Some(0) } else { Some(1) }
     }
 
-    fn retrieve_caret_position(&self) -> Option<POINT> {
+    fn retrieve_ime_rect(&self) -> Option<RECT> {
         self.with_input_handler_and_scale_factor(|input_handler, scale_factor| {
-            let caret_range = input_handler.selected_text_range(false)?;
-            let caret_position = input_handler.bounds_for_range(caret_range.range)?;
-            Some(POINT {
+            let bounds = input_handler.ime_candidate_bounds()?;
+            Some(RECT {
                 // logical to physical
-                x: (caret_position.origin.x.as_f32() * scale_factor) as i32,
-                y: (caret_position.origin.y.as_f32() * scale_factor) as i32
-                    + ((caret_position.size.height.as_f32() * scale_factor) as i32 / 2),
+                left: (bounds.origin.x.as_f32() * scale_factor) as i32,
+                top: (bounds.origin.y.as_f32() * scale_factor) as i32,
+                right: ((bounds.origin.x + bounds.size.width).as_f32() * scale_factor) as i32,
+                bottom: ((bounds.origin.y + bounds.size.height).as_f32() * scale_factor) as i32,
             })
         })
     }
 
     fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
-        if let Some(caret_position) = self.retrieve_caret_position() {
-            self.update_ime_position(handle, caret_position);
+        if let Some(rect) = self.retrieve_ime_rect() {
+            self.update_ime_position(handle, rect);
         }
         Some(0)
     }
 
-    pub(crate) fn update_ime_position(&self, handle: HWND, caret_position: POINT) {
+    pub(crate) fn update_ime_position(&self, handle: HWND, rect: RECT) {
         let Some(ctx) = ImeContext::get(handle) else {
             return;
         };
@@ -682,7 +683,10 @@ impl WindowsWindowInner {
                 *ctx,
                 &COMPOSITIONFORM {
                     dwStyle: CFS_POINT,
-                    ptCurrentPos: caret_position,
+                    ptCurrentPos: POINT {
+                        x: rect.left,
+                        y: rect.top + (rect.bottom - rect.top) / 2,
+                    },
                     ..Default::default()
                 },
             )
@@ -692,14 +696,58 @@ impl WindowsWindowInner {
             ImmSetCandidateWindow(
                 *ctx,
                 &CANDIDATEFORM {
-                    dwStyle: CFS_CANDIDATEPOS,
-                    ptCurrentPos: caret_position,
-                    ..Default::default()
+                    dwIndex: 0,
+                    dwStyle: CFS_EXCLUDE,
+                    ptCurrentPos: POINT {
+                        x: rect.left,
+                        y: rect.bottom,
+                    },
+                    rcArea: rect,
                 },
             )
             .ok()
             .log_err();
         }
+    }
+
+    fn handle_ime_request(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        if wparam.0 as u32 != IMR_QUERYCHARPOSITION {
+            return None;
+        }
+        // SAFETY: for IMR_QUERYCHARPOSITION, lparam points to an IMECHARPOSITION that the IME
+        // owns for the duration of this message.
+        let position = unsafe { &mut *(lparam.0 as *mut IMECHARPOSITION) };
+        let (bounds, scale) = self.with_input_handler_and_scale_factor(|input, scale| {
+            let start = input.marked_text_range().map(|range| range.start);
+            let start =
+                start.or_else(|| input.selected_text_range(false).map(|s| s.range.start))?;
+            let offset = start + position.dwCharPos as usize;
+            Some((input.bounds_for_range(offset..offset)?, scale))
+        })?;
+        let to_screen = |x: f32, y: f32| {
+            let mut point = POINT {
+                x: x as i32,
+                y: y as i32,
+            };
+            unsafe { ClientToScreen(handle, &mut point).ok().log_err() };
+            point
+        };
+        position.pt = to_screen(
+            bounds.origin.x.as_f32() * scale,
+            bounds.origin.y.as_f32() * scale,
+        );
+        position.cLineHeight = (bounds.size.height.as_f32() * scale) as u32;
+        let mut client = RECT::default();
+        unsafe { GetClientRect(handle, &mut client).log_err() };
+        let top_left = to_screen(client.left as f32, client.top as f32);
+        let bottom_right = to_screen(client.right as f32, client.bottom as f32);
+        position.rcDocument = RECT {
+            left: top_left.x,
+            top: top_left.y,
+            right: bottom_right.x,
+            bottom: bottom_right.y,
+        };
+        Some(1)
     }
 
     fn update_ime_enabled(&self, handle: HWND) {
@@ -716,15 +764,7 @@ impl WindowsWindowInner {
                     .ok()
                     .log_err();
             } else {
-                // The IME context is per-thread, so without this check a change in this
-                // window's text input state could commit an IME composition happening in another window.
-                if GetFocus() == handle
-                    && let Some(ctx) = ImeContext::get(handle)
-                {
-                    ImmNotifyIME(*ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
-                        .ok()
-                        .log_err();
-                }
+                self.end_ime_composition(handle);
                 ImmAssociateContextEx(handle, HIMC::default(), 0)
                     .ok()
                     .log_err();
@@ -732,7 +772,30 @@ impl WindowsWindowInner {
         }
     }
 
+    /// Ends the IME composition in progress. The element that owned it keeps its composed text,
+    /// so the IME's reply is not delivered to any input handler.
+    pub(crate) fn end_ime_composition(&self, handle: HWND) {
+        // The IME context is per-thread, so without this check a change in this
+        // window's text input state could commit an IME composition happening in another window.
+        if unsafe { GetFocus() } != handle {
+            return;
+        }
+        let Some(ctx) = ImeContext::get(handle) else {
+            return;
+        };
+        self.state.ending_ime_composition.set(true);
+        unsafe {
+            ImmNotifyIME(*ctx, NI_COMPOSITIONSTR, CPS_COMPLETE, 0)
+                .ok()
+                .log_err()
+        };
+        self.state.ending_ime_composition.set(false);
+    }
+
     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        if self.state.ending_ime_composition.get() {
+            return Some(0);
+        }
         let ctx = ImeContext::get(handle)?;
         self.handle_ime_composition_inner(*ctx, lparam)
     }

@@ -31,6 +31,13 @@ changed file starts with a notice line.
   minimize, zoom and close buttons (gpui platform.rs and window.rs;
   gpui_macos window.rs), and Acrylic drawn as the macOS sidebar
   vibrancy (gpui_macos window.rs).
+- IME focus changes: gpui reports a move between text inputs
+  (TextInputStateChange::FocusMoved); macOS discards and Windows
+  completes the input method's composition on focus change without
+  delivering it; the Windows candidate window excludes the caret line
+  and answers IMR_QUERYCHARPOSITION (gpui platform.rs, window.rs and
+  input.rs; gpui_web window.rs; gpui_macos window.rs; gpui_windows
+  window.rs and events.rs).
 - Headless tests: a configurable window scale factor (gpui test
   platform and window, HeadlessAppContext).
 - EditableText accessibility and IME: inputs forward their ARIA

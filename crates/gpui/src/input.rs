@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     App, Bounds, ClipboardItem, Context, Entity, InputHandler, Pixels, TextInputConfiguration,
     UTF16Selection, Window,
@@ -329,6 +330,7 @@ mod configuration_tests {
             let custom = custom.clone();
             move |_, cx| ConfigurationTestView {
                 focus_handle: cx.focus_handle(),
+                second_focus_handle: cx.focus_handle(),
                 configuration: custom,
             }
         });
@@ -407,8 +409,63 @@ mod configuration_tests {
         );
     }
 
+    // test-category: pure-logic
+    #[gpui::test]
+    fn focus_moving_between_text_inputs_is_forwarded(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, cx| ConfigurationTestView {
+            focus_handle: cx.focus_handle(),
+            second_focus_handle: cx.focus_handle(),
+            configuration: TextInputConfiguration::default(),
+        });
+        let view = window.root(cx).unwrap();
+        let test_window = cx.test_window(window.into());
+        let window = AnyWindowHandle::from(window);
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+
+        cx.update_window(window, |_, window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+        })
+        .unwrap();
+        draw(cx);
+        assert_eq!(
+            test_window.text_input_state_changes(),
+            vec![TextInputStateChange::FocusGained]
+        );
+
+        cx.update_window(window, |_, window, cx| {
+            let second = view.read(cx).second_focus_handle.clone();
+            window.focus(&second, cx);
+        })
+        .unwrap();
+        draw(cx);
+        assert_eq!(
+            test_window.text_input_state_changes(),
+            vec![
+                TextInputStateChange::FocusGained,
+                TextInputStateChange::FocusMoved
+            ]
+        );
+
+        cx.update_window(window, |_, window, cx| window.blur(cx))
+            .unwrap();
+        draw(cx);
+        assert_eq!(
+            test_window.text_input_state_changes(),
+            vec![
+                TextInputStateChange::FocusGained,
+                TextInputStateChange::FocusMoved,
+                TextInputStateChange::FocusLost
+            ]
+        );
+    }
+
     struct ConfigurationTestView {
         focus_handle: FocusHandle,
+        second_focus_handle: FocusHandle,
         configuration: TextInputConfiguration,
     }
 
@@ -416,19 +473,39 @@ mod configuration_tests {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let view = cx.entity();
             let focus_handle = self.focus_handle.clone();
-            div().size_full().track_focus(&self.focus_handle).child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        window.handle_input(
-                            &focus_handle,
-                            ElementInputHandler::new(bounds, view),
-                            cx,
-                        );
-                    },
+            let second = self.second_focus_handle.clone();
+            let second_view = view.clone();
+            div()
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            window.handle_input(
+                                &focus_handle,
+                                ElementInputHandler::new(bounds, view),
+                                cx,
+                            );
+                        },
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            )
+                .child(
+                    div().track_focus(&self.second_focus_handle).child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                window.handle_input(
+                                    &second,
+                                    ElementInputHandler::new(bounds, second_view),
+                                    cx,
+                                );
+                            },
+                        )
+                        .size_full(),
+                    ),
+                )
         }
     }
 
