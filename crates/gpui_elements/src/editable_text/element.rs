@@ -916,7 +916,8 @@ impl PrepaintElements {
             }),
         );
 
-        if prepaint.caret_visible {
+        // Native fields hide the caret while text is selected.
+        if prepaint.caret_visible && range.is_empty() {
             let caret_point = document_origin
                 + document
                     .visual_position_for_caret(state.visible_caret(), line_height)
