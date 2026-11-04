@@ -916,7 +916,8 @@ impl PrepaintElements {
             }),
         );
 
-        if prepaint.caret_visible {
+        // Native fields hide the caret while text is selected.
+        if prepaint.caret_visible && range.is_empty() {
             let caret_point = document_origin
                 + document
                     .visual_position_for_caret(state.visible_caret(), line_height)
@@ -1469,13 +1470,11 @@ mod tests {
             let caret_visual_position = document
                 .visual_position_for_caret(caret, line_height)
                 .unwrap();
-            self.assert_quads(
-                CARET_COLOR,
-                vec![Bounds::new(
-                    origin + caret_visual_position,
-                    size(px(2.), line_height),
-                )],
-            );
+            // Like native fields, the caret is painted only while nothing is selected.
+            let painted_caret = range
+                .is_empty()
+                .then(|| Bounds::new(origin + caret_visual_position, size(px(2.), line_height)));
+            self.assert_quads(CARET_COLOR, painted_caret.into_iter().collect());
 
             let field = self.field_extent();
             let expected = selection_rects(&document, range, selection, line_height, field)
