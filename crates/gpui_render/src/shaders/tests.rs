@@ -1,4 +1,17 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use super::*;
+
+/// Runs `f` on the 64 MiB stack the build script uses: generating or parsing the modules
+/// that include `blur` recurses deeper than a test thread's default stack in an
+/// unoptimized build.
+pub(super) fn on_build_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn on the build stack")
+        .join()
+        .expect("panicked on the build stack")
+}
 
 #[test]
 fn validates_subpixel_shader() {
@@ -8,51 +21,55 @@ fn validates_subpixel_shader() {
 
 #[test]
 fn build_generated_shaders_match_rust_sources() {
-    assert_eq!(
-        base::WGSL_SOURCE.wgsl_source().unwrap(),
-        crate::artifacts::BASE_WGSL
-    );
-    let subpixel = subpixel_sprite::WGSL_SOURCE.wgsl_source().unwrap();
-    assert_eq!(
-        format!("enable dual_source_blending;\n{subpixel}"),
-        crate::artifacts::SUBPIXEL_DUAL_SOURCE_WGSL
-    );
+    on_build_stack(|| {
+        assert_eq!(
+            base::WGSL_SOURCE.wgsl_source().unwrap(),
+            crate::artifacts::BASE_WGSL
+        );
+        let subpixel = subpixel_sprite::WGSL_SOURCE.wgsl_source().unwrap();
+        assert_eq!(
+            format!("enable dual_source_blending;\n{subpixel}"),
+            crate::artifacts::SUBPIXEL_DUAL_SOURCE_WGSL
+        );
+    });
 }
 
 #[test]
 fn shader_interface_matches_generated_sources() {
-    let standard_source = base::WGSL_SOURCE.wgsl_source().unwrap();
-    let subpixel_source = subpixel_sprite::WGSL_SOURCE.wgsl_source().unwrap();
-    for pipeline in interface::ALL {
-        let source = if pipeline.label == interface::SUBPIXEL_SPRITES.label {
-            &subpixel_source
-        } else {
-            &standard_source
-        };
-        assert!(
-            source.contains(&format!("fn {}(", pipeline.vertex_entry)),
-            "missing vertex entry point {}",
-            pipeline.vertex_entry,
-        );
-        assert!(
-            source.contains(&format!("fn {}(", pipeline.fragment_entry)),
-            "missing fragment entry point {}",
-            pipeline.fragment_entry,
-        );
-    }
+    on_build_stack(|| {
+        let standard_source = base::WGSL_SOURCE.wgsl_source().unwrap();
+        let subpixel_source = subpixel_sprite::WGSL_SOURCE.wgsl_source().unwrap();
+        for pipeline in interface::ALL {
+            let source = if pipeline.label == interface::SUBPIXEL_SPRITES.label {
+                &subpixel_source
+            } else {
+                &standard_source
+            };
+            assert!(
+                source.contains(&format!("fn {}(", pipeline.vertex_entry)),
+                "missing vertex entry point {}",
+                pipeline.vertex_entry,
+            );
+            assert!(
+                source.contains(&format!("fn {}(", pipeline.fragment_entry)),
+                "missing fragment entry point {}",
+                pipeline.fragment_entry,
+            );
+        }
 
-    assert_eq!(common::GLOBALS.group, interface::GLOBAL_BIND_GROUP);
-    assert_eq!(common::GLOBALS.binding, interface::GLOBAL_UNIFORMS_BINDING);
-    assert_eq!(
-        common::FONT_RASTERIZATION.group,
-        interface::GLOBAL_BIND_GROUP
-    );
-    assert_eq!(
-        common::FONT_RASTERIZATION.binding,
-        interface::FONT_RASTERIZATION_BINDING
-    );
-    assert_eq!(quad::QUADS.group(), interface::DATA_BIND_GROUP);
-    assert_eq!(quad::QUADS.binding(), interface::DATA_BUFFER_BINDING);
+        assert_eq!(common::GLOBALS.group, interface::GLOBAL_BIND_GROUP);
+        assert_eq!(common::GLOBALS.binding, interface::GLOBAL_UNIFORMS_BINDING);
+        assert_eq!(
+            common::FONT_RASTERIZATION.group,
+            interface::GLOBAL_BIND_GROUP
+        );
+        assert_eq!(
+            common::FONT_RASTERIZATION.binding,
+            interface::FONT_RASTERIZATION_BINDING
+        );
+        assert_eq!(quad::QUADS.group(), interface::DATA_BIND_GROUP);
+        assert_eq!(quad::QUADS.binding(), interface::DATA_BUFFER_BINDING);
+    });
 }
 
 fn vertex_output_shape(module: &naga::Module, entry_name: &str) -> (usize, u32) {
@@ -85,19 +102,22 @@ fn vertex_output_shape(module: &naga::Module, entry_name: &str) -> (usize, u32) 
 
 #[test]
 fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
-    let module = naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
-    for (entry, maximum_shape) in [
-        ("vertex_quad", (8, 29)),
-        ("vertex_shadow", (5, 17)),
-        ("vertex_polychrome_sprite", (3, 7)),
-        ("vertex_blur_composite", (2, 6)),
-    ] {
-        let actual_shape = vertex_output_shape(&module, entry);
-        assert!(
-            actual_shape.0 <= maximum_shape.0 && actual_shape.1 <= maximum_shape.1,
-            "{entry} uses {actual_shape:?}, exceeding {maximum_shape:?} (locations, components)"
-        );
-    }
+    on_build_stack(|| {
+        let module =
+            naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
+        for (entry, maximum_shape) in [
+            ("vertex_quad", (8, 29)),
+            ("vertex_shadow", (5, 17)),
+            ("vertex_polychrome_sprite", (3, 7)),
+            ("vertex_blur_composite", (2, 6)),
+        ] {
+            let actual_shape = vertex_output_shape(&module, entry);
+            assert!(
+                actual_shape.0 <= maximum_shape.0 && actual_shape.1 <= maximum_shape.1,
+                "{entry} uses {actual_shape:?}, exceeding {maximum_shape:?} (locations, components)"
+            );
+        }
+    });
 }
 
 #[test]

@@ -35,25 +35,25 @@ mod tests;
 
 #[cfg(test)]
 mod large_shader_validation_tests {
-    /// These modules (blur, and `base`, which imports it) recurse deeper in their IR builder
-    /// and Naga's parser than a test thread's default stack allows in an unoptimized build;
-    /// validate them on the same 64 MiB stack the build script uses.
-    fn validate_on_build_stack(source: &'static wgsl_rs::Source) {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(move || source.validate().expect("generated WGSL must validate"))
-            .expect("spawn WGSL validation")
-            .join()
-            .expect("WGSL validation panicked");
-    }
+    use super::tests::on_build_stack;
 
+    // `blur` and `base` (which imports it) skip their generated validation tests, which
+    // would overflow a default test-thread stack; validate them on the build stack instead.
     #[test]
     fn blur_wgsl_validates() {
-        validate_on_build_stack(&super::filters::blur::WGSL_SOURCE);
+        on_build_stack(|| {
+            super::filters::blur::WGSL_SOURCE
+                .validate()
+                .expect("blur WGSL must validate")
+        });
     }
 
     #[test]
     fn base_wgsl_validates() {
-        validate_on_build_stack(&super::linkage::base::WGSL_SOURCE);
+        on_build_stack(|| {
+            super::linkage::base::WGSL_SOURCE
+                .validate()
+                .expect("base WGSL must validate")
+        });
     }
 }
