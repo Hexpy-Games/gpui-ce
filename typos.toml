@@ -13,6 +13,8 @@ extend-exclude = [
   # macOS APIs
   "crates/gpui/src/platform/mac/dispatcher.rs",
 
+  # Shader names kept from their original sources.
+  "crates/gpui_render/src/shaders/filters.rs",
 ]
 
 [default]
