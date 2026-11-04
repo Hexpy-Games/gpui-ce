@@ -1131,6 +1131,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(is_focused, focused, "occluded={occluded}");
+            // A focused input leaves its input handler with the platform window; blur so the
+            // app can drop without a live handle.
+            window
+                .update(&mut cx, |_view, window, cx| window.blur(cx))
+                .unwrap();
+            cx.run_until_parked();
         }
     }
 
