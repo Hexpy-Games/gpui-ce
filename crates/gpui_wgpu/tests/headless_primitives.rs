@@ -154,6 +154,8 @@ fn every_primitive_kind_renders() {
         element_corner_radii: Default::default(),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.0,
+        clip_outside: ShaderBool::Disabled,
+        padding: 0,
     });
     // 4. Underline (white, solid).
     let underline_bounds = bounds(130.0, 20.0, 30.0, 4.0);
@@ -220,6 +222,8 @@ fn every_primitive_kind_renders() {
         element_corner_radii: Default::default(),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.0,
+        clip_outside: ShaderBool::Disabled,
+        padding: 0,
     });
     scene.insert_primitive(Shadow {
         order: 0,
@@ -232,6 +236,8 @@ fn every_primitive_kind_renders() {
         element_corner_radii: Default::default(),
         inset: ShaderBool::Enabled,
         corner_smoothing: 0.0,
+        clip_outside: ShaderBool::Disabled,
+        padding: 0,
     });
     scene.finish();
     let quad_batches: Vec<_> = scene
@@ -397,6 +403,8 @@ fn smoothed_primitives_share_one_contour() {
         element_corner_radii: Corners::all(ScaledPixels(15.0)),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.6,
+        clip_outside: ShaderBool::Disabled,
+        padding: 0,
     });
     scene.insert_primitive(Quad {
         bounds: drop_element,
@@ -427,6 +435,8 @@ fn smoothed_primitives_share_one_contour() {
         element_corner_radii: Corners::all(ScaledPixels(16.0)),
         inset: ShaderBool::Enabled,
         corner_smoothing: 1.0,
+        clip_outside: ShaderBool::Disabled,
+        padding: 0,
     });
 
     let filter_bounds = bounds(190.0, 92.0, 70.0, 52.0);
