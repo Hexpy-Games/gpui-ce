@@ -999,50 +999,23 @@ fn selection_rects(
         return rects;
     }
 
-    rects.retain(|bounds| !(start_row + 1..end_row).contains(&row_at(bounds.origin.y)));
     let rtl = document
         .visual_lines()
         .get(start_row)
         .is_some_and(|line| line.direction.is_rtl());
-    let first_row = rects
-        .iter_mut()
-        .filter(|bounds| row_at(bounds.origin.y) == start_row);
-    let trailing = if rtl {
-        first_row.min_by(|a, b| a.left().partial_cmp(&b.left()).unwrap_or(Ordering::Equal))
-    } else {
-        first_row.max_by(|a, b| a.right().partial_cmp(&b.right()).unwrap_or(Ordering::Equal))
-    };
-    let extended = match trailing {
-        Some(bounds) if rtl => {
-            let right = bounds.right();
-            bounds.origin.x = bounds.origin.x.min(field.start);
-            bounds.size.width = right - bounds.origin.x;
-            true
-        }
-        Some(bounds) => {
-            bounds.size.width = bounds.right().max(field.end) - bounds.origin.x;
-            true
-        }
-        None => false,
-    };
-    if !extended {
-        let y = line_height * start_row as f32;
-        let (left, right) = if rtl {
-            (field.start, start_point.x)
-        } else {
-            (start_point.x, field.end)
-        };
-        rects.push(Bounds::from_corners(
-            point(left, y),
-            point(right, y + line_height),
-        ));
-    }
-    for row in start_row + 1..end_row {
+    let row = |row: usize, left: Pixels, right: Pixels| {
         let y = line_height * row as f32;
-        rects.push(Bounds::from_corners(
-            point(field.start, y),
-            point(field.end, y + line_height),
-        ));
+        Bounds::from_corners(point(left, y), point(right, y + line_height))
+    };
+    rects.retain(|bounds| row_at(bounds.origin.y) == end_row);
+    let (left, right) = if rtl {
+        (field.start, start_point.x)
+    } else {
+        (start_point.x, field.end)
+    };
+    rects.push(row(start_row, left, right));
+    for middle in start_row + 1..end_row {
+        rects.push(row(middle, field.start, field.end));
     }
     rects.sort_by(|a, b| {
         a.origin
@@ -1133,6 +1106,15 @@ mod tests {
                     window.activate();
                     window.dispatch_event(
                         PlatformInput::MouseDown(MouseDownEvent {
+                            position: point(px(100.), px(20.)),
+                            button: MouseButton::Left,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent {
                             position: point(px(100.), px(20.)),
                             button: MouseButton::Left,
                             click_count: 1,
