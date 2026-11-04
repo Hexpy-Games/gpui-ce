@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! CPU layout metadata consumed by the shader compiler. Keep this beside the scene types
 //! so private fields are checked too, without exposing them to renderer implementations.
 
@@ -82,7 +83,9 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         element_bounds,
         element_corner_radii,
         inset,
-        corner_smoothing
+        corner_smoothing,
+        clip_outside,
+        padding
     ),
     layout!(
         Underline,

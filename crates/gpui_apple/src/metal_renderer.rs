@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::metal_atlas::MetalAtlas;
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -2707,6 +2708,8 @@ mod tests {
             element_corner_radii: Corners::all(ScaledPixels(2.0)),
             inset: gpui::ShaderBool::Disabled,
             corner_smoothing: 0.0,
+            clip_outside: gpui::ShaderBool::Disabled,
+            padding: 0,
         });
         shadow.finish();
         let Some(image) = render_for_contracts(
