@@ -39,6 +39,11 @@ changed file starts with a notice line.
   layout until the next layout, and end their composition when they
   lose focus (gpui div.rs; gpui_elements editable_text element and
   state).
+- EditableText native field behaviour: presses are hit-tested, the
+  caret stays in view after edits, multiline input stores LF line
+  breaks, the IME composition uses the font's 1-px underline, and the
+  selection paints under the text and fills continued lines to the
+  field edge (gpui_elements editable_text element, state and layout).
 
 The lens model was written with reference to these MIT-licensed
 projects; no code was copied from them:
