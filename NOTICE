@@ -55,6 +55,8 @@ changed file starts with a notice line.
 - EditableText caret: edits reveal the caret's whole line, and the
   caret is hidden while text is selected (gpui_elements editable_text
   element and state).
+- EditableText layout: measuring at several widths in one frame keeps
+  the layout of the final width (gpui_elements editable_text element).
 
 The lens model was written with reference to these MIT-licensed
 projects; no code was copied from them:
