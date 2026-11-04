@@ -781,11 +781,12 @@ impl PrelayoutState {
                     unicode_bidi,
                 };
 
-                if let Some(size) = self.prev_layout_state.size
+                let layout_state = self.state.read(cx).layout_data.state.clone();
+                if let Some(size) = layout_state.size
                     && truncation.width.is_none()
-                    && self.storage_version == self.prev_layout_state.last_seen_storage_version
-                    && self.prev_layout_state.options == options
-                    && self.prev_layout_state.marked_range == self.marked_range
+                    && self.storage_version == layout_state.last_seen_storage_version
+                    && layout_state.options == options
+                    && layout_state.marked_range == self.marked_range
                 {
                     return size;
                 }
@@ -2080,6 +2081,129 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn editable_text_keeps_one_layout_when_measured_at_several_widths() {
+        struct MultiMeasureView {
+            input: Entity<EditableTextState>,
+        }
+
+        impl Render for MultiMeasureView {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().flex().justify_center().w_full().child(
+                    div().w(px(400.)).child(
+                        div().w_full().child(
+                            text_area("input")
+                                .state(self.input.downgrade())
+                                .w_full()
+                                .max_h(px(160.))
+                                .overflow_y_scroll()
+                                .bg(INPUT_COLOR)
+                                .text_color(TEXT_COLOR)
+                                .caret_color(CARET_COLOR)
+                                .text_size(px(14.))
+                                .line_height(px(20.)),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        let system = ParleyTextSystem::new_with_system_font(SystemFonts::Skip, "IBM Plex Sans");
+        system
+            .add_fonts(vec![Cow::Borrowed(*gpui_fonts::IBM_PLEX)])
+            .unwrap();
+        let mut cx = HeadlessAppContext::new(Arc::new(system));
+        let input =
+            cx.update(|cx| cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)));
+        let window = cx
+            .open_window(size(px(600.), px(300.)), |_window, cx| {
+                cx.new(|_| MultiMeasureView {
+                    input: input.clone(),
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let text = "m ".repeat(70);
+        window
+            .update(&mut cx, |_view, window, cx| {
+                let focus_handle = input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+                input.update(cx, |state, cx| {
+                    state.replace_text_in_range(None, &text, window, cx);
+                });
+            })
+            .unwrap();
+
+        let mut previous_rows = None;
+        for _ in 0..2 {
+            window
+                .update(&mut cx, |_view, window, _cx| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            let mut rows = cx
+                .glyph_bounds(window.into(), TEXT_COLOR)
+                .unwrap()
+                .into_iter()
+                .map(|bounds| bounds.top().as_f32())
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| left.partial_cmp(right).unwrap());
+            rows.dedup();
+            assert!(rows.len() > 1, "painted rows={rows:?}");
+            if let Some(previous_rows) = &previous_rows {
+                assert_eq!(&rows, previous_rows);
+            }
+            previous_rows = Some(rows);
+            let field = only_quad(&mut cx, window.into(), INPUT_COLOR);
+            let scale = window
+                .update(&mut cx, |_view, window, _cx| window.scale_factor())
+                .unwrap();
+            cx.update(|cx| {
+                assert_eq!(
+                    input.read(cx).layout_data.state.options.wrap_width,
+                    Some(px(field.size.width.as_f32() / scale))
+                );
+            });
+        }
+
+        window
+            .update(&mut cx, |_view, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.move_to(state.as_str().len(), cx);
+                    state.replace_text_in_range(
+                        None,
+                        "\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10",
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .unwrap();
+        for _ in 0..2 {
+            window
+                .update(&mut cx, |_view, window, _cx| window.refresh())
+                .unwrap();
+            cx.run_until_parked();
+            let field =
+                only_quad(&mut cx, window.into(), INPUT_COLOR).map(|value| px(value.as_f32()));
+            let caret =
+                only_quad(&mut cx, window.into(), CARET_COLOR).map(|value| px(value.as_f32()));
+            assert!(
+                caret.top() >= field.top() && caret.bottom() <= field.bottom(),
+                "caret={caret:?}, field={field:?}"
+            );
+        }
+        window
+            .update(&mut cx, |_view, window, cx| window.blur(cx))
+            .unwrap();
+        cx.run_until_parked();
     }
 
     // test-category: pure-logic
