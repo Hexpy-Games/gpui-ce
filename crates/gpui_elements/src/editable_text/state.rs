@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::editable_text::{
     StringStorage, TextBoundary, UnicodeTextStorage, actions::EditableTextActionHandler,
     caret::CaretNotify, history::EditableTextHistory, layout::EditableTextLayoutResult,
@@ -5,7 +6,7 @@ use crate::editable_text::{
 use gpui::{
     App, Bounds, CaretAffinity, CaretPosition, CaretSelection, CaretSelectionMovement,
     ClipboardItem, Context, ElementId, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, NavigationDirection, Pixels, Point, ShapedText, Subscription,
+    Focusable, NavigationDirection, Pixels, Point, ResolvedDirection, ShapedText, Subscription,
     TextDirection as Direction, TextMovement, TextRangeExt, TextSelectionKind, UTF16Selection,
     Window, point, utf16_to_utf8_offset,
 };
@@ -212,6 +213,7 @@ impl EditableTextState {
         let focus_handle = self.focus_handle.clone();
         let subscription = cx.on_blur(&focus_handle, window, |_state, window, cx| {
             cx.defer_in(window, |state, _window, cx| {
+                state.marked_range = None;
                 state.clear_selection(cx);
             });
         });
@@ -246,6 +248,33 @@ impl EditableTextState {
     pub(super) fn accessibility_text_metrics(&self) -> &AccessibilityTextMetrics {
         &self.accessibility_text_metrics
     }
+
+    /// Runs for the current layout, or `None` when the layout does not show the value
+    /// (stale, placeholder or truncated).
+    pub(super) fn accessibility_runs(&self) -> Option<Vec<AccessibilityRun>> {
+        let document = self.current_document().ok()?;
+        (document.text.as_str() == self.as_str())
+            .then(|| self.accessibility_text_metrics.runs(document))
+            .filter(|runs| !runs.is_empty())
+    }
+}
+
+/// One accessibility text run: a visual line of the current layout.
+pub(super) struct AccessibilityRun {
+    pub(super) characters: Range<usize>, // indices into `character_lengths`
+    pub(super) byte_range: Range<usize>, // the line's `VisualLine::text_range`
+    pub(super) line_index: usize,
+    pub(super) x_range: Range<Pixels>, // layout x of the line's left..right edge
+    pub(super) direction: ResolvedDirection,
+    pub(super) positions: Vec<f32>, // layout px from the line's start edge
+    pub(super) widths: Vec<f32>,
+}
+
+pub(super) fn run_position(runs: &[AccessibilityRun], character: usize) -> (usize, usize) {
+    let index = runs
+        .partition_point(|run| run.characters.start <= character)
+        .saturating_sub(1);
+    (index, character - runs[index].characters.start)
 }
 
 pub(super) struct AccessibilityTextMetrics {
@@ -254,6 +283,72 @@ pub(super) struct AccessibilityTextMetrics {
 }
 
 impl AccessibilityTextMetrics {
+    pub(super) fn runs(&self, document: &ShapedText) -> Vec<AccessibilityRun> {
+        let ranges = self
+            .byte_offsets
+            .windows(2)
+            .map(|pair| pair[0]..pair[1])
+            .collect::<Vec<_>>();
+        let geometry = document.platform_layout.inline_geometry_for_ranges(&ranges);
+        document
+            .visual_lines()
+            .iter()
+            .enumerate()
+            .map(|(line_index, line)| {
+                let start = self
+                    .byte_offsets
+                    .partition_point(|offset| *offset < line.text_range.start);
+                let end = self
+                    .byte_offsets
+                    .partition_point(|offset| *offset < line.text_range.end);
+                let characters = start..end;
+                let extents = geometry[characters.clone()]
+                    .iter()
+                    .map(|rects| {
+                        rects
+                            .iter()
+                            .filter(|rect| rect.visual_line_index == line_index)
+                            .map(|rect| rect.bounds.left()..rect.bounds.right())
+                            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+                    })
+                    .collect::<Vec<_>>();
+                let x_range = extents
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+                    .unwrap_or(line.offset..line.offset);
+                let mut positions = Vec::with_capacity(characters.len());
+                let mut widths = Vec::with_capacity(characters.len());
+                let mut previous_end = 0.;
+                for extent in extents {
+                    let (position, width) = match extent {
+                        Some(extent) => {
+                            let position = match line.direction {
+                                ResolvedDirection::LeftToRight => extent.start - x_range.start,
+                                ResolvedDirection::RightToLeft => x_range.end - extent.end,
+                            };
+                            (position.as_f32(), (extent.end - extent.start).as_f32())
+                        }
+                        None => (previous_end, 0.),
+                    };
+                    positions.push(position);
+                    widths.push(width);
+                    previous_end = position + width;
+                }
+                AccessibilityRun {
+                    characters,
+                    byte_range: line.text_range.clone(),
+                    line_index,
+                    x_range,
+                    direction: line.direction,
+                    positions,
+                    widths,
+                }
+            })
+            .collect()
+    }
+
     fn new(text: &str) -> Self {
         let mut metrics = Self {
             character_lengths: Vec::new(),
@@ -1080,11 +1175,22 @@ impl EntityInputHandler for EditableTextState {
         let range = self.storage.utf_range_16to8(&range_utf16);
         let line_height = window.line_height();
 
-        let document = self.current_document().ok()?;
+        // Between an edit and the next layout, answer from the previous layout: a caret at the
+        // range start, clamped to the old text. Platforms query between edit and layout
+        // (AppKit's firstRect right after setMarkedText) and would otherwise place IME windows at
+        // the screen origin.
+        let (document, stale) = match self.current_document() {
+            Ok(document) => (document, false),
+            Err(OldDocumentVersion) => (self.layout_data.document.as_deref()?, true),
+        };
         let document_origin = bounds.origin + self.layout_data.document_offset
             - self.layout_data.scroll_bounds.origin;
         let start = range.start.min(document.text.len());
-        let end = range.end.min(document.text.len());
+        let end = if stale {
+            start
+        } else {
+            range.end.min(document.text.len())
+        };
 
         if start == end {
             let caret = CaretPosition::attached_to_next_cluster(start);
@@ -1440,7 +1546,7 @@ mod tests {
     use crate::editable_text::StringStorage;
     use gpui::{
         AppContext, Entity, IntoElement, PlatformTextSystem, Render, TestAppContext, TextRun,
-        TextSystem, WindowHandle, WindowTextSystem, div, font, px,
+        TextSystem, WindowHandle, WindowTextSystem, div, font, px, size,
     };
     use gpui_parley::{ParleyTextSystem, SystemFonts};
 
@@ -1627,6 +1733,54 @@ mod tests {
             view.input.update(cx, |input, cx| update(input, window, cx));
         })
         .unwrap();
+    }
+
+    // test-category: pure-logic
+    #[gpui::test]
+    fn ime_bounds_use_the_previous_layout_until_the_next_layout(cx: &mut TestAppContext) {
+        let text = "ab";
+        let document = movement_document(text, None);
+        let view = create_test_input(cx, text, 2);
+        update_movement_input(view, cx, |input, window, cx| {
+            input.layout_data.document = Some(document.clone());
+            input.layout_data.state.last_seen_storage_version = input.version();
+            let element = Bounds::new(point(px(10.), px(20.)), size(px(200.), px(30.)));
+            let caret = input.bounds_for_range(2..2, element, window, cx);
+            assert!(caret.is_some());
+
+            input.replace_and_mark_text_in_range(None, "x", None, window, cx);
+            assert!(input.current_document().is_err());
+            assert_eq!(input.bounds_for_range(2..3, element, window, cx), caret);
+        });
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn accessibility_runs_follow_visual_lines_and_glyph_geometry() {
+        let text = "ab\ncd";
+        let document = movement_document(text, None);
+        let runs = AccessibilityTextMetrics::new(text).runs(&document);
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            (runs[0].byte_range.clone(), runs[0].characters.clone()),
+            (0..3, 0..3)
+        );
+        assert_eq!(
+            (runs[1].byte_range.clone(), runs[1].characters.clone()),
+            (3..5, 3..5)
+        );
+        assert_eq!(runs[1].line_index, 1);
+        for run in &runs {
+            assert_eq!(run.positions.len(), run.characters.len());
+            assert_eq!(run.widths.len(), run.characters.len());
+            assert_eq!(run.positions[0], 0.);
+        }
+        assert!(runs[0].widths[0] > 0. && runs[0].widths[1] > 0.);
+        assert_eq!(runs[0].positions[1], runs[0].widths[0]);
+        assert_eq!(run_position(&runs, 2), (0, 2));
+        assert_eq!(run_position(&runs, 4), (1, 1));
+        assert_eq!(run_position(&runs, 5), (1, 2));
     }
 
     // Disable grouping for predictable test behavior

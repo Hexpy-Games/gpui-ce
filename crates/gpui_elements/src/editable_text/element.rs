@@ -1,16 +1,18 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::editable_text::{
     BLINK_INTERVAL_500MS, Caret, EditableTextState,
     actions::{DEFAULT_INPUT_CONTEXT, EditableTextActionElement, EditableTextActionHandler},
     layout::{EditableTextLayoutResult, EditableTextLayoutState},
+    state::run_position,
 };
 use gpui::{
     A11ySubtreeBuilder, App, Bounds, CaretPosition, CursorStyle, DefiniteLength, DispatchPhase,
     Display, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Focusable, Hitbox,
     HitboxBehavior, Hsla, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParagraphDirection, Pixels, Point,
-    ShapedText, SharedString, Size, StatefulInteractiveElement, Style, StyleRefinement, Styled,
-    TextAlign, TextLayout, TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, point,
-    px, relative, size,
+    ResolvedDirection, ShapedText, SharedString, Size, StatefulInteractiveElement, Style,
+    StyleRefinement, Styled, TextAlign, TextLayout, TextLayoutOptions, UnicodeBidi, WeakEntity,
+    Window, accesskit, point, px, relative, size,
 };
 use palette::IntoColor;
 use smallvec::SmallVec;
@@ -231,9 +233,68 @@ impl InteractivityPrepaint {
 }
 
 struct AccessibilityPrepaint {
-    text_run: accesskit::Node,
-    anchor: usize,
-    focus: usize,
+    runs: Vec<accesskit::Node>,
+    anchor: (usize, usize),
+    focus: (usize, usize),
+}
+
+fn accessibility_prepaint(
+    state: &EditableTextState,
+    document_origin: Point<Pixels>,
+    scale: f32,
+) -> AccessibilityPrepaint {
+    let metrics = state.accessibility_text_metrics();
+    let (anchor, focus) = metrics.character_indices_for_selection(state.caret_selection());
+    let Some(runs) = state.accessibility_runs() else {
+        let mut text_run = accesskit::Node::new(accesskit::Role::TextRun);
+        text_run.set_value(state.as_str());
+        text_run.set_character_lengths(metrics.character_lengths.clone());
+        return AccessibilityPrepaint {
+            runs: vec![text_run],
+            anchor: (0, anchor),
+            focus: (0, focus),
+        };
+    };
+    let anchor = run_position(&runs, anchor);
+    let focus = run_position(&runs, focus);
+    let line_height = state.layout_data.line_height.as_f32();
+    let runs = runs
+        .into_iter()
+        .map(|run| {
+            let mut node = accesskit::Node::new(accesskit::Role::TextRun);
+            node.set_value(&state.as_str()[run.byte_range]);
+            node.set_character_lengths(metrics.character_lengths[run.characters].to_vec());
+            let y0 = (document_origin.y.as_f32() + line_height * run.line_index as f32) * scale;
+            node.set_bounds(accesskit::Rect {
+                x0: ((document_origin.x + run.x_range.start).as_f32() * scale) as f64,
+                x1: ((document_origin.x + run.x_range.end).as_f32() * scale) as f64,
+                y0: y0 as f64,
+                y1: (y0 + line_height * scale) as f64,
+            });
+            node.set_character_positions(
+                run.positions
+                    .into_iter()
+                    .map(|value| value * scale)
+                    .collect::<Vec<_>>(),
+            );
+            node.set_character_widths(
+                run.widths
+                    .into_iter()
+                    .map(|value| value * scale)
+                    .collect::<Vec<_>>(),
+            );
+            node.set_text_direction(match run.direction {
+                ResolvedDirection::LeftToRight => accesskit::TextDirection::LeftToRight,
+                ResolvedDirection::RightToLeft => accesskit::TextDirection::RightToLeft,
+            });
+            node
+        })
+        .collect();
+    AccessibilityPrepaint {
+        runs,
+        anchor,
+        focus,
+    }
 }
 
 /// Internal type containing prepaint information used to paint the element
@@ -267,6 +328,7 @@ impl Element for EditableTextElement {
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        self.interactivity.write_a11y_info(node);
         if !self.accepts_input {
             node.set_read_only();
         }
@@ -281,18 +343,26 @@ impl Element for EditableTextElement {
             .accessibility
             .take()
             .expect("accessibility data was prepared while building the tree");
-        let text_run_id = builder.synthetic_node_id("text");
-        builder.push_child(text_run_id, accessibility.text_run);
+        let ids = accessibility
+            .runs
+            .into_iter()
+            .enumerate()
+            .map(|(index, run)| {
+                let id = builder.synthetic_node_id(("text", index));
+                builder.push_child(id, run);
+                id
+            })
+            .collect::<Vec<_>>();
         builder
             .parent_node()
             .set_text_selection(accesskit::TextSelection {
                 anchor: accesskit::TextPosition {
-                    node: text_run_id,
-                    character_index: accessibility.anchor,
+                    node: ids[accessibility.anchor.0],
+                    character_index: accessibility.anchor.1,
                 },
                 focus: accesskit::TextPosition {
-                    node: text_run_id,
-                    character_index: accessibility.focus,
+                    node: ids[accessibility.focus.0],
+                    character_index: accessibility.focus.1,
                 },
             });
     }
@@ -445,17 +515,7 @@ impl Element for EditableTextElement {
 
         let state = request_layout.state.read(cx);
         let accessibility = window.is_a11y_active().then(|| {
-            let metrics = state.accessibility_text_metrics();
-            let (anchor, focus) = metrics.character_indices_for_selection(state.caret_selection());
-            let mut text_run = accesskit::Node::new(accesskit::Role::TextRun);
-            text_run.set_value(state.as_str());
-            text_run.set_character_lengths(metrics.character_lengths.clone());
-
-            AccessibilityPrepaint {
-                text_run,
-                anchor,
-                focus,
-            }
+            accessibility_prepaint(state, prepaint.document_origin(), window.scale_factor())
         });
         let elements = PrepaintElements::build_elements(
             state,
@@ -1778,6 +1838,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn editable_text_writes_its_aria_properties() {
+        let input = text_input("name").aria_label("Search");
+        let mut node = accesskit::Node::new(accesskit::Role::TextInput);
+        input.write_a11y_info(&mut node);
+        assert_eq!(node.label(), Some("Search"));
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn editable_text_ends_composition_when_blurred() {
+        let text = "ab";
+        let mut cx = HeadlessAppContext::new(Arc::new(TestTextSystem));
+        let window = cx
+            .open_window(size(px(420.0), px(260.0)), |_window, cx| {
+                let input = cx.new(|cx| EditableTextState::new(StringStorage::from(text), cx));
+                cx.new(|_| CenteredEditableTextView { extent: 0.0, input })
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+        let input = window
+            .update(&mut cx, |view, window, cx| {
+                window.activate();
+                let focus_handle = view.input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+                view.input.update(cx, |state, cx| {
+                    state.move_to(text.len(), cx);
+                    state.replace_and_mark_text_in_range(None, "c", None, window, cx);
+                });
+                view.input.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).marked_range(), Some(2..3));
+        });
+
+        window
+            .update(&mut cx, |_view, window, cx| window.blur(cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).marked_range(), None);
+            assert_eq!(input.read(cx).as_str(), "abc");
+        });
     }
 
     #[test]
