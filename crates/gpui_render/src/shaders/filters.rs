@@ -85,7 +85,7 @@ pub mod surface {
     }
 }
 
-#[wgsl_rs::wgsl]
+#[wgsl_rs::wgsl(skip_validation)]
 pub mod blur {
     use super::super::common::*;
     use super::super::corner_smoothing::*;
