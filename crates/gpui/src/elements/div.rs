@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! Div is the central, reusable element that most GPUI trees will be built from.
 //! It functions as a container for other elements, and provides a number of
 //! useful features for laying out and styling its children as well as binding
@@ -4344,7 +4345,8 @@ impl Interactivity {
         style
     }
 
-    pub(crate) fn write_a11y_info(&self, node: &mut accesskit::Node) {
+    /// Writes this element's ARIA properties (label, description, value, states) to its accessibility node.
+    pub fn write_a11y_info(&self, node: &mut accesskit::Node) {
         if let Some(id) = &self.aria.author_id {
             node.set_author_id(id.to_string());
         }
