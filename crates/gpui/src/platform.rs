@@ -887,7 +887,11 @@ pub enum TextInputStateChange {
     /// An editable element gained focus.
     FocusGained,
     /// The focused editable element lost focus.
+    /// Platforms end any IME composition in progress the same way.
     FocusLost,
+    /// Focus moved directly from one editable element to another. Platforms end any IME
+    /// composition in progress without delivering it: the element that lost focus keeps its text.
+    FocusMoved,
     /// The selection or caret moved
     SelectionChanged,
     /// The document content changed outside of platform-initiated edits.

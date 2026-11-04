@@ -56,6 +56,7 @@ pub struct WindowsWindowState {
     pub callbacks: Callbacks,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
+    pub ending_ime_composition: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
     pub last_reported_modifiers: Cell<Option<Modifiers>>,
     pub last_reported_capslock: Cell<Option<Capslock>>,
@@ -167,6 +168,7 @@ impl WindowsWindowState {
             callbacks,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
+            ending_ime_composition: Cell::new(false),
             pending_surrogate: Cell::new(pending_surrogate),
             last_reported_modifiers: Cell::new(last_reported_modifiers),
             last_reported_capslock: Cell::new(last_reported_capslock),
@@ -605,6 +607,15 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn text_input_state_changed(&self, change: TextInputStateChange) {
+        if matches!(
+            change,
+            TextInputStateChange::FocusMoved | TextInputStateChange::FocusLost
+        ) {
+            self.0.end_ime_composition(self.0.hwnd);
+        }
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
     }
@@ -1138,13 +1149,14 @@ impl PlatformWindow for WindowsWindow {
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
-        let caret_position = POINT {
-            x: (bounds.origin.x.as_f32() * scale_factor) as i32,
-            y: (bounds.origin.y.as_f32() * scale_factor) as i32
-                + ((bounds.size.height.as_f32() * scale_factor) as i32 / 2),
+        let rect = RECT {
+            left: (bounds.origin.x.as_f32() * scale_factor) as i32,
+            top: (bounds.origin.y.as_f32() * scale_factor) as i32,
+            right: ((bounds.origin.x + bounds.size.width).as_f32() * scale_factor) as i32,
+            bottom: ((bounds.origin.y + bounds.size.height).as_f32() * scale_factor) as i32,
         };
 
-        self.0.update_ime_position(self.0.hwnd, caret_position);
+        self.0.update_ime_position(self.0.hwnd, rect);
     }
 
     fn play_system_bell(&self) {

@@ -14,8 +14,8 @@ use gpui::{
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, point, px, size,
+    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowKind, WindowParams, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -1563,6 +1563,31 @@ fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
 }
 
 impl PlatformWindow for MacWindow {
+    fn text_input_state_changed(&self, change: TextInputStateChange) {
+        if !matches!(
+            change,
+            TextInputStateChange::FocusMoved | TextInputStateChange::FocusLost
+        ) {
+            return;
+        }
+        // The element that lost focus keeps its composed text. Withhold the input handler so
+        // nothing the input method sends while discarding reaches the newly focused element.
+        let mut lock = self.0.lock();
+        let view = lock.native_view.as_ptr();
+        let input_handler = lock.input_handler.take();
+        drop(lock);
+        unsafe {
+            let input_context: ObjcId = msg_send![view, inputContext];
+            if !input_context.is_null() {
+                let _: () = msg_send![input_context, discardMarkedText];
+            }
+        }
+        let mut lock = self.0.lock();
+        if lock.input_handler.is_none() {
+            lock.input_handler = input_handler;
+        }
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
     }

@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::display::WebDisplay;
 use crate::events::{
     ClickState, EventListenerHandle, TouchIds, WebEventListeners, is_mac_platform,
@@ -703,7 +704,9 @@ impl PlatformWindow for WebWindow {
 
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         match change {
-            TextInputStateChange::FocusGained => self.inner.sync_virtual_keyboard(true),
+            TextInputStateChange::FocusGained | TextInputStateChange::FocusMoved => {
+                self.inner.sync_virtual_keyboard(true)
+            }
             TextInputStateChange::FocusLost => self.inner.sync_virtual_keyboard(false),
             TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {}
         }
