@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 //! Rust-authored shader sources, split by ABI and rendering domain.
 //!
 //! Ordinary and smoothed entry points share vertex preparation, but keep distinct stage-output
@@ -10,6 +11,8 @@ pub mod interface;
 
 mod corner_smoothing;
 mod emoji;
+// The literals are emitted verbatim into WGSL; keep the generated shaders byte-identical.
+#[allow(clippy::approx_constant)]
 mod filters;
 mod linkage;
 mod paths;
