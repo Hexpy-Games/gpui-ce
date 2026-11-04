@@ -55,6 +55,9 @@ pub struct EditableTextState {
 
     /// UTF-8 byte range in `storage` being composed during IME input.
     marked_range: Option<Range<usize>>,
+    /// Set by every edit. The element scrolls the caret into view once the layout of the
+    /// edited text exists.
+    reveal_caret: bool,
 
     /// True while the user holds the mouse button to select text, including while dragging.
     /// Cleared on mouse-up or when this input loses focus.
@@ -155,6 +158,7 @@ impl EditableTextState {
 
             selection_movement: CaretSelectionMovement::default(),
             marked_range: None,
+            reveal_caret: false,
 
             is_selecting: false,
             selection_drag_anchor: None,
@@ -183,8 +187,9 @@ impl EditableTextState {
 
     /// Replaces the contents of the stored text with the provided string slice.
     pub fn emplace(&mut self, content: &str, cx: &mut Context<Self>) {
+        let content = normalize_line_endings(content);
         let len = self.storage.content_utf8().len();
-        self.replace_text(0..len, content);
+        self.replace_text(0..len, &content);
         self.emit_text_changed(cx);
         cx.notify();
     }
@@ -388,6 +393,15 @@ impl AccessibilityTextMetrics {
     }
 }
 
+/// Converts CRLF and lone CR line breaks to LF, so storage has one newline convention.
+fn normalize_line_endings(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 impl EditableTextState {
     fn replace_storage_range(&mut self, range: Range<usize>, text: &str) {
         self.storage.replace_range(range, text);
@@ -409,10 +423,10 @@ impl EditableTextState {
         // should also consider validation support, for features such as:
         // - total syntax evaluation (e.g. passwords)
         // - conforms to regex or math (e.g. ssn, phone number, email, etc)
-        let mut text_to_insert = Cow::Borrowed(text_to_insert);
+        let mut text_to_insert = normalize_line_endings(text_to_insert);
 
         if !self.layout_data.supports_multiline {
-            text_to_insert = Cow::Owned(text_to_insert.replace("\n", "").replace("\r", ""));
+            text_to_insert = Cow::Owned(text_to_insert.replace('\n', ""));
         }
 
         /* A sample implementation of max-length sampled from gpuikit
@@ -450,6 +464,7 @@ impl EditableTextState {
 
         self.set_selection(CaretPosition::from((end_pos, affinity)));
         self.marked_range = None;
+        self.reveal_caret = true;
     }
 
     fn emit_text_changed(&self, cx: &mut Context<Self>) {
@@ -642,11 +657,19 @@ impl EditableTextState {
 // Internal user action / logical processors
 impl EditableTextState {
     fn scroll_to_caret(&mut self) {
+        if let Some(offset) = self.caret_reveal_offset() {
+            self.layout_data.next_scroll_offset = Some(offset);
+        }
+    }
+
+    /// The positive scroll offset that brings the visible caret's line fully into the scroll
+    /// bounds, or `None` when it is already in view or nothing is laid out yet.
+    fn caret_reveal_offset(&self) -> Option<Point<Pixels>> {
         if self.layout_data.scroll_bounds.is_empty() {
-            return;
+            return None;
         }
         let Some(content_size) = self.layout_data.state.size else {
-            return;
+            return None;
         };
 
         // point will be relative to content_size, and may or may not be within the current scroll_bounds
@@ -657,7 +680,7 @@ impl EditableTextState {
         let mut scroll_offset = Cow::Borrowed(&self.layout_data.scroll_bounds.origin);
 
         if self.layout_data.scroll_bounds.contains(&point) {
-            return;
+            return None;
         }
 
         // No existing "shift bounds origin so <point> is contained", but that is effectively what this does
@@ -681,8 +704,19 @@ impl EditableTextState {
         if let Cow::Owned(mut offset) = scroll_offset {
             offset.x = offset.x.clamp(Pixels::ZERO, content_size.width);
             offset.y = offset.y.clamp(Pixels::ZERO, content_size.height);
-            self.layout_data.next_scroll_offset = Some(offset);
+            return Some(offset);
         }
+        None
+    }
+
+    /// Resolves the caret reveal requested by an edit. Keeps the request while the layout
+    /// still describes the text before the edit.
+    pub(super) fn take_caret_reveal(&mut self) -> Option<Point<Pixels>> {
+        if !self.reveal_caret || self.current_document().is_err() {
+            return None;
+        }
+        self.reveal_caret = false;
+        self.caret_reveal_offset()
     }
 
     /// Moves the caret to the provided position.
@@ -999,6 +1033,14 @@ impl EditableTextState {
         self.history.as_ref()
     }
 
+    /// Forgets undo and redo, for when the host takes the text away (for example, a sent
+    /// message), so undo cannot bring it back.
+    pub fn clear_history(&mut self) {
+        if let Some(history) = &mut self.history {
+            history.clear();
+        }
+    }
+
     fn record_history(&mut self, range: Range<usize>, new_text_len: usize) {
         // Don't record during IME composition
         if self.marked_range.is_some() {
@@ -1039,7 +1081,7 @@ impl EditableTextState {
             .push(dst, entry.as_inverted(removed_text));
         self.set_selection(selection);
 
-        self.scroll_to_caret();
+        self.reveal_caret = true;
         cx.notify();
     }
 }
@@ -2631,6 +2673,22 @@ mod tests {
                     caret: CaretPosition::attached_to_next_cluster(5),
                 }
             ); // selected the entire emoji
+        });
+    }
+
+    // test-category: pure-logic
+    #[gpui::test]
+    fn multiline_input_stores_lf_for_crlf_and_cr(cx: &mut TestAppContext) {
+        let view = create_test_input(cx, "", 0);
+        cx.write_to_clipboard(ClipboardItem::new_string("a\r\nb\rc".to_string()));
+        update_movement_input(view, cx, |input, window, cx| {
+            input.layout_data.supports_multiline = true;
+            EditableTextActionHandler::paste(input, &Paste, window, cx);
+            assert_eq!(input.as_str(), "a\nb\nc");
+            input.replace_text_in_range(None, "\r\n", window, cx);
+            assert_eq!(input.as_str(), "a\nb\nc\n");
+            input.emplace("x\r\ny\rz", cx);
+            assert_eq!(input.as_str(), "x\ny\nz");
         });
     }
 

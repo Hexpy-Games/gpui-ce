@@ -1,8 +1,9 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use gpui::{Bounds, Pixels, Point, ShapedText, Size};
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 /// Data used across successive layout requests to gauge whether layout must be recomputed.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub(super) struct EditableTextLayoutState {
     /// The last known size of the text, as generated during layout.
     pub size: Option<Size<Pixels>>,
@@ -10,6 +11,8 @@ pub(super) struct EditableTextLayoutState {
     pub last_seen_storage_version: u16,
     /// Direction and alignment inputs used for this layout.
     pub options: gpui::TextLayoutOptions,
+    /// IME composition range underlined in this layout.
+    pub marked_range: Option<Range<usize>>,
 }
 
 /// Internal state/result after the element has recomputed layout.

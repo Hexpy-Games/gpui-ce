@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use gpui::CaretSelection;
 use std::{
     ops::Range,
@@ -54,6 +55,12 @@ pub enum HistoryKind {
 impl EditableTextHistory {
     pub fn set_grouping_interval(&mut self, interval: Duration) {
         self.grouping_interval = interval;
+    }
+
+    /// Forgets every undo and redo entry.
+    pub fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     pub fn record(

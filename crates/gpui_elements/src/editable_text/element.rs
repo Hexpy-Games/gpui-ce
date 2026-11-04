@@ -6,17 +6,17 @@ use crate::editable_text::{
     state::run_position,
 };
 use gpui::{
-    A11ySubtreeBuilder, App, Bounds, CaretPosition, CursorStyle, DefiniteLength, DispatchPhase,
-    Display, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Focusable, Hitbox,
-    HitboxBehavior, Hsla, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParagraphDirection, Pixels, Point,
-    ResolvedDirection, ShapedText, SharedString, Size, StatefulInteractiveElement, Style,
-    StyleRefinement, Styled, TextAlign, TextLayout, TextLayoutOptions, UnicodeBidi, WeakEntity,
-    Window, accesskit, point, px, relative, size,
+    A11ySubtreeBuilder, App, Bounds, CaretPosition, CaretSelection, CursorStyle, DefiniteLength,
+    DispatchPhase, Display, Element, ElementId, ElementInputHandler, Entity, FocusHandle,
+    Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement, Interactivity, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, PaintQuad,
+    ParagraphDirection, Pixels, Point, ResolvedDirection, ShapedText, SharedString, Size,
+    StatefulInteractiveElement, Style, StyleRefinement, Styled, TextAlign, TextLayout,
+    TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, point, px, relative, size,
 };
 use palette::IntoColor;
 use smallvec::SmallVec;
-use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, cmp::Ordering, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 /// Creates a text input element.
 /// See [`EditableTextElement`] for usage.
@@ -207,6 +207,8 @@ struct PrelayoutState {
     show_placeholder: bool,
     text: Option<SharedString>,
     placeholder_color: Hsla,
+    marked_range: Option<Range<usize>>,
+    marked_color: Hsla,
     supports_multiline: bool,
     accepts_input: bool,
 }
@@ -397,11 +399,13 @@ impl Element for EditableTextElement {
 
             let prelayout = PrelayoutState {
                 state: entity.clone(),
-                prev_layout_state: state.layout_data.state,
+                prev_layout_state: state.layout_data.state.clone(),
                 show_placeholder,
                 storage_version: state.version(),
                 text,
                 placeholder_color: self.colors.placeholder,
+                marked_range: state.marked_range().filter(|_| !show_placeholder),
+                marked_color: self.colors.ime_underline,
                 supports_multiline: self.supports_multiline,
                 accepts_input: self.accepts_input,
             };
@@ -475,7 +479,7 @@ impl Element for EditableTextElement {
             .update(cx, |caret, cx| caret.update_focus(is_focused, cx));
         window.set_focus_handle(&focus_handle, cx);
 
-        let prepaint = self.interactivity.prepaint(
+        let mut prepaint = self.interactivity.prepaint(
             global_id,
             inspector_id,
             bounds,
@@ -512,6 +516,22 @@ impl Element for EditableTextElement {
                 }
             },
         );
+
+        // Edits reveal the caret in the frame that first lays out the edited text.
+        let overflow = &self.interactivity.base_style.overflow;
+        let scrollable =
+            overflow.x == Some(Overflow::Scroll) || overflow.y == Some(Overflow::Scroll);
+        let reveal = request_layout.state.update(cx, |state, _cx| {
+            let offset = state.take_caret_reveal().filter(|_| scrollable)?;
+            state.layout_data.scroll_bounds.origin = offset;
+            Some(offset)
+        });
+        if let Some(offset) = reveal {
+            // gpui stores scroll offsets as negative values.
+            self.interactivity
+                .set_scroll_offset(global_id, window, -offset);
+            prepaint.scroll_offset = -offset;
+        }
 
         let state = request_layout.state.read(cx);
         let accessibility = window.is_a11y_active().then(|| {
@@ -561,10 +581,14 @@ impl Element for EditableTextElement {
 
             // Register event listeners to the window for the next frame
             if accepts_input {
-                Self::process_frame_events(prepaint, bounds, &request_layout.state, window, cx);
+                Self::process_frame_events(prepaint, &request_layout.state, window, cx);
             }
 
             // Actually draw the elements we constructed during prepaint
+            for quad in prepaint.elements.selection.drain(..) {
+                window.paint_quad(quad);
+            }
+
             if let Some(document) = prepaint.elements.document.take() {
                 let _ = document.paint(
                     prepaint.interactivity.document_origin(),
@@ -574,14 +598,6 @@ impl Element for EditableTextElement {
                     window,
                     cx,
                 );
-            }
-
-            for quad in prepaint.elements.ime_marked.drain(..) {
-                window.paint_quad(quad);
-            }
-
-            for quad in prepaint.elements.selection.drain(..) {
-                window.paint_quad(quad);
             }
 
             if let Some(quad) = prepaint.elements.caret.take() {
@@ -635,7 +651,6 @@ impl EditableTextElement {
 
     fn process_frame_events(
         prepaint: &PrepaintState,
-        bounds: Bounds<Pixels>,
         entity: &Entity<EditableTextState>,
         window: &mut Window,
         cx: &mut App,
@@ -648,12 +663,16 @@ impl EditableTextElement {
 
         window.on_mouse_event({
             let focus_handle = prepaint.focus_handle.clone();
+            let hitbox = prepaint.interactivity.hitbox.clone();
             let state = entity.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                if !bounds.contains(&event.position) {
+                if !hitbox
+                    .as_ref()
+                    .is_some_and(|hitbox| hitbox.is_hovered(window))
+                {
                     return;
                 }
                 if event.button != MouseButton::Left {
@@ -723,15 +742,19 @@ impl PrelayoutState {
             // This is invoked sometime in the near future (before prepaint but not immediately),
             // so we avoid doing any pre-emptive work until the layout engine is ready.
             move |known_dimensions, available_space, window, cx| {
-                let runs = vec![gpui::TextRun {
-                    len: text.len(),
-                    font: text_style.font(),
-                    color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                    letter_spacing: None,
-                }];
+                let runs = composition_runs(
+                    gpui::TextRun {
+                        len: text.len(),
+                        font: text_style.font(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                        letter_spacing: None,
+                    },
+                    self.marked_range.clone(),
+                    self.marked_color,
+                );
 
                 let wrap_width = TextLayout::evaluate_wrap_width(
                     &text_style.white_space,
@@ -762,6 +785,7 @@ impl PrelayoutState {
                     && truncation.width.is_none()
                     && self.storage_version == self.prev_layout_state.last_seen_storage_version
                     && self.prev_layout_state.options == options
+                    && self.prev_layout_state.marked_range == self.marked_range
                 {
                     return size;
                 }
@@ -810,6 +834,7 @@ impl PrelayoutState {
                     state: EditableTextLayoutState {
                         size: Some(size),
                         last_seen_storage_version: self.storage_version,
+                        marked_range: self.marked_range.clone(),
                         options,
                     },
                     document,
@@ -844,7 +869,6 @@ impl PrelayoutState {
 struct PrepaintElements {
     document: Option<Arc<ShapedText>>,
     selection: SmallVec<[PaintQuad; 20]>,
-    ime_marked: SmallVec<[PaintQuad; 2]>,
     caret: Option<PaintQuad>,
 }
 
@@ -871,35 +895,26 @@ impl PrepaintElements {
         }
 
         let document_origin = prepaint.document_origin();
-        let quads = |range: Range<usize>, color, offset_y| {
-            let start = range.start.min(document.text.len());
-            let end = range.end.min(document.text.len());
-
-            document
-                .selection_bounds(start..end, line_height)
-                .into_iter()
-                .map(move |bounds| {
-                    PaintQuad::new(Bounds::from_corners(
-                        document_origin + bounds.origin + point(Pixels::ZERO, offset_y),
-                        document_origin + bounds.bottom_right(),
-                    ))
-                    .background(color)
-                })
-        };
-
         elements.document = Some(document.clone());
 
-        elements.selection.extend(quads(
-            state.selected_byte_range(),
-            colors.selection,
-            Pixels::ZERO,
-        ));
-
-        if let Some(range) = state.marked_range() {
-            elements
-                .ime_marked
-                .extend(quads(range, colors.ime_underline, line_height - px(2.)));
-        }
+        let len = document.text.len();
+        let range = state.selected_byte_range();
+        let field = prepaint.inner_bounds.left() - document_origin.x
+            ..prepaint.inner_bounds.right() - document_origin.x;
+        elements.selection.extend(
+            selection_rects(
+                document,
+                range.start.min(len)..range.end.min(len),
+                state.caret_selection(),
+                line_height,
+                field,
+            )
+            .into_iter()
+            .map(|bounds| {
+                PaintQuad::new(Bounds::new(document_origin + bounds.origin, bounds.size))
+                    .background(colors.selection)
+            }),
+        );
 
         if prepaint.caret_visible {
             let caret_point = document_origin
@@ -919,6 +934,96 @@ impl PrepaintElements {
 
         elements
     }
+}
+
+/// Text runs for an editable document. The IME composition range carries a 1-px underline
+/// at the font's underline position, the way native text fields mark text being composed.
+fn composition_runs(
+    run: gpui::TextRun,
+    marked: Option<Range<usize>>,
+    color: Hsla,
+) -> Vec<gpui::TextRun> {
+    let Some(marked) = marked.filter(|marked| !marked.is_empty() && marked.end <= run.len) else {
+        return vec![run];
+    };
+    let underlined = gpui::TextRun {
+        len: marked.len(),
+        underline: Some(gpui::UnderlineStyle {
+            thickness: px(1.),
+            color: Some(color),
+            wavy: false,
+        }),
+        ..run.clone()
+    };
+    [
+        gpui::TextRun {
+            len: marked.start,
+            ..run.clone()
+        },
+        underlined,
+        gpui::TextRun {
+            len: run.len - marked.end,
+            ..run
+        },
+    ]
+    .into_iter()
+    .filter(|run| run.len > 0)
+    .collect()
+}
+
+/// Selection rectangles in document coordinates. A selection that continues past a visual
+/// line fills that line to the field edge on the line's trailing side, and lines between
+/// its first and last line are filled edge to edge, as native multi-line text fields draw
+/// it. The last line, and a selection within one line, cover only the selected clusters.
+fn selection_rects(
+    document: &ShapedText,
+    range: Range<usize>,
+    selection: CaretSelection,
+    line_height: Pixels,
+    field: Range<Pixels>,
+) -> SmallVec<[Bounds<Pixels>; 4]> {
+    let mut rects = document.selection_bounds(range, line_height);
+    let (start, end) = match selection.endpoint_ordering() {
+        Ordering::Greater => (selection.anchor, selection.caret),
+        _ => (selection.caret, selection.anchor),
+    };
+    let row_at = |y: Pixels| (y / line_height).round() as usize;
+    let (Some(start_point), Some(end_point)) = (
+        document.visual_position_for_caret(start, line_height),
+        document.visual_position_for_caret(end, line_height),
+    ) else {
+        return rects;
+    };
+    let (start_row, end_row) = (row_at(start_point.y), row_at(end_point.y));
+    if start_row >= end_row {
+        return rects;
+    }
+
+    let rtl = document
+        .visual_lines()
+        .get(start_row)
+        .is_some_and(|line| line.direction.is_rtl());
+    let row = |row: usize, left: Pixels, right: Pixels| {
+        let y = line_height * row as f32;
+        Bounds::from_corners(point(left, y), point(right, y + line_height))
+    };
+    rects.retain(|bounds| row_at(bounds.origin.y) == end_row);
+    let (left, right) = if rtl {
+        (field.start, start_point.x)
+    } else {
+        (start_point.x, field.end)
+    };
+    rects.push(row(start_row, left, right));
+    for middle in start_row + 1..end_row {
+        rects.push(row(middle, field.start, field.end));
+    }
+    rects.sort_by(|a, b| {
+        a.origin
+            .y
+            .partial_cmp(&b.origin.y)
+            .unwrap_or(Ordering::Equal)
+    });
+    rects
 }
 
 fn editable_document_offset(document: &ShapedText, line_height: Pixels) -> Point<Pixels> {
@@ -959,6 +1064,134 @@ mod tests {
     const CARET_COLOR: Hsla = hsla(0.95, 0.8, 0.6, 1.0);
     const TEXT_COLOR: Hsla = hsla(0.0, 0.0, 0.1, 1.0);
     const MARKED_COLOR: Hsla = hsla(0.55, 0.8, 0.6, 1.0);
+
+    struct OccludedEditableTextView {
+        input: Entity<EditableTextState>,
+        occluded: bool,
+    }
+
+    impl Render for OccludedEditableTextView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .w(px(200.))
+                .h(px(40.))
+                .child(
+                    text_input("input")
+                        .state(self.input.downgrade())
+                        .size_full()
+                        .bg(INPUT_COLOR),
+                )
+                .when(self.occluded, |this| {
+                    this.child(div().absolute().top_0().left_0().size_full().occlude())
+                })
+        }
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn editable_text_ignores_mouse_down_under_an_occluding_layer() {
+        for (occluded, focused) in [(false, true), (true, false)] {
+            let mut cx = HeadlessAppContext::new(Arc::new(TestTextSystem));
+            let window = cx
+                .open_window(size(px(240.), px(80.)), |_window, cx| {
+                    let input =
+                        cx.new(|cx| EditableTextState::new(StringStorage::from("text"), cx));
+                    cx.new(|_| OccludedEditableTextView { input, occluded })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(&mut cx, |_view, window, cx| {
+                    window.activate();
+                    window.dispatch_event(
+                        PlatformInput::MouseDown(MouseDownEvent {
+                            position: point(px(100.), px(20.)),
+                            button: MouseButton::Left,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            position: point(px(100.), px(20.)),
+                            button: MouseButton::Left,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let is_focused = window
+                .update(&mut cx, |view, window, cx| {
+                    view.input.read(cx).focus_handle(cx).is_focused(window)
+                })
+                .unwrap();
+            assert_eq!(is_focused, focused, "occluded={occluded}");
+            // A focused input leaves its input handler with the platform window; blur so the
+            // app can drop without a live handle.
+            window
+                .update(&mut cx, |_view, window, cx| window.blur(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn editing_keeps_the_caret_in_view() {
+        let mut fixture = BidiInputFixture::new("a", 8., 200., true, 1.0);
+        fixture.update_input(|state, cx| state.move_to(1, cx));
+        fixture
+            .cx
+            .update_window(fixture.window.into(), |_view, window, cx| {
+                fixture.input.update(cx, |state, cx| {
+                    state.replace_text_in_range(None, "\n\n\n\n\n", window, cx);
+                });
+            })
+            .unwrap();
+        fixture.cx.run_until_parked();
+
+        let scale = fixture.scale;
+        let field = only_quad(&mut fixture.cx, fixture.window.into(), INPUT_COLOR)
+            .map(|value| px(value.as_f32() / scale));
+        let caret = only_quad(&mut fixture.cx, fixture.window.into(), CARET_COLOR)
+            .map(|value| px(value.as_f32() / scale));
+        assert!(
+            caret.top() >= field.top() && caret.bottom() <= field.bottom(),
+            "caret={caret:?}, field={field:?}"
+        );
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn multi_line_selection_fills_continued_lines_to_the_field_edge() {
+        let text = "one\ntwo\nthree";
+        let end = "one\ntwo\nth".len();
+        let mut fixture = BidiInputFixture::new(text, 8., 200., true, 1.0);
+        fixture.update_input(|state, cx| {
+            state.move_to(1, cx);
+            state.select_to(end, cx);
+        });
+
+        let origin = fixture.origin();
+        let field = fixture.field_extent();
+        let line_height = fixture.line_height();
+        let (start_x, end_x) = (fixture.point(1).x, fixture.point(end).x);
+        let row = |index: f32| origin.y + line_height * index;
+        let (left, right) = (origin.x + field.start, origin.x + field.end);
+        fixture.assert_quads(
+            SELECTION_COLOR,
+            vec![
+                Bounds::from_corners(point(start_x, row(0.)), point(right, row(1.))),
+                Bounds::from_corners(point(left, row(1.)), point(right, row(2.))),
+                Bounds::from_corners(point(origin.x, row(2.)), point(end_x, row(3.))),
+            ],
+        );
+    }
 
     struct BidiInputView {
         input: Entity<EditableTextState>,
@@ -1090,6 +1323,14 @@ mod tests {
             bounds.origin + point(self.padding, self.padding) - scroll + document_offset
         }
 
+        fn field_extent(&mut self) -> Range<Pixels> {
+            let scale = self.scale;
+            let bounds = only_quad(&mut self.cx, self.window.into(), INPUT_COLOR)
+                .map(|value| px(value.as_f32() / scale));
+            let origin = self.origin();
+            bounds.left() + self.padding - origin.x..bounds.right() - self.padding - origin.x
+        }
+
         fn document(&mut self) -> Arc<ShapedText> {
             self.cx
                 .update(|cx| self.input.read(cx).layout_data.document.clone().unwrap())
@@ -1214,12 +1455,12 @@ mod tests {
         fn assert_caret_selection(&mut self, anchor: usize, expected_caret: CaretPosition) {
             let caret_idx = expected_caret.index;
             let range = anchor.min(caret_idx)..anchor.max(caret_idx);
-            let caret = self.cx.update(|cx| {
+            let (caret, selection) = self.cx.update(|cx| {
                 let state = self.input.read(cx);
                 assert_eq!(state.selected_byte_range(), range);
                 assert_eq!(state.caret_selection().caret, expected_caret);
 
-                state.caret_selection().caret
+                (state.caret_selection().caret, state.caret_selection())
             });
 
             let origin = self.origin();
@@ -1236,8 +1477,8 @@ mod tests {
                 )],
             );
 
-            let expected = document
-                .selection_bounds(range, line_height)
+            let field = self.field_extent();
+            let expected = selection_rects(&document, range, selection, line_height, field)
                 .into_iter()
                 .map(|bounds| Bounds::new(origin + bounds.origin, bounds.size))
                 .collect();
@@ -1627,18 +1868,20 @@ mod tests {
         fixture.scroll(point(px(45.), px(0.)));
 
         let origin = fixture.origin();
-        let expected = fixture
-            .document()
-            .selection_bounds(focus..anchor, px(28.))
-            .into_iter()
-            .map(|bounds| {
-                Bounds::new(
-                    origin + bounds.origin + point(px(0.), px(26.)),
-                    size(bounds.size.width, px(2.)),
-                )
-            })
-            .collect();
-        fixture.assert_quads(MARKED_COLOR, expected);
+        let scale = fixture.scale;
+        let marked = fixture.document().selection_bounds(focus..anchor, px(28.));
+        let underlines = fixture
+            .cx
+            .underline_bounds(fixture.window.into(), MARKED_COLOR)
+            .unwrap();
+        assert_eq!(underlines.len(), marked.len());
+        for (actual, expected) in underlines.into_iter().zip(marked) {
+            let actual = actual.map(|value| px(value.as_f32() / scale));
+            assert!((actual.left() - (origin.x + expected.left())).abs() <= px(1.));
+            assert!((actual.size.width - expected.size.width).abs() <= px(1.));
+            assert!(actual.size.height <= px(1.5));
+            assert!(actual.top() > origin.y + px(14.) && actual.bottom() <= origin.y + px(28.));
+        }
     }
 
     #[test]
