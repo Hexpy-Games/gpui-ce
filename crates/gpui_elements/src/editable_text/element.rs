@@ -33,7 +33,6 @@ pub fn editable_text(id: impl Into<ElementId>) -> EditableTextElement {
         colors: EditableTextColors::default(),
         caret_blink_interval: None,
         caret_width: px(2.),
-        hide_caret_with_selection: false,
         caret_height: relative(1.).into(),
     };
     this.interactivity.element_id = Some(id.into());
@@ -93,10 +92,6 @@ pub struct EditableTextElement {
     /// `relative(1.)`, which makes the caret as tall as the line.
     #[setters(generate, rename = "caret_h", into)]
     caret_height: DefiniteLength,
-    /// Hides the caret while text is selected, as native text fields do. Off by default,
-    /// which keeps the caret at the selection's moving end.
-    #[setters(generate)]
-    hide_caret_with_selection: bool,
 }
 
 /// EditableText styling that goes beyond what Style/StyleRefinement supports
@@ -481,13 +476,7 @@ impl Element for EditableTextElement {
         let is_focused = focus_handle.is_focused(window);
         let caret_visible = request_layout
             .caret
-            .update(cx, |caret, cx| caret.update_focus(is_focused, cx))
-            && !(self.hide_caret_with_selection
-                && !request_layout
-                    .state
-                    .read(cx)
-                    .selected_byte_range()
-                    .is_empty());
+            .update(cx, |caret, cx| caret.update_focus(is_focused, cx));
         window.set_focus_handle(&focus_handle, cx);
 
         let mut prepaint = self.interactivity.prepaint(
@@ -927,7 +916,8 @@ impl PrepaintElements {
             }),
         );
 
-        if prepaint.caret_visible {
+        // Native fields hide the caret while text is selected.
+        if prepaint.caret_visible && range.is_empty() {
             let caret_point = document_origin
                 + document
                     .visual_position_for_caret(state.visible_caret(), line_height)
