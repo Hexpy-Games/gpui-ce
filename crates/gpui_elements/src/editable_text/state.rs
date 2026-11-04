@@ -679,10 +679,6 @@ impl EditableTextState {
         // positive real number space (interactivity stores it in the negatives)
         let mut scroll_offset = Cow::Borrowed(&self.layout_data.scroll_bounds.origin);
 
-        if self.layout_data.scroll_bounds.contains(&point) {
-            return None;
-        }
-
         // No existing "shift bounds origin so <point> is contained", but that is effectively what this does
         if point.x < self.layout_data.scroll_bounds.left() {
             scroll_offset.to_mut().x = point.x;
