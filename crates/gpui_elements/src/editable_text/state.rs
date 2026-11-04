@@ -328,7 +328,7 @@ impl AccessibilityTextMetrics {
                                 ResolvedDirection::LeftToRight => extent.start - x_range.start,
                                 ResolvedDirection::RightToLeft => x_range.end - extent.end,
                             };
-                            (position.0, (extent.end - extent.start).0)
+                            (position.as_f32(), (extent.end - extent.start).as_f32())
                         }
                         None => (previous_end, 0.),
                     };

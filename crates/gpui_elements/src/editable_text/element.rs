@@ -257,17 +257,17 @@ fn accessibility_prepaint(
     };
     let anchor = run_position(&runs, anchor);
     let focus = run_position(&runs, focus);
-    let line_height = state.layout_data.line_height.0;
+    let line_height = state.layout_data.line_height.as_f32();
     let runs = runs
         .into_iter()
         .map(|run| {
             let mut node = accesskit::Node::new(accesskit::Role::TextRun);
             node.set_value(&state.as_str()[run.byte_range]);
             node.set_character_lengths(metrics.character_lengths[run.characters].to_vec());
-            let y0 = (document_origin.y.0 + line_height * run.line_index as f32) * scale;
+            let y0 = (document_origin.y.as_f32() + line_height * run.line_index as f32) * scale;
             node.set_bounds(accesskit::Rect {
-                x0: ((document_origin.x.0 + run.x_range.start.0) * scale) as f64,
-                x1: ((document_origin.x.0 + run.x_range.end.0) * scale) as f64,
+                x0: ((document_origin.x + run.x_range.start).as_f32() * scale) as f64,
+                x1: ((document_origin.x + run.x_range.end).as_f32() * scale) as f64,
                 y0: y0 as f64,
                 y1: (y0 + line_height * scale) as f64,
             });
