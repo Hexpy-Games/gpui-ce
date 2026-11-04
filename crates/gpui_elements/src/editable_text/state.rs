@@ -1033,6 +1033,14 @@ impl EditableTextState {
         self.history.as_ref()
     }
 
+    /// Forgets undo and redo, for when the host takes the text away (for example, a sent
+    /// message), so undo cannot bring it back.
+    pub fn clear_history(&mut self) {
+        if let Some(history) = &mut self.history {
+            history.clear();
+        }
+    }
+
     fn record_history(&mut self, range: Range<usize>, new_text_len: usize) {
         // Don't record during IME composition
         if self.marked_range.is_some() {
