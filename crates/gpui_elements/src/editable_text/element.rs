@@ -2162,10 +2162,13 @@ mod tests {
             }
             previous_rows = Some(rows);
             let field = only_quad(&mut cx, window.into(), INPUT_COLOR);
+            let scale = window
+                .update(&mut cx, |_view, window, _cx| window.scale_factor())
+                .unwrap();
             cx.update(|cx| {
                 assert_eq!(
                     input.read(cx).layout_data.state.options.wrap_width,
-                    Some(px(field.size.width.as_f32()))
+                    Some(px(field.size.width.as_f32() / scale))
                 );
             });
         }
