@@ -72,3 +72,6 @@ rand.workspace = true
 path = { package = "gpui_ce_path", version = "0.2.2", path = "../gpui_path", features = [
   "test-support",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }

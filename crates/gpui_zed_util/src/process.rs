@@ -206,60 +206,70 @@ mod windows_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// Spawns a process tree `powershell -> ping` via `Child::spawn` and
-    /// returns the `Child` along with the pid of the grandchild (`ping`).
-    fn spawn_process_tree(temp_dir: &std::path::Path) -> (Child, u32) {
-        let pid_file = temp_dir.join("grandchild_pid");
-        // Single quotes don't escape themselves in PowerShell; double them so
-        // temp paths containing `'` can't break out of the literal.
-        let pid_file_literal = pid_file.display().to_string().replace('\'', "''");
-        let mut command = std::process::Command::new("powershell.exe");
-        // `-ExecutionPolicy Bypass` keeps locked-down CI images from refusing
-        // to run the snippet, and writing the pid with the .NET API (rather
-        // than `Set-Content`) pins the encoding to plain ASCII without a BOM
-        // on both Windows PowerShell 5.1 and PowerShell 7+.
-        command
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"])
-            .arg(format!(
-                "$ErrorActionPreference='Stop'; \
-                 $p = Start-Process -FilePath ping.exe -ArgumentList @('-n','60','127.0.0.1') -PassThru -WindowStyle Hidden; \
-                 [System.IO.File]::WriteAllText('{pid_file_literal}', \"$($p.Id)\", [System.Text.Encoding]::ASCII); \
-                 Wait-Process -Id $p.Id"
-            ));
-        // Capture powershell's stderr so a startup failure (missing binary,
-        // policy violation, bad path quoting, ...) is visible in the panic
-        // below instead of vanishing into the null device.
-        let stderr_log = std::fs::File::create(temp_dir.join("powershell-stderr.log"))
-            .expect("failed to create powershell stderr log");
-        let child = Child::spawn(
-            command,
-            Stdio::null(),
-            Stdio::null(),
-            Stdio::from(stderr_log),
-        )
-        .expect("failed to spawn powershell");
+    /// Spawns a process tree `cmd.exe -> ping.exe` via `Child::spawn` and
+    /// returns the `Child`, the pid of the grandchild (`ping.exe`), and the
+    /// stdout pipe both share. Keep the pipe open until the grandchild has
+    /// been checked: once it closes, `ping.exe` exits on its next write.
+    fn spawn_process_tree() -> (Child, u32, smol::process::ChildStdout) {
+        let mut command = std::process::Command::new("cmd.exe");
+        command.args(["/C", "ping", "-n", "60", "127.0.0.1"]);
+        let mut child = Child::spawn(command, Stdio::null(), Stdio::piped(), Stdio::inherit())
+            .expect("failed to spawn cmd.exe");
+        let mut stdout = child.stdout.take().expect("child stdout should be piped");
 
-        // PowerShell cold start (JIT + Defender scan) can take several seconds
-        // on CI, especially with sibling tests starting their own instances
-        // concurrently, so allow ample headroom before declaring the handoff
-        // lost.
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let grandchild_pid = loop {
-            if let Some(pid) = read_grandchild_pid(&pid_file) {
-                break pid;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for grandchild pid file: {}",
-                describe_pid_handoff(temp_dir, &pid_file)
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        };
+        // Only ping.exe writes to stdout, so its first byte proves the
+        // grandchild is running. If it never starts, cmd.exe exits, the pipe
+        // closes and the read returns 0.
+        let mut first_byte = [0u8; 1];
+        let read = smol::block_on(smol::io::AsyncReadExt::read(&mut stdout, &mut first_byte))
+            .expect("failed to read child stdout");
+        assert_eq!(read, 1, "cmd.exe exited before ping.exe wrote to stdout");
+
+        let grandchild_pid =
+            child_pid_named(child.id(), "ping.exe").expect("ping.exe should be a child of cmd.exe");
         assert!(
             process_is_alive(grandchild_pid),
             "grandchild should be alive after spawning"
         );
-        (child, grandchild_pid)
+        (child, grandchild_pid, stdout)
+    }
+
+    /// Returns the pid of the process named `exe_name` whose parent is
+    /// `parent_pid`, from one snapshot of the running processes.
+    fn child_pid_named(parent_pid: u32, exe_name: &str) -> Option<u32> {
+        use windows::Win32::{
+            Foundation::CloseHandle,
+            System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+        };
+
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+                .expect("failed to snapshot processes");
+            let mut entry = PROCESSENTRY32W {
+                dwSize: size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut found = None;
+            let mut has_entry = Process32FirstW(snapshot, &mut entry).is_ok();
+            while has_entry {
+                let name_len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&unit| unit == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+                if entry.th32ParentProcessID == parent_pid && name.eq_ignore_ascii_case(exe_name) {
+                    found = Some(entry.th32ProcessID);
+                    break;
+                }
+                has_entry = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            CloseHandle(snapshot).expect("failed to close process snapshot");
+            found
+        }
     }
 
     fn process_is_alive(pid: u32) -> bool {
@@ -282,54 +292,6 @@ mod windows_tests {
         }
     }
 
-    /// Reads the grandchild pid without assuming an encoding: PowerShell
-    /// output may carry a BOM or trailing newlines depending on version and
-    /// host configuration, so decode lossily and parse the digit run.
-    fn read_grandchild_pid(pid_file: &std::path::Path) -> Option<u32> {
-        let bytes = std::fs::read(pid_file).ok()?;
-        let text = String::from_utf8_lossy(&bytes);
-        // Strip a UTF-8/UTF-16 BOM if one was emitted, then accept the pid
-        // surrounded by arbitrary whitespace/newlines.
-        let text = text.trim().trim_start_matches('\u{feff}').trim();
-        text.parse::<u32>().ok()
-    }
-
-    /// Builds a diagnostic summary for a pid-handoff timeout: whether the
-    /// file appeared (and what it contains), what else is in the temp dir,
-    /// and any stderr PowerShell left behind.
-    fn describe_pid_handoff(temp_dir: &std::path::Path, pid_file: &std::path::Path) -> String {
-        let pid_state = match std::fs::read(pid_file) {
-            Ok(bytes) => format!(
-                "pid file exists ({} bytes, contents: {:?})",
-                bytes.len(),
-                String::from_utf8_lossy(&bytes)
-            ),
-            Err(error) => format!("pid file missing ({error})"),
-        };
-        let dir_state = match std::fs::read_dir(temp_dir) {
-            Ok(entries) => {
-                let names: Vec<String> = entries
-                    .filter_map(|entry| {
-                        entry
-                            .ok()
-                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    })
-                    .collect();
-                format!("temp dir entries: {names:?}")
-            }
-            Err(error) => format!("temp dir unreadable ({error})"),
-        };
-        let stderr_state = match std::fs::read_to_string(temp_dir.join("powershell-stderr.log")) {
-            Ok(log) if log.trim().is_empty() => "powershell stderr: <empty>".to_string(),
-            Ok(log) => format!("powershell stderr: {log:?}"),
-            Err(error) => format!("powershell stderr log unreadable ({error})"),
-        };
-        format!(
-            "{pid_state}; {dir_state}; {stderr_state}; pid file: {}",
-            pid_file.display()
-        )
-    }
-
     fn assert_process_exits(pid: u32, message: &str) {
         // Job-object termination is normally near-instant, but allow headroom
         // for a loaded CI worker to reap the whole tree.
@@ -342,8 +304,7 @@ mod windows_tests {
 
     #[test]
     fn test_kill_terminates_grandchildren() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let (mut child, grandchild_pid) = spawn_process_tree(temp_dir.path());
+        let (mut child, grandchild_pid, stdout) = spawn_process_tree();
 
         child.kill().expect("failed to kill child");
 
@@ -351,12 +312,12 @@ mod windows_tests {
             grandchild_pid,
             "grandchild should be terminated after killing the child",
         );
+        drop(stdout);
     }
 
     #[test]
     fn test_drop_terminates_grandchildren() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let (child, grandchild_pid) = spawn_process_tree(temp_dir.path());
+        let (child, grandchild_pid, stdout) = spawn_process_tree();
 
         drop(child);
 
@@ -364,5 +325,6 @@ mod windows_tests {
             grandchild_pid,
             "grandchild should be terminated after dropping the child",
         );
+        drop(stdout);
     }
 }
