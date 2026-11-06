@@ -960,6 +960,8 @@ impl BackdropFilter {
 pub struct BackdropLens {
     /// Radius of the circular bevel, measured inward from the edge (capped at the half size).
     pub bezel: f32,
+    /// CSS `saturate()` amount applied to the sampled backdrop after the blur; `None` leaves it unchanged
+    pub saturation: Option<f32>,
     /// Inward shift per unit of bevel slope (ybouane's refraction strength).
     pub refraction: f32,
     /// Rim highlight and Fresnel strength, 0 to 1.
@@ -1024,7 +1026,7 @@ pub struct BackdropLens {
 impl BackdropLens {
     /// Whether the lens changes anything.
     pub fn is_active(&self) -> bool {
-        self.bezel > 0.0
+        self.bezel > 0.0 || self.saturation.is_some()
     }
 
     /// How far outside the shape the lens reads the backdrop, in device pixels: its samples

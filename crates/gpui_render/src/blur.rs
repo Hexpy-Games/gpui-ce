@@ -120,6 +120,7 @@ impl BlurUniforms {
         self.lens_fold_band = lens.fold_band;
         self.lens_fold_depth = lens.fold_depth;
         self.lens_curve = lens.curve;
+        self.lens_saturation = lens.saturation.unwrap_or(1.0);
         // padding2 flags (no layout change): bit 0 tone curve, bit 1 full-shape sharp pass. With
         // the tone on, its coefficients ride in lens_refraction, lens_depth and lens_shade, which
         // only the v5 bevel (fold off) and the inner shade read; the tone forces both off.
@@ -372,7 +373,7 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         lens_fold_band: 0.0,
         lens_fold_depth: 0.0,
         lens_curve: 0.0,
-        padding0: 0,
+        lens_saturation: 1.0,
         padding1: 0,
         padding2: 0,
         wp_mode: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
@@ -395,7 +396,8 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
 
 #[cfg(test)]
 mod tests {
-    use super::downsampled_dimension;
+    use super::{BlurUniforms, FilterCompositeClip, downsampled_dimension};
+    use gpui::{BackdropLens, Bounds, Corners};
 
     #[test]
     fn downsampled_dimensions_cover_odd_edges() {
@@ -404,5 +406,32 @@ mod tests {
         assert_eq!(downsampled_dimension(2), 1);
         assert_eq!(downsampled_dimension(3), 2);
         assert_eq!(downsampled_dimension(33), 17);
+    }
+
+    #[test]
+    fn lens_saturation_defaults_to_one_and_uses_the_requested_amount() {
+        let uniforms = BlurUniforms::composite(
+            Bounds::default(),
+            Bounds::default(),
+            Corners::default(),
+            0.0,
+            1.0,
+            FilterCompositeClip::ContentShape,
+            [1.0, 1.0],
+            [1.0, 1.0],
+        );
+        assert_eq!(
+            uniforms
+                .with_lens(BackdropLens {
+                    saturation: Some(1.35),
+                    ..Default::default()
+                })
+                .lens_saturation,
+            1.35
+        );
+        assert_eq!(
+            uniforms.with_lens(BackdropLens::default()).lens_saturation,
+            1.0
+        );
     }
 }

@@ -250,7 +250,7 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         lens_fold_band,
         lens_fold_depth,
         lens_curve,
-        padding0,
+        lens_saturation,
         padding1,
         padding2,
         wp_mode,
