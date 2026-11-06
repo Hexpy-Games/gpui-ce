@@ -779,6 +779,8 @@ impl PrelayoutState {
                     text_align: text_style.text_align,
                     direction,
                     unicode_bidi,
+                    word_break: text_style.word_break,
+                    overflow_wrap: text_style.overflow_wrap,
                 };
 
                 let layout_state = self.state.read(cx).layout_data.state.clone();

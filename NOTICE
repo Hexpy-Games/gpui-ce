@@ -63,6 +63,9 @@ changed file starts with a notice line.
   element and state).
 - EditableText layout: measuring at several widths in one frame keeps
   the layout of the final width (gpui_elements editable_text element).
+- Text wrapping: word-break and overflow-wrap options reach Parley layouts
+  (gpui style, styled, text layout and text element; gpui_ce_parley text
+  system; gpui_elements editable_text element).
 
 The lens model was written with reference to these MIT-licensed
 projects; no code was copied from them:

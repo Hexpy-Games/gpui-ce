@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     ActiveTooltip, AnyView, App, AppContext, Bounds, DispatchPhase, Element, ElementId,
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
@@ -867,6 +868,8 @@ impl TextLayout {
             text_align: text_style.text_align,
             direction,
             unicode_bidi,
+            word_break: text_style.word_break,
+            overflow_wrap: text_style.overflow_wrap,
         };
         let truncation = Self::evaluate_overflow(text_style, known_dimensions, available_space);
 

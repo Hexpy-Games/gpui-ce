@@ -1,4 +1,33 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{Pixels, ResolvedDirection, TextAlign, TextRun, UnicodeBidi};
+
+/// Controls whether line breaking is allowed within words.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
+)]
+pub enum WordBreak {
+    /// Use normal line breaking rules.
+    #[default]
+    Normal,
+    /// Keep words together where possible.
+    KeepAll,
+    /// Allow breaks between any characters.
+    BreakAll,
+}
+
+/// Controls whether long words may break to avoid overflowing a line.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
+)]
+pub enum OverflowWrap {
+    /// Break words only at their normal line-break opportunities.
+    #[default]
+    Normal,
+    /// Allow breaks at any character when a word would overflow.
+    Anywhere,
+    /// Allow emergency word breaks when a word would overflow.
+    BreakWord,
+}
 
 /// The paragraph base-direction policy supplied to a text backend.
 #[doc(hidden)]
@@ -38,6 +67,10 @@ pub struct TextLayoutOptions {
     pub direction: ParagraphDirection,
     /// Bidirectional behavior applied to the complete document.
     pub unicode_bidi: UnicodeBidi,
+    /// Word-level line-breaking behavior.
+    pub word_break: WordBreak,
+    /// Emergency wrapping behavior for long words.
+    pub overflow_wrap: OverflowWrap,
 }
 
 /// Complete input for one backend-owned text document layout.

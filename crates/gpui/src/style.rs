@@ -2,9 +2,9 @@
 use crate::{
     AbsoluteLength, App, Background, BorderStyle, Bounds, ColorExt, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length, PaintQuad,
-    Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size, SizeRefinement, Styled,
-    TextRun, Window, black, phi, point, px, rems, size,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length,
+    OverflowWrap, PaintQuad, Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size,
+    SizeRefinement, Styled, TextRun, Window, WordBreak, black, phi, point, px, rems, size,
 };
 use collections::HashSet;
 use palette::{Hsla, IntoColor, rgb::Rgba};
@@ -697,6 +697,12 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How words may break across lines.
+    pub word_break: WordBreak,
+
+    /// Whether long words may break to avoid overflowing a line.
+    pub overflow_wrap: OverflowWrap,
+
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
 
@@ -732,6 +738,8 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
