@@ -6,8 +6,8 @@ use super::{
     path_types,
 };
 use gpui::{
-    FilterRenderTarget, MonochromeSprite, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand,
-    Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
+    FilterRenderTarget, MonochromeSprite, Point, PolychromeSprite, PrimitiveBatch, Quad,
+    RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
@@ -470,6 +470,8 @@ impl<'a> FrameEncoder<'a> {
                                 corner_smoothing: filter.corner_smoothing,
                                 blur_radius: filter.max_blur_radius(),
                                 opacity: filter.opacity,
+                                scale: 1.0,
+                                scale_origin: Point::default(),
                                 clip: FilterCompositeClip::RoundedBounds,
                                 lens: filter.lens,
                             },
@@ -533,6 +535,8 @@ impl<'a> FrameEncoder<'a> {
                             corner_smoothing: boundary.corner_smoothing,
                             blur_radius: boundary.max_blur_radius(),
                             opacity: boundary.opacity,
+                            scale: boundary.scale,
+                            scale_origin: boundary.scale_origin,
                             clip: FilterCompositeClip::ContentShape,
                             lens: Default::default(),
                         },

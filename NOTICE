@@ -13,6 +13,10 @@ changed file starts with a notice line.
 
 - Backdrop lens saturation (CSS `saturate()`) after backdrop blur (gpui
   scene; gpui_render blur and shaders).
+- Element scale around a configurable transform origin, composited as a
+  group and applied to hitboxes (gpui style, styled, div, scene and
+  window; gpui_render blur and shaders; gpui_wgpu renderer; gpui_windows
+  DirectX renderer).
 - Backdrop lens: liquid-glass refraction through a continuous distance
   field, dispersion, frost, rim light, tone curve, full-shape detail
   pass and hairline ring, with per-lens backdrop snapshots (gpui scene,

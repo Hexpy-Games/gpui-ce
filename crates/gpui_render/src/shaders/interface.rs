@@ -267,7 +267,10 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         wp_p2,
         wp_p3,
         wp_p4,
-        wp_p5
+        wp_p5,
+        composite_scale,
+        composite_scale_padding,
+        composite_scale_origin
     ),
     render_layout!(crate::path_types::PathSprite, "PathSprite", bounds),
     render_layout!(

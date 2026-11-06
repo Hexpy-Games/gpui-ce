@@ -39,6 +39,8 @@ pub struct FilterCompositeParameters {
     pub corner_smoothing: f32,
     pub blur_radius: f32,
     pub opacity: f32,
+    pub scale: f32,
+    pub scale_origin: gpui::Point<ScaledPixels>,
     pub clip: FilterCompositeClip,
     pub lens: BackdropLens,
 }
@@ -135,6 +137,12 @@ impl BlurUniforms {
             self.lens_curve = lens.hairline[0];
             self.lens_fresnel = lens.hairline[1];
         }
+        self
+    }
+
+    pub fn with_composite_scale(mut self, scale: f32, origin: gpui::Point<ScaledPixels>) -> Self {
+        self.composite_scale = scale;
+        self.composite_scale_origin = vec2f(origin.x.0, origin.y.0);
         self
     }
 
@@ -391,6 +399,9 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         wp_p3: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
         wp_p4: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
         wp_p5: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        composite_scale: 1.0,
+        composite_scale_padding: 0.0,
+        composite_scale_origin: vec2f(0.0, 0.0),
     }
 }
 

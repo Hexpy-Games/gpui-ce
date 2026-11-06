@@ -829,6 +829,8 @@ mod tests {
             corner_smoothing: 0.0,
             filters,
             opacity,
+            scale: 1.0,
+            scale_origin: Point::default(),
             is_start: true,
         };
         scene.insert_primitive(boundary.clone());

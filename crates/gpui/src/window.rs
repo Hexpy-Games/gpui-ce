@@ -1320,6 +1320,7 @@ pub struct Window {
     pub(crate) measurement_unicode_bidi: UnicodeBidi,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+    element_scale_stack: Vec<(f32, Point<Pixels>)>,
     /// Bounds of the parent `Div` currently prepainting this element as one of its children.
     /// Inset transitions use these bounds to resolve `auto` from the child's rendered position.
     style_transition_containing_bounds: Option<Bounds<Pixels>>,
@@ -2077,6 +2078,7 @@ impl Window {
             measurement_unicode_bidi: UnicodeBidi::Normal,
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
+            element_scale_stack: Vec::new(),
             style_transition_containing_bounds: None,
             content_mask_stack: Vec::new(),
             requested_autoscroll: None,
@@ -4068,6 +4070,23 @@ impl Window {
         result
     }
 
+    pub(crate) fn with_element_scale_hitboxes<R>(
+        &mut self,
+        scale: Option<f32>,
+        origin: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_prepaint();
+        let Some(scale) = scale.filter(|scale| *scale != 1.0) else {
+            return f(self);
+        };
+
+        self.element_scale_stack.push((scale, origin));
+        let result = f(self);
+        self.element_scale_stack.pop();
+        result
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
@@ -4094,6 +4113,39 @@ impl Window {
             corner_smoothing: 0.0,
             filters: SmallVec::new(),
             opacity,
+            scale: 1.0,
+            scale_origin: Point::default(),
+            is_start: true,
+        };
+
+        self.with_filter_boundary(boundary, paint)
+    }
+
+    pub(crate) fn with_element_scale<R>(
+        &mut self,
+        scale: Option<f32>,
+        origin: Point<Pixels>,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        let Some(scale) = scale.filter(|scale| *scale != 1.0) else {
+            return paint(self);
+        };
+
+        let bounds = self.cover_bounds(Bounds::new(Point::default(), self.viewport_size()));
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds,
+            content_mask: ContentMask {
+                bounds,
+                fade_out: Edges::default(),
+            },
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale,
+            scale_origin: origin.scale(self.scale_factor()),
             is_start: true,
         };
 
@@ -4734,6 +4786,8 @@ impl Window {
             corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
             filters,
             opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Point::default(),
             is_start: true,
         };
 
@@ -5639,6 +5693,14 @@ impl Window {
     ) -> &mut Hitbox {
         self.invalidator.debug_assert_prepaint();
 
+        let bounds =
+            self.element_scale_stack
+                .iter()
+                .rev()
+                .fold(bounds, |bounds, (scale, origin)| Bounds {
+                    origin: *origin + (bounds.origin - *origin) * *scale,
+                    size: size(bounds.size.width * *scale, bounds.size.height * *scale),
+                });
         let content_mask = self.content_mask();
         let hitbox_id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();

@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Edges, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures,
@@ -969,6 +970,21 @@ pub trait Styled: Sized {
     /// Sets the opacity of this element and its children, composited together as one group.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);
+        self
+    }
+
+    /// Sets the uniform scale of this element and its children.
+    fn scale(mut self, s: f32) -> Self {
+        self.style().scale = Some(s);
+        self
+    }
+
+    /// Sets the transform origin as fractions of this element's bounds.
+    fn transform_origin(mut self, x: f32, y: f32) -> Self {
+        self.style().transform_origin = gpui::PointRefinement {
+            x: Some(x),
+            y: Some(y),
+        };
         self
     }
 

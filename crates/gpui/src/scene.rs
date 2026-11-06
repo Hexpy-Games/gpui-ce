@@ -1045,10 +1045,11 @@ impl From<BackdropFilter> for Primitive {
     }
 }
 
-/// The start or end marker of a content-filter or opacity isolation group. The element's
-/// subtree is painted between a matched start/end pair; the renderer redirects that span into
-/// an offscreen target, filters it, and composites it back at `bounds`. Produces the CSS
-/// `filter` effect (e.g. blurring the element and its children as a single group).
+/// The start or end marker of a content-filter, opacity, or scale isolation group. The
+/// element's subtree is painted between a matched start/end pair; the renderer redirects that
+/// span into an offscreen target, filters it, and composites it back at `bounds` with its
+/// configured opacity and scale. Produces the CSS `filter` effect (e.g. blurring the element
+/// and its children as a single group).
 #[derive(Debug, Clone)]
 #[expect(missing_docs)]
 pub struct FilterBoundary {
@@ -1058,11 +1059,16 @@ pub struct FilterBoundary {
     pub corner_radii: Corners<ScaledPixels>,
     pub corner_smoothing: f32,
     /// The filter chain applied to the isolated group, in scene (device-pixel) space. Identity
-    /// filters are dropped at paint time. An empty chain represents an opacity-only group.
+    /// filters are dropped at paint time. An empty chain represents an opacity-only or
+    /// scale-only group.
     /// Inline capacity 4 (same struct size as 1 here — see [`BackdropFilter::filters`]).
     pub filters: SmallVec<[ScaledFilter; 4]>,
     /// Opacity applied once when compositing the completed group into its parent.
     pub opacity: f32,
+    /// Uniform scale applied while compositing the completed group into its parent.
+    pub scale: f32,
+    /// Origin of the group scale in scene (device-pixel) space.
+    pub scale_origin: Point<ScaledPixels>,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
 }
@@ -1601,6 +1607,8 @@ mod tests {
             corner_smoothing: 0.0,
             filters: smallvec::smallvec![ScaledFilter::Blur(scaled(8.0))],
             opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Point::default(),
             is_start,
         }
     }

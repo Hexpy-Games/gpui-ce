@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     AbsoluteLength, App, Background, BorderStyle, Bounds, ColorExt, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
@@ -390,6 +391,13 @@ pub struct Style {
 
     /// Opacity applied to this element and its children after compositing them as a group.
     pub opacity: Option<f32>,
+
+    /// Uniform scale applied to this element and its children after compositing them as a group.
+    pub scale: Option<f32>,
+
+    /// Transform origin as fractions of this element's bounds.
+    #[refineable]
+    pub transform_origin: Point<f32>,
 
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
@@ -1151,6 +1159,8 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            scale: None,
+            transform_origin: point(0.5, 0.5),
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

@@ -650,6 +650,8 @@ impl DirectXRenderer {
                                 filter.max_blur_radius(),
                                 filter.opacity,
                                 true,
+                                1.0,
+                                Point::default(),
                                 filter.lens,
                             )?;
                         }
@@ -699,6 +701,8 @@ impl DirectXRenderer {
                         boundary.max_blur_radius(),
                         boundary.opacity,
                         false,
+                        boundary.scale,
+                        boundary.scale_origin,
                         BackdropLens::default(),
                     );
                     self.active_render_target = parent_rtv.clone();
@@ -1301,6 +1305,8 @@ impl DirectXRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
+        scale: f32,
+        scale_origin: Point<ScaledPixels>,
         lens: BackdropLens,
     ) -> Result<()> {
         if clip_rounded && blur_radius <= 0.0 && !lens.is_active() {
@@ -1408,7 +1414,8 @@ impl DirectXRenderer {
             source_size,
             full_size,
         )
-        .with_lens(lens);
+        .with_lens(lens)
+        .with_composite_scale(scale, scale_origin);
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -1452,6 +1459,7 @@ impl DirectXRenderer {
                     full_size,
                 )
                 .with_lens(lens)
+                .with_composite_scale(scale, scale_origin)
                 .with_sharp_rim_pass(lens.sharp_rim),
                 &resources.viewport,
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
@@ -3070,6 +3078,8 @@ mod tests {
             corner_smoothing: 0.0,
             filters: SmallVec::new(),
             opacity,
+            scale: 1.0,
+            scale_origin: Point::default(),
             is_start: true,
         };
         scene.insert_primitive(boundary.clone());

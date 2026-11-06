@@ -3089,26 +3089,34 @@ impl Interactivity {
                 }
 
                 window.with_text_style(style.text_style().cloned(), |window| {
-                    window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
-                        |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                let hitbox = window.insert_hitbox_mut(bounds, self.hitbox_behavior);
-                                // attach the group of the div to the hitbox's tags so it can be queried in hit-test related listeners
-                                if let Some(group) = &self.group {
-                                    hitbox.tags.push(group.clone());
-                                }
-                                Some(hitbox.clone())
-                            } else {
-                                None
-                            };
+                    let origin = bounds.origin
+                        + point(
+                            bounds.size.width * style.transform_origin.x,
+                            bounds.size.height * style.transform_origin.y,
+                        );
+                    window.with_element_scale_hitboxes(style.scale, origin, |window| {
+                        window.with_content_mask(
+                            style.overflow_mask(bounds, window.rem_size()),
+                            |window| {
+                                let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                                    let hitbox =
+                                        window.insert_hitbox_mut(bounds, self.hitbox_behavior);
+                                    // attach the group of the div to the hitbox's tags so it can be queried in hit-test related listeners
+                                    if let Some(group) = &self.group {
+                                        hitbox.tags.push(group.clone());
+                                    }
+                                    Some(hitbox.clone())
+                                } else {
+                                    None
+                                };
 
-                            let scroll_offset =
-                                self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
-                            (result, element_state)
-                        },
-                    )
+                                let scroll_offset =
+                                    self.clamp_scroll_position(bounds, &style, window, cx);
+                                let result = f(&style, scroll_offset, hitbox, window, cx);
+                                (result, element_state)
+                            },
+                        )
+                    })
                 })
             },
         )
@@ -3347,7 +3355,14 @@ impl Interactivity {
                     });
                 };
 
-                style.paint(bounds, window, cx, paint_text_style);
+                let origin = bounds.origin
+                    + point(
+                        bounds.size.width * style.transform_origin.x,
+                        bounds.size.height * style.transform_origin.y,
+                    );
+                window.with_element_scale(style.scale, origin, |window| {
+                    style.paint(bounds, window, cx, paint_text_style);
+                });
 
                 ((), element_state)
             },
@@ -5235,6 +5250,64 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn scale_paints_a_scaled_filter_boundary_pair(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            div().size(px(100.)).scale(0.5).child(
+                canvas(
+                    |_, _, _| (),
+                    |bounds, _, window, _| {
+                        window.paint_quad(crate::PaintQuad::new(bounds).background(crate::red()));
+                    },
+                )
+                .size_full(),
+            )
+        });
+
+        let (boundaries, scale_factor) = window.update(|window, _| {
+            (
+                window.rendered_frame.scene.filter_boundaries.clone(),
+                window.scale_factor(),
+            )
+        });
+        assert_eq!(boundaries.len(), 2);
+        assert!(boundaries[0].is_start);
+        assert!(!boundaries[1].is_start);
+        assert_eq!(boundaries[0].scale, 0.5);
+        assert_eq!(boundaries[1].scale, 0.5);
+        let expected_origin = point(
+            crate::ScaledPixels(50.0 * scale_factor),
+            crate::ScaledPixels(50.0 * scale_factor),
+        );
+        assert_eq!(boundaries[0].scale_origin, expected_origin);
+        assert_eq!(boundaries[1].scale_origin, expected_origin);
+    }
+
+    #[gpui::test]
+    fn scale_transform_origin_moves_hitbox_bounds(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            div()
+                .size(px(100.))
+                .id("scaled-hitbox")
+                .scale(0.5)
+                .transform_origin(0.0, 0.0)
+                .on_click(|_, _, _| {})
+        });
+
+        let hitbox = window.update(|window, _| {
+            window
+                .rendered_frame
+                .hitboxes
+                .first()
+                .expect("scaled div should insert a hitbox")
+                .clone()
+        });
+        assert!(hitbox.contains(&point(px(40.), px(40.))));
+        assert!(!hitbox.contains(&point(px(60.), px(60.))));
+    }
 
     #[gpui::test]
     fn inline_div_places_element_children_in_text_flow(cx: &mut TestAppContext) {

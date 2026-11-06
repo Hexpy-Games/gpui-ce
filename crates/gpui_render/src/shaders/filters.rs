@@ -145,6 +145,9 @@ pub mod blur {
         pub wp_p3: Vec4f,
         pub wp_p4: Vec4f,
         pub wp_p5: Vec4f,
+        pub composite_scale: f32,
+        pub composite_scale_padding: f32,
+        pub composite_scale_origin: Vec2f,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
 
@@ -172,12 +175,21 @@ pub mod blur {
         let b = get!(BLUR_LOCALS).bounds;
         let grow = select(0.0, 2.0, get!(BLUR_LOCALS).lens_bezel > 0.0);
         let unit_position = rectangle_corner(vertex_id);
-        let viewport_position =
+        let source_position =
             b.origin - vec2f(grow, grow) + unit_position * (b.size + vec2f(2.0 * grow, 2.0 * grow));
+        let mut viewport_position = source_position;
+        let mut content_mask = get!(BLUR_LOCALS).content_mask;
+        if get!(BLUR_LOCALS).composite_scale != 1.0 {
+            let scale = get!(BLUR_LOCALS).composite_scale;
+            let origin = get!(BLUR_LOCALS).composite_scale_origin;
+            viewport_position = origin + (source_position - origin) * scale;
+            content_mask.origin = origin + (content_mask.origin - origin) * scale;
+            content_mask.size = content_mask.size * scale;
+        }
         BlurCompositeVertexData {
             position: viewport_to_clip_position(viewport_position),
             texture_coordinates: unit_position,
-            clip_distances: clip_distances(viewport_position, get!(BLUR_LOCALS).content_mask),
+            clip_distances: clip_distances(viewport_position, content_mask),
         }
     }
 
@@ -188,6 +200,19 @@ pub mod blur {
             position / get!(BLUR_LOCALS).target_size,
             0.0,
         )
+    }
+
+    pub fn blur_composite_source_position(
+        destination_position: Vec2f,
+        texture_coordinates: Vec2f,
+    ) -> Vec2f {
+        let locals = get!(BLUR_LOCALS);
+        if locals.composite_scale == 1.0 {
+            return destination_position;
+        }
+        let grow = select(0.0, 2.0, locals.lens_bezel > 0.0);
+        locals.bounds.origin - vec2f(grow, grow)
+            + texture_coordinates * (locals.bounds.size + vec2f(2.0 * grow, 2.0 * grow))
     }
 
     /// Slope of a circular bevel of radius `bezel` at depth `d` inside the edge, from the height
@@ -716,7 +741,10 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
-        blur_composite_color(input.position.xy(), coverage)
+        blur_composite_color(
+            blur_composite_source_position(input.position.xy(), input.texture_coordinates),
+            coverage,
+        )
     }
 
     #[derive(Wgsl)]
@@ -2077,6 +2105,9 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
-        blur_composite_color(input.position.xy(), coverage)
+        blur_composite_color(
+            blur_composite_source_position(input.position.xy(), input.texture_coordinates),
+            coverage,
+        )
     }
 }
