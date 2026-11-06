@@ -66,6 +66,8 @@ changed file starts with a notice line.
 - Text wrapping: word-break and overflow-wrap options reach Parley layouts
   (gpui style, styled, text layout and text element; gpui_ce_parley text
   system; gpui_elements editable_text element).
+- Native popup menus return a selected item index on macOS and Windows
+  (gpui platform and window; gpui_macos window; gpui_windows window).
 
 The lens model was written with reference to these MIT-licensed
 projects; no code was copied from them:

@@ -1012,6 +1012,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn request_decorations(&self, _decorations: WindowDecorations) {}
     fn show_window_menu(&self, _position: Point<Pixels>) {}
+    fn popup_menu(
+        &self,
+        _items: &[PopupMenuItem],
+        _selected: Option<usize>,
+        _anchor: Bounds<Pixels>,
+    ) -> Option<oneshot::Receiver<Option<usize>>> {
+        None
+    }
     fn start_window_move(&self) {}
     fn can_start_external_drag(&self) -> bool {
         false
@@ -3272,6 +3280,25 @@ pub enum PromptButton {
     Cancel(SharedString),
     /// Other button
     Other(SharedString),
+}
+
+/// An item in a native popup menu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PopupMenuItem {
+    /// A selectable option.
+    Option {
+        /// Label shown for the option.
+        label: SharedString,
+        /// Whether the option can be selected.
+        enabled: bool,
+    },
+    /// A disabled group heading.
+    Group {
+        /// Label shown for the group.
+        label: SharedString,
+    },
+    /// A separator between menu items.
+    Separator,
 }
 
 impl PromptButton {
