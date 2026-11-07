@@ -3081,6 +3081,7 @@ mod tests {
             scale: 1.0,
             scale_origin: Point::default(),
             is_start: true,
+            inline: false,
         };
         scene.insert_primitive(boundary.clone());
         paint(scene);

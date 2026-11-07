@@ -90,7 +90,7 @@ impl ScenePlan {
                 PrimitiveBatch::FilterBoundary(boundary_index) => {
                     let boundary = &scene.filter_boundaries[boundary_index];
                     if boundary.is_start {
-                        let target = if matched_starts[boundary_index] {
+                        let target = if matched_starts[boundary_index] && !boundary.inline {
                             FilterRenderTarget::Isolated(FilterTargetIndex(isolated_depth))
                         } else {
                             FilterRenderTarget::Inline

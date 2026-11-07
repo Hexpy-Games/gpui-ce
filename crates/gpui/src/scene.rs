@@ -58,6 +58,16 @@ impl From<bool> for ShaderBool {
     }
 }
 
+/// An open filter group while its contents are being recorded.
+struct FilterGroup {
+    /// The group is fully transparent, so it and its contents are not recorded.
+    suppressed: bool,
+    /// Index of the group's start marker in `Scene::filter_boundaries`.
+    start_index: usize,
+    /// `Scene::paint_operations` length right after the start marker was recorded.
+    start_len: usize,
+}
+
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
@@ -65,6 +75,7 @@ pub struct Scene {
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<Option<DrawOrder>>,
     filter_depth: usize,
+    filter_groups: Vec<FilterGroup>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -87,6 +98,7 @@ impl Scene {
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.filter_depth = 0;
+        self.filter_groups.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -137,6 +149,45 @@ impl Scene {
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
         self.is_finished = false;
+
+        // A fully transparent group paints nothing: it and its contents produce no draw data.
+        // Their operations are still recorded, so a cached view inside replays them when the
+        // group is visible again.
+        let suppressed = self
+            .filter_groups
+            .last()
+            .is_some_and(|group| group.suppressed);
+        match &primitive {
+            Primitive::FilterBoundary(boundary)
+                if boundary.is_start && (suppressed || boundary.opacity <= 0.0) =>
+            {
+                self.filter_groups.push(FilterGroup {
+                    suppressed: true,
+                    start_index: 0,
+                    start_len: 0,
+                });
+                self.paint_operations
+                    .push(PaintOperation::Primitive(primitive));
+                return;
+            }
+            Primitive::FilterBoundary(boundary) if !boundary.is_start => {
+                if let Some(group) = self.filter_groups.pop() {
+                    if group.suppressed {
+                        self.paint_operations
+                            .push(PaintOperation::Primitive(primitive));
+                        return;
+                    }
+                    self.inline_single_primitive_group(&group);
+                }
+            }
+            Primitive::FilterBoundary(_) => {}
+            _ if suppressed => {
+                self.paint_operations
+                    .push(PaintOperation::Primitive(primitive));
+                return;
+            }
+            _ => {}
+        }
 
         // Cached glyph batches may have been recorded outside isolation. The monochrome
         // pipeline also accepts RGB atlas masks and provides a scalar-alpha fallback.
@@ -244,8 +295,79 @@ impl Scene {
             }
         }
 
+        let opens_group =
+            matches!(&primitive, Primitive::FilterBoundary(boundary) if boundary.is_start);
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
+        if opens_group {
+            self.filter_groups.push(FilterGroup {
+                suppressed: false,
+                start_index: self.filter_boundaries.len() - 1,
+                start_len: self.paint_operations.len(),
+            });
+        }
+    }
+
+    /// A group of one primitive needs no isolation: compositing it at `opacity` equals drawing
+    /// it with its alpha multiplied by `opacity`. Only the drawn copy and the start marker change;
+    /// the recorded operations stay as painted, so `replay` applies whatever opacity the
+    /// enclosing group has then.
+    fn inline_single_primitive_group(&mut self, group: &FilterGroup) {
+        let start = &self.filter_boundaries[group.start_index];
+        if !start.filters.is_empty() || start.scale != 1.0 {
+            return;
+        }
+        let factor = start.opacity;
+        let [PaintOperation::Primitive(primitive)] = &self.paint_operations[group.start_len..]
+        else {
+            return;
+        };
+        match primitive {
+            Primitive::Shadow(_) => {
+                if let Some(shadow) = self.shadows.last_mut() {
+                    shadow.color = shadow.color.opacity(factor);
+                }
+            }
+            Primitive::Quad(_) => {
+                if let Some(quad) = self.quads.last_mut() {
+                    quad.background = quad.background.opacity(factor);
+                    quad.border_color = quad.border_color.opacity(factor);
+                }
+            }
+            Primitive::Path(_) => {
+                if let Some(path) = self.paths.last_mut() {
+                    path.color = path.color.opacity(factor);
+                }
+            }
+            Primitive::Underline(_) => {
+                if let Some(underline) = self.underlines.last_mut() {
+                    underline.color.a *= factor;
+                }
+            }
+            Primitive::MonochromeSprite(_) => {
+                if let Some(sprite) = self.monochrome_sprites.last_mut() {
+                    sprite.color.a *= factor;
+                }
+            }
+            Primitive::SubpixelSprite(_) => {
+                if let Some(sprite) = self.subpixel_sprites.last_mut() {
+                    sprite.color.a *= factor;
+                }
+            }
+            Primitive::PolychromeSprite(_) => {
+                if let Some(sprite) = self.polychrome_sprites.last_mut() {
+                    sprite.opacity *= factor;
+                }
+            }
+            Primitive::BackdropFilter(_) => {
+                if let Some(filter) = self.backdrop_filters.last_mut() {
+                    filter.opacity *= factor;
+                }
+            }
+            // A surface has no alpha of its own to carry the opacity; nested groups stay isolated.
+            Primitive::Surface(_) | Primitive::FilterBoundary(_) => return,
+        }
+        self.filter_boundaries[group.start_index].inline = true;
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -1071,6 +1193,9 @@ pub struct FilterBoundary {
     pub scale_origin: Point<ScaledPixels>,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
+    /// The group holds one primitive that already carries the group's opacity, so it is drawn
+    /// directly into the parent without an offscreen target. Set by [`Scene::insert_primitive`].
+    pub inline: bool,
 }
 
 impl FilterBoundary {
@@ -1610,6 +1735,7 @@ mod tests {
             scale: 1.0,
             scale_origin: Point::default(),
             is_start,
+            inline: false,
         }
     }
 
@@ -1819,6 +1945,8 @@ mod tests {
                 scene.insert_primitive(backdrop());
             }
 
+            // Two primitives: a single one inside an opacity group is drawn inline.
+            scene.insert_primitive(quad());
             scene.insert_primitive(quad());
 
             if group {
@@ -1840,5 +1968,49 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Inserts `start`, `quads`, then the matching end marker, and finishes the scene.
+    fn finished_group(opacity: f32, quads: Vec<Quad>) -> Scene {
+        let mut start = boundary(true);
+        start.filters.clear();
+        start.opacity = opacity;
+        let mut scene = Scene::default();
+        scene.insert_primitive(start.clone());
+        for quad in quads {
+            scene.insert_primitive(quad);
+        }
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..start
+        });
+        scene.finish();
+        scene
+    }
+
+    #[test]
+    fn fully_transparent_group_paints_nothing() {
+        let scene = finished_group(0.0, vec![quad()]);
+
+        assert!(scene.quads.is_empty());
+        assert!(scene.filter_boundaries.is_empty());
+        assert!(!scene.render_plan().requirements().uses_offscreen_target);
+    }
+
+    #[test]
+    fn single_primitive_opacity_group_is_drawn_inline() {
+        let mut solid = quad();
+        solid.background.solid.a = 1.0;
+        let scene = finished_group(0.5, vec![solid]);
+
+        assert_eq!(scene.render_plan().requirements().isolated_target_count, 0);
+        assert_eq!(scene.quads[0].background.solid.a, 0.5);
+    }
+
+    #[test]
+    fn multi_primitive_opacity_group_stays_isolated() {
+        let scene = finished_group(0.5, vec![quad(), quad()]);
+
+        assert_eq!(scene.render_plan().requirements().isolated_target_count, 1);
     }
 }

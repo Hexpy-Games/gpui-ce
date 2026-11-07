@@ -4117,6 +4117,7 @@ impl Window {
             scale: 1.0,
             scale_origin: Point::default(),
             is_start: true,
+            inline: false,
         };
 
         self.with_filter_boundary(boundary, paint)
@@ -4148,6 +4149,7 @@ impl Window {
             scale,
             scale_origin: origin.scale(self.scale_factor()),
             is_start: true,
+            inline: false,
         };
 
         self.with_filter_boundary(boundary, paint)
@@ -4790,6 +4792,7 @@ impl Window {
             scale: 1.0,
             scale_origin: Point::default(),
             is_start: true,
+            inline: false,
         };
 
         self.with_filter_boundary(boundary, f)
