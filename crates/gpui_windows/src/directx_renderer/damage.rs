@@ -109,7 +109,7 @@ impl DirectXRenderer {
             bottom: (scissor.y + scissor.height) as i32,
         });
         self.restore_rasterizer();
-        let mut targets = TargetStack::new((scene_rtv.clone(), scene_srv.clone()));
+        let mut targets = TargetStack::new((scene_rtv, scene_srv.clone()));
         let result = self.encode_commands(scene, &plan.commands, &mut targets, &groups, Some(plan));
         self.damage_scissor = None;
         self.restore_rasterizer();
