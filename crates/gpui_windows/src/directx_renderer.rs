@@ -978,7 +978,10 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut()?;
         let previous_texture = resources.render_target.replace(texture.clone());
         let previous_view = std::mem::replace(&mut resources.render_target_view, view);
+        // The window keeps its retained frame and backdrop keys.
+        let (retained, frame_keys) = (self.retained, self.frame_keys.clone());
         let rendered = self.render(scene, WindowBackgroundAppearance::Transparent);
+        (self.retained, self.frame_keys) = (retained, frame_keys);
         let resources = self.resources.as_mut()?;
         resources.render_target = previous_texture;
         resources.render_target_view = previous_view;

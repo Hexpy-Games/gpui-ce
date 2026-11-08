@@ -47,6 +47,22 @@ pub(super) fn render_to_view(
     submission
 }
 
+/// Renders `scene` into `view` for an offscreen copy, leaving the window's retained frame,
+/// backdrop keys and surface cache as they are.
+pub(super) fn render_offscreen(
+    renderer: &mut WgpuRenderer,
+    scene: &Scene,
+    view: &wgpu::TextureView,
+) -> bool {
+    let planned = *scene.render_plan().requirements();
+    let commands = scene.render_commands();
+    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view) else {
+        return false;
+    };
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    submit(renderer, encoder, None).is_some()
+}
+
 /// Encodes and submits `encoder`; `None` when encoding failed (nothing is submitted).
 pub(super) fn submit(
     renderer: &WgpuRenderer,

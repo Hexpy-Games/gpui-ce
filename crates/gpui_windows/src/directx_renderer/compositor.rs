@@ -370,13 +370,14 @@ fn motion_animation(
         }
         MotionEasing::CubicBezier([x1, y1, x2, y2]) => {
             let [x1, y1, x2, y2] = [x1, y1, x2, y2].map(f64::from);
-            let sample = |x: f64| {
+            // Eased value at linear progress `x`; slopes come from finite differences so a curve
+            // with a vertical tangent (x1 or x2 at 0 or 1) still gives finite Hermite segments.
+            let ease = |x: f64| {
                 let (mut low, mut high) = (0.0, 1.0);
                 for _ in 0..32 {
                     let t = (low + high) * 0.5;
                     let u = 1.0 - t;
-                    let position = 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t;
-                    if position < x {
+                    if 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t < x {
                         low = t;
                     } else {
                         high = t;
@@ -384,12 +385,15 @@ fn motion_animation(
                 }
                 let t = (low + high) * 0.5;
                 let u = 1.0 - t;
-                let value = 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t;
-                let dx = 3.0 * u * u * x1 + 6.0 * u * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
-                let dy = 3.0 * u * u * y1 + 6.0 * u * t * (y2 - y1) + 3.0 * t * t * (1.0 - y2);
+                3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t
+            };
+            let sample = |x: f64| {
+                const STEP: f64 = 1.0 / 1024.0;
+                let (lo, hi) = ((x - STEP).max(0.0), (x + STEP).min(1.0));
+                let slope = (ease(hi) - ease(lo)) / (hi - lo);
                 (
-                    from + delta * value as f32,
-                    (f64::from(delta) * dy / dx / duration) as f32,
+                    from + delta * ease(x) as f32,
+                    (f64::from(delta) * slope / duration) as f32,
                 )
             };
             let h = duration as f32 / 8.0;

@@ -310,20 +310,30 @@ impl WgpuRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        // Same pipelines as the window when its target already matches; the window keeps its
+        // retained frame, backdrop keys and surface cache.
+        let wanted = (
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        );
         let (format, alpha, clear) = (
             self.target.config.format,
             self.target.config.alpha_mode,
             self.target.clear_color,
         );
-        self.target.config.format = wgpu::TextureFormat::Bgra8Unorm;
-        self.target.config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
+        let rebuild = (format, alpha) != wanted;
+        (self.target.config.format, self.target.config.alpha_mode) = wanted;
         self.target.clear_color = wgpu::Color::TRANSPARENT;
-        self.rebuild_pipelines();
-        let rendered = self.render_to_view(scene, &view);
+        if rebuild {
+            self.rebuild_pipelines();
+        }
+        let rendered = frame::render_offscreen(self, scene, &view);
         self.target.config.format = format;
         self.target.config.alpha_mode = alpha;
         self.target.clear_color = clear;
-        self.rebuild_pipelines();
+        if rebuild {
+            self.rebuild_pipelines();
+        }
         if !rendered {
             return None;
         }
