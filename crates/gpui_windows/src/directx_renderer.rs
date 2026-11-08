@@ -1040,6 +1040,7 @@ impl DirectXRenderer {
                                 1.0,
                                 Point::default(),
                                 Point::default(),
+                                0.0,
                                 lens,
                                 hit,
                             )?;
@@ -1093,7 +1094,7 @@ impl DirectXRenderer {
                         self.damage_scissor = damage_scissor;
                         self.restore_rasterizer();
                     }
-                    let (opacity, scale, composite_offset, clip) = gpui::motion_composite_parameters(
+                    let (opacity, scale, composite_offset, composite_rotation, clip) = gpui::motion_composite_parameters(
                         boundary, self.animation_time_ms, scene.scale_factor,
                     );
                     let result = self.dx_blur_and_composite(
@@ -1109,6 +1110,7 @@ impl DirectXRenderer {
                         scale,
                         boundary.scale_origin,
                         composite_offset,
+                        composite_rotation,
                         BackdropLens::default(),
                         false,
                     );
@@ -1839,6 +1841,7 @@ impl DirectXRenderer {
         scale: f32,
         scale_origin: Point<ScaledPixels>,
         composite_offset: Point<ScaledPixels>,
+        composite_rotation: f32,
         lens: BackdropLens,
         // The blurred backdrop was restored into the ping texture, so the blur passes are skipped.
         blurred_ready: bool,
@@ -1956,6 +1959,7 @@ impl DirectXRenderer {
         .with_composite_scale(scale, scale_origin);
         composite_uniforms.composite_offset =
             wgsl_rs::std::vec2f(composite_offset.x.0, composite_offset.y.0);
+        composite_uniforms.composite_rotation = composite_rotation;
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -2061,6 +2065,7 @@ impl DirectXRenderer {
                 1.0,
                 Point::default(),
                 Point::default(),
+                0.0,
                 BackdropLens::default(),
                 false,
             )?;

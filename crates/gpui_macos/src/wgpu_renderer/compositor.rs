@@ -428,13 +428,17 @@ fn make_layers(
                     let offset = motion.offset.0 + (motion.offset.1 - motion.offset.0) * progress;
                     let scale =
                         f64::from(motion.scale.0 + (motion.scale.1 - motion.scale.0) * progress);
+                    let rotation = -f64::from(
+                        motion.rotation.0 + (motion.rotation.1 - motion.rotation.0) * progress,
+                    );
+                    let (sin, cos) = rotation.sin_cos();
                     let transform = CATransform3D {
-                        m11: scale,
-                        m12: 0.0,
+                        m11: scale * cos,
+                        m12: scale * sin,
                         m13: 0.0,
                         m14: 0.0,
-                        m21: 0.0,
-                        m22: scale,
+                        m21: -scale * sin,
+                        m22: scale * cos,
                         m23: 0.0,
                         m24: 0.0,
                         m31: 0.0,

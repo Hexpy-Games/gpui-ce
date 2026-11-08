@@ -150,6 +150,10 @@ pub mod blur {
         pub composite_scale_origin: Vec2f,
         pub composite_offset: Vec2f,
         pub composite_offset_padding: Vec2f,
+        pub composite_rotation: f32,
+        pub composite_rotation_padding0: f32,
+        pub composite_rotation_padding1: f32,
+        pub composite_rotation_padding2: f32,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
 
@@ -182,7 +186,14 @@ pub mod blur {
         let scale = get!(BLUR_LOCALS).composite_scale;
         let origin = get!(BLUR_LOCALS).composite_scale_origin;
         let offset = get!(BLUR_LOCALS).composite_offset;
-        let viewport_position = origin + (source_position - origin) * scale + offset;
+        let rotation = get!(BLUR_LOCALS).composite_rotation;
+        let scaled_position = (source_position - origin) * scale;
+        let viewport_position = origin
+            + vec2f(
+                cos(rotation) * scaled_position.x - sin(rotation) * scaled_position.y,
+                sin(rotation) * scaled_position.x + cos(rotation) * scaled_position.y,
+            )
+            + offset;
         let mut content_mask = get!(BLUR_LOCALS).content_mask;
         if get!(BLUR_LOCALS).composite_scale != 1.0 {
             content_mask.origin = origin + (content_mask.origin - origin) * scale;
@@ -206,9 +217,14 @@ pub mod blur {
 
     pub fn blur_composite_source_position(destination_position: Vec2f) -> Vec2f {
         let locals = get!(BLUR_LOCALS);
+        let position =
+            destination_position - locals.composite_offset - locals.composite_scale_origin;
+        let rotation = locals.composite_rotation;
         locals.composite_scale_origin
-            + (destination_position - locals.composite_offset - locals.composite_scale_origin)
-                / locals.composite_scale
+            + vec2f(
+                cos(rotation) * position.x + sin(rotation) * position.y,
+                -sin(rotation) * position.x + cos(rotation) * position.y,
+            ) / locals.composite_scale
     }
 
     /// Slope of a circular bevel of radius `bezel` at depth `d` inside the edge, from the height

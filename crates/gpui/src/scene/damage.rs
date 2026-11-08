@@ -737,6 +737,26 @@ mod tests {
             ..motion
         };
         assert!(still.changes_between(499, 500));
+
+        let motion_bounds = rect(0.0, 0.0, 20.0, 10.0);
+        let motion = LayerMotion {
+            duration_ms: 1000,
+            easing: MotionEasing::linear(&[(0.0, 0.0), (1.0, 1.0)]),
+            rotation: (0.0, std::f32::consts::FRAC_PI_2),
+            ..LayerMotion::NONE
+        };
+        assert_eq!(
+            motion.sample(500, 1.0, motion_bounds).rotation,
+            std::f32::consts::FRAC_PI_4,
+        );
+        let swept = motion.sweep(motion_bounds, motion_bounds.center(), 1.0, motion_bounds);
+        let rotated = rect(5.0, -5.0, 10.0, 20.0);
+        assert!(
+            swept.origin.x <= rotated.origin.x
+                && swept.origin.y <= rotated.origin.y
+                && swept.right() >= rotated.right()
+                && swept.bottom() >= rotated.bottom()
+        );
     }
 
     #[test]

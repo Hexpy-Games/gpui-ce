@@ -327,7 +327,22 @@ fn make_visuals(
             let animation = motion_animation(device, motion, motion.scale, now_ms)?;
             scale.SetScaleX(&animation)?;
             scale.SetScaleY(&animation)?;
-            window.SetTransform(&scale)?;
+            let rotate = device.CreateRotateTransform()?;
+            rotate.SetCenterX2(bounds.size.width.0 * motion.origin.x)?;
+            rotate.SetCenterY2(bounds.size.height.0 * motion.origin.y)?;
+            let animation = motion_animation(
+                device,
+                motion,
+                (
+                    motion.rotation.0.to_degrees(),
+                    motion.rotation.1.to_degrees(),
+                ),
+                now_ms,
+            )?;
+            rotate.SetAngle(&animation)?;
+            let transform =
+                device.CreateTransformGroup(&[Some(scale.cast()?), Some(rotate.cast()?)])?;
+            window.SetTransform(&transform)?;
         }
         clip.AddVisual(&window, true, None)?;
 

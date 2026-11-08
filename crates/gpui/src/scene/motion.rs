@@ -60,7 +60,7 @@ pub struct LayoutMotion {
     pub easing: MotionEasing,
 }
 
-/// A retained subtree's opacity, translation, and scale over time.
+/// A retained subtree's opacity, translation, scale, and rotation over time.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[expect(missing_docs)]
 pub struct LayerMotion {
@@ -74,6 +74,8 @@ pub struct LayerMotion {
     pub clip: Option<(Edges<Pixels>, Edges<Pixels>)>,
     pub visible: (f32, f32),
     pub scale: (f32, f32),
+    /// Clockwise rotation in screen-space radians about `origin`.
+    pub rotation: (f32, f32),
     pub origin: Point<f32>,
 }
 
@@ -84,6 +86,7 @@ pub struct LayerMotionSample {
     pub opacity: f32,
     pub offset: Point<ScaledPixels>,
     pub scale: f32,
+    pub rotation: f32,
     pub clip: Option<Bounds<ScaledPixels>>,
 }
 
@@ -103,6 +106,7 @@ impl LayerMotion {
         clip: None,
         visible: (0.0, 1.0),
         scale: (1.0, 1.0),
+        rotation: (0.0, 0.0),
         origin: point(0.5, 0.5),
     };
 
@@ -210,6 +214,7 @@ impl LayerMotion {
                             + (self.relative_offset.1.y - self.relative_offset.0.y) * p),
                 ),
             scale: self.scale.0 + (self.scale.1 - self.scale.0) * p,
+            rotation: self.rotation.0 + (self.rotation.1 - self.rotation.0) * p,
             clip: self.clip.map(|(from, to)| {
                 let edges = Edges {
                     top: from.top + (to.top - from.top) * p,
@@ -235,6 +240,7 @@ impl LayerMotion {
             && self.offset.0 == self.offset.1
             && self.relative_offset.0 == self.relative_offset.1
             && self.scale.0 == self.scale.1
+            && self.rotation.0 == self.rotation.1
             && self.clip.is_none_or(|(from, to)| from == to)
         {
             return self.visible_at(a_ms) != self.visible_at(b_ms);
@@ -268,7 +274,19 @@ impl LayerMotion {
                     (low.min(y), high.max(y))
                 }),
         };
-        [0.0, 1.0, low, high]
+        let mut samples = vec![0.0, 1.0, low, high];
+        if self.rotation.0 != self.rotation.1 {
+            let delta = self.rotation.1 - self.rotation.0;
+            let from = self.rotation.0 + delta * low;
+            let to = self.rotation.0 + delta * high;
+            let quarter_turn = std::f32::consts::FRAC_PI_2;
+            let first = (from.min(to) / quarter_turn).ceil() as i32;
+            let last = (from.max(to) / quarter_turn).floor() as i32;
+            samples.extend(
+                (first..=last).map(|turn| (turn as f32 * quarter_turn - self.rotation.0) / delta),
+            );
+        }
+        samples
             .into_iter()
             .map(|p| {
                 let offset = (self.offset.0 + (self.offset.1 - self.offset.0) * p)
@@ -282,12 +300,27 @@ impl LayerMotion {
                                 + (self.relative_offset.1.y - self.relative_offset.0.y) * p),
                     );
                 let scale = self.scale.0 + (self.scale.1 - self.scale.0) * p;
-                let a = origin + (bounds.origin - origin) * scale + offset;
-                let b = origin + (bounds.bottom_right() - origin) * scale + offset;
-                Bounds::from_corners(
-                    point(a.x.min(b.x), a.y.min(b.y)),
-                    point(a.x.max(b.x), a.y.max(b.y)),
-                )
+                let rotation = self.rotation.0 + (self.rotation.1 - self.rotation.0) * p;
+                let (sin, cos) = rotation.sin_cos();
+                [
+                    bounds.origin,
+                    bounds.top_right(),
+                    bounds.bottom_left(),
+                    bounds.bottom_right(),
+                ]
+                .into_iter()
+                .map(|corner| {
+                    let corner = (corner - origin) * scale;
+                    let position = origin
+                        + point(
+                            corner.x * cos - corner.y * sin,
+                            corner.x * sin + corner.y * cos,
+                        )
+                        + offset;
+                    Bounds::from_corners(position, position)
+                })
+                .reduce(|a, b| a.union(&b))
+                .unwrap()
             })
             .reduce(|a, b| a.union(&b))
             .unwrap()
@@ -299,7 +332,13 @@ pub fn motion_composite_parameters(
     boundary: &FilterBoundary,
     now_ms: u32,
     scale_factor: f32,
-) -> (f32, f32, Point<ScaledPixels>, Option<Bounds<ScaledPixels>>) {
+) -> (
+    f32,
+    f32,
+    Point<ScaledPixels>,
+    f32,
+    Option<Bounds<ScaledPixels>>,
+) {
     if boundary.motion.is_animated() {
         let sample = boundary
             .motion
@@ -308,10 +347,17 @@ pub fn motion_composite_parameters(
             boundary.opacity * sample.opacity,
             sample.scale,
             sample.offset,
+            sample.rotation,
             sample.clip,
         )
     } else {
-        (boundary.opacity, boundary.scale, Point::default(), None)
+        (
+            boundary.opacity,
+            boundary.scale,
+            Point::default(),
+            0.0,
+            None,
+        )
     }
 }
 

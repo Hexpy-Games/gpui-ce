@@ -625,6 +625,7 @@ impl<'a> FrameEncoder<'a> {
                                 scale: 1.0,
                                 scale_origin: Point::default(),
                                 composite_offset: Point::default(),
+                                composite_rotation: 0.0,
                                 clip: FilterCompositeClip::RoundedBounds,
                                 lens,
                             },
@@ -731,7 +732,7 @@ impl<'a> FrameEncoder<'a> {
                         scissor = self.scissor;
                     }
                     let boundary = &self.scene.filter_boundaries[*boundary_index];
-                    let (opacity, scale, composite_offset, clip) =
+                    let (opacity, scale, composite_offset, composite_rotation, clip) =
                         gpui::motion_composite_parameters(
                             boundary,
                             self.renderer.animation_time_ms,
@@ -752,6 +753,7 @@ impl<'a> FrameEncoder<'a> {
                             opacity,
                             scale,
                             composite_offset,
+                            composite_rotation,
                             scale_origin: boundary.scale_origin,
                             clip: FilterCompositeClip::ContentShape,
                             lens: Default::default(),
