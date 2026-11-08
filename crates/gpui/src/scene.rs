@@ -497,13 +497,12 @@ impl Scene {
                 pending_starts.push(index);
             } else if let Some(start_index) = pending_starts.pop() {
                 let start = &self.filter_boundaries[start_index];
-                if start.motion.is_animated()
-                    && !start.motion.is_active(now)
-                    && start.motion.rests_at_end()
-                    && start.opacity == 1.0
-                    && start.scale == 1.0
-                    && start.filters.is_empty()
-                {
+                let plain = start.opacity == 1.0 && start.scale == 1.0 && start.filters.is_empty();
+                // A played-out motion at rest draws what its content draws, and a motion around
+                // nothing draws nothing: neither needs a group or frames.
+                let finished = !start.motion.is_active(now) && start.motion.rests_at_end();
+                let empty = !self.paints_between(start.order, boundary.order);
+                if start.motion.is_animated() && plain && (finished || empty) {
                     removed_orders.insert(start.order);
                     removed_orders.insert(boundary.order);
                 }
@@ -544,6 +543,20 @@ impl Scene {
     /// Whether any primitive carries an animated motion (set by `finish`).
     pub fn has_animations(&self) -> bool {
         self.has_animations
+    }
+
+    /// Whether any primitive is drawn strictly between two draw orders (a group's markers).
+    fn paints_between(&self, start: DrawOrder, end: DrawOrder) -> bool {
+        let inside = |order: DrawOrder| start < order && order < end;
+        self.shadows.iter().any(|p| inside(p.order))
+            || self.quads.iter().any(|p| inside(p.order))
+            || self.paths.iter().any(|p| inside(p.order))
+            || self.underlines.iter().any(|p| inside(p.order))
+            || self.monochrome_sprites.iter().any(|p| inside(p.order))
+            || self.subpixel_sprites.iter().any(|p| inside(p.order))
+            || self.polychrome_sprites.iter().any(|p| inside(p.order))
+            || self.surfaces.iter().any(|p| inside(p.order))
+            || self.backdrop_filters.iter().any(|p| inside(p.order))
     }
 
     /// Whether any retained animation is still playing at this clock value.
