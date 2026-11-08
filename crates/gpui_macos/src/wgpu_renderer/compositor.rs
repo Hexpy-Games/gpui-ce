@@ -12,7 +12,10 @@ use core_graphics::{
     image::CGImage,
 };
 use foreign_types::ForeignType as _;
-use gpui::{CompositorSprite, FRAME_GUTTER, FrameLoop, animation_time_ms, hsla_to_rgba};
+use gpui::{
+    CompositorSprite, FRAME_GUTTER, FrameLoop, MotionEasing, MotionRepeat, SpriteContents,
+    animation_time_ms, hsla_to_rgba,
+};
 use gpui_wgpu::WgpuAtlas;
 use objc2::{
     Encode, Encoding, class, msg_send,
@@ -20,6 +23,7 @@ use objc2::{
     runtime::{AnyObject, Bool},
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::{CAMediaTimingFunction, CATransform3D};
 use std::{collections::HashMap, f64::consts::TAU, ffi::c_void, sync::Arc};
 
 type ObjcId = *mut AnyObject;
@@ -105,11 +109,35 @@ impl CompositorLayers {
         for (sprite, found) in sprites.iter().zip(matched) {
             if let Some(entry) = found.and_then(|index| old[index].take()) {
                 entries.push(entry);
-            } else if let Some(cells) = self.cells_for(sprite, atlas) {
+            } else {
+                let pixels;
+                let cells = match &sprite.contents {
+                    SpriteContents::Atlas(_) => {
+                        let Some(cells) = self.cells_for(sprite, atlas) else {
+                            continue;
+                        };
+                        cells
+                    }
+                    SpriteContents::Pixels { size, bytes } => {
+                        pixels = vec![CGImage::new(
+                            size.width.0 as usize,
+                            size.height.0 as usize,
+                            8,
+                            32,
+                            size.width.0 as usize * 4,
+                            &CGColorSpace::create_device_rgb(),
+                            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+                            &CGDataProvider::from_buffer(Arc::new(bytes.clone())),
+                            false,
+                            kCGRenderingIntentDefault,
+                        )];
+                        &pixels
+                    }
+                };
                 let layer = make_layers(sprite, cells, place, now_ms);
                 let _: () = unsafe { msg_send![root, addSublayer: &*layer] };
                 entries.push(Entry {
-                    sprite: *sprite,
+                    sprite: sprite.clone(),
                     placement: place,
                     layer: MainThread(layer),
                 });
@@ -125,7 +153,7 @@ impl CompositorLayers {
         self.cells.retain(|key, _| {
             entries
                 .iter()
-                .any(|entry| (entry.sprite.tile.texture_id, entry.sprite.tile.tile_id.0) == *key)
+                .any(|entry| matches!(&entry.sprite.contents, SpriteContents::Atlas(tile) if (tile.texture_id, tile.tile_id.0) == *key))
         });
     }
 
@@ -145,9 +173,12 @@ impl CompositorLayers {
     }
 
     fn cells_for(&mut self, sprite: &CompositorSprite, atlas: &WgpuAtlas) -> Option<&[CGImage]> {
-        let key = (sprite.tile.texture_id, sprite.tile.tile_id.0);
+        let SpriteContents::Atlas(tile) = &sprite.contents else {
+            return None;
+        };
+        let key = (tile.texture_id, tile.tile_id.0);
         if !self.cells.contains_key(&key) {
-            let (size, bytes) = atlas.frame_grid(&sprite.tile)?;
+            let (size, bytes) = atlas.frame_grid(tile)?;
             let (width, height) = (size.width.0 as usize, size.height.0 as usize);
             let cells = crop_cells(
                 (width, height),
@@ -340,6 +371,95 @@ fn make_layers(
         let _: () = unsafe { msg_send![&*animation, setToValue: &*number(-TAU)] };
         loop_forever(&animation, frames.turn_period_ms, frames.start_ms, now_ms);
         add_animation(&layer, &animation, "turn");
+    }
+
+    let motion = sprite.motion;
+    if motion.is_animated() {
+        let anchor = NSPoint::new(f64::from(motion.origin.x), 1.0 - f64::from(motion.origin.y));
+        let _: () = unsafe { msg_send![&*layer, setAnchorPoint: anchor] };
+        let _: () = unsafe {
+            msg_send![&*layer, setPosition: NSPoint::new(x + width * anchor.x, y + height * anchor.y)]
+        };
+        for key in ["opacity", "transform"] {
+            let value = |progress: f32| -> Retained<AnyObject> {
+                if key == "opacity" {
+                    let opacity = f64::from(
+                        motion.opacity.0 + (motion.opacity.1 - motion.opacity.0) * progress,
+                    );
+                    unsafe { msg_send![class!(NSNumber), numberWithDouble: opacity] }
+                } else {
+                    let offset = motion.offset.0 + (motion.offset.1 - motion.offset.0) * progress;
+                    let scale =
+                        f64::from(motion.scale.0 + (motion.scale.1 - motion.scale.0) * progress);
+                    let transform = CATransform3D {
+                        m11: scale,
+                        m12: 0.0,
+                        m13: 0.0,
+                        m14: 0.0,
+                        m21: 0.0,
+                        m22: scale,
+                        m23: 0.0,
+                        m24: 0.0,
+                        m31: 0.0,
+                        m32: 0.0,
+                        m33: 1.0,
+                        m34: 0.0,
+                        m41: f64::from(offset.x.0),
+                        m42: -f64::from(offset.y.0),
+                        m43: 0.0,
+                        m44: 1.0,
+                    };
+                    unsafe { msg_send![class!(NSValue), valueWithCATransform3D: transform] }
+                }
+            };
+            let animation: Retained<AnyObject> = match motion.easing {
+                MotionEasing::CubicBezier([x1, y1, x2, y2]) => {
+                    let animation: Retained<AnyObject> = unsafe {
+                        msg_send![class!(CABasicAnimation), animationWithKeyPath: &*NSString::from_str(key)]
+                    };
+                    let _: () = unsafe { msg_send![&*animation, setFromValue: &*value(0.0)] };
+                    let _: () = unsafe { msg_send![&*animation, setToValue: &*value(1.0)] };
+                    let timing = CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2);
+                    let _: () = unsafe { msg_send![&*animation, setTimingFunction: &*timing] };
+                    animation
+                }
+                MotionEasing::Steps(n) => {
+                    let animation: Retained<AnyObject> = unsafe {
+                        msg_send![class!(CAKeyframeAnimation), animationWithKeyPath: &*NSString::from_str(key)]
+                    };
+                    let values: Retained<AnyObject> =
+                        unsafe { msg_send![class!(NSMutableArray), array] };
+                    let times: Retained<AnyObject> =
+                        unsafe { msg_send![class!(NSMutableArray), array] };
+                    for i in 0..=n {
+                        let _: () =
+                            unsafe { msg_send![&*values, addObject: &*value(i as f32 / n as f32)] };
+                        let time: Retained<AnyObject> = unsafe {
+                            msg_send![class!(NSNumber), numberWithDouble: f64::from(i) / f64::from(n)]
+                        };
+                        let _: () = unsafe { msg_send![&*times, addObject: &*time] };
+                    }
+                    let _: () = unsafe { msg_send![&*animation, setValues: &*values] };
+                    let _: () = unsafe { msg_send![&*animation, setKeyTimes: &*times] };
+                    let _: () = unsafe {
+                        msg_send![&*animation, setCalculationMode: &*NSString::from_str("discrete")]
+                    };
+                    animation
+                }
+            };
+            let begin = unsafe { CACurrentMediaTime() }
+                - f64::from(now_ms.wrapping_sub(motion.start_ms)) / 1000.0;
+            let _: () = unsafe { msg_send![&*animation, setBeginTime: begin] };
+            let _: () = unsafe {
+                msg_send![&*animation, setDuration: f64::from(motion.duration_ms) / 1000.0]
+            };
+            let _: () = unsafe { msg_send![&*animation, setRepeatCount: f32::INFINITY] };
+            let _: () = unsafe {
+                msg_send![&*animation, setAutoreverses: Bool::new(motion.repeat == MotionRepeat::Alternate)]
+            };
+            let _: () = unsafe { msg_send![&*animation, setRemovedOnCompletion: Bool::NO] };
+            add_animation(&layer, &animation, key);
+        }
     }
 
     let _: () = unsafe { msg_send![&*clip_layer, addSublayer: &*layer] };

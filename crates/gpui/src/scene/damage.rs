@@ -88,7 +88,8 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
             changed.push((
                 boundary
                     .motion
-                    .sweep(boundary.bounds, boundary.scale_origin, scene.scale_factor),
+                    .sweep(boundary.bounds, boundary.scale_origin, scene.scale_factor)
+                    .intersect(&boundary.content_mask.bounds),
                 boundary.order,
             ));
         }
@@ -493,6 +494,69 @@ mod tests {
             assert!(scene.has_animations());
         }
     }
+    #[test]
+    fn uncovered_loop_motion_groups_are_offloaded() {
+        let mut scene = Scene {
+            offload_animations: true,
+            scale_factor: 1.0,
+            ..Scene::default()
+        };
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds: mask().bounds,
+            content_mask: mask(),
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
+            motion: LayerMotion {
+                duration_ms: 1000,
+                repeat: MotionRepeat::Loop,
+                offset: (point(px(0.0), px(0.0)), point(px(40.0), px(0.0))),
+                ..LayerMotion::NONE
+            },
+            is_start: true,
+            inline: false,
+        };
+        scene.insert_primitive(boundary.clone());
+        for x in [10.0, 30.0] {
+            scene.insert_primitive(Quad {
+                bounds: rect(x, 10.0, 20.0, 20.0),
+                content_mask: mask(),
+                ..Default::default()
+            });
+        }
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary.clone()
+        });
+        scene.finish();
+        assert_eq!(scene.compositor_groups().len(), 1);
+        assert_eq!(scene.compositor_groups()[0].scene.quads.len(), 2);
+        assert!(scene.quads.is_empty());
+        assert!(!scene.has_animations());
+        scene.insert_primitive(boundary.clone());
+        scene.insert_primitive(Quad {
+            bounds: rect(100.0, 100.0, 20.0, 20.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        scene.insert_primitive(Quad {
+            bounds: rect(110.0, 100.0, 20.0, 20.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.finish();
+        assert_eq!(scene.compositor_groups().len(), 1);
+        assert_eq!(scene.filter_boundaries.len(), 2);
+    }
+
     #[test]
     fn motion_group_damage_keeps_the_sweep_and_group_commands() {
         let mut scene = Scene {

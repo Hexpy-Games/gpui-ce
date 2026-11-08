@@ -8,6 +8,7 @@ use super::*;
 struct Entry {
     sprite: CompositorSprite,
     clip: IDCompositionVisual,
+    key: Option<u64>,
 }
 
 /// The child visuals of the window's root visual that draw the scene's [`CompositorSprite`]s.
@@ -17,7 +18,7 @@ pub(super) struct CompositorVisuals {
     /// The surface and size of each flipbook grid in use, by (texture, tile id, tint). A tinted
     /// (monochrome) grid is baked with its tint, so the key includes it.
     surfaces: Vec<(
-        (AtlasTextureId, u32, Option<Rgba>),
+        (Option<(AtlasTextureId, u32)>, Option<u64>, Option<Rgba>),
         IDCompositionSurface,
         (u32, u32),
     )>,
@@ -31,6 +32,7 @@ impl CompositorVisuals {
         composition: &DirectComposition,
         device_context: &ID3D11DeviceContext,
         sprites: &[CompositorSprite],
+        keys: &[Option<u64>],
         atlas: &DirectXAtlas,
     ) -> Result<bool> {
         let matched = self.matches(sprites);
@@ -44,17 +46,18 @@ impl CompositorVisuals {
             .map(Some)
             .collect();
         let mut entries = Vec::with_capacity(sprites.len());
-        for (sprite, found) in sprites.iter().zip(matched) {
+        for ((sprite, found), &key) in sprites.iter().zip(matched).zip(keys) {
             if let Some(entry) = found.and_then(|index| old[index].take()) {
                 entries.push(entry);
             } else if let Some((surface, grid)) =
-                self.surface_for(composition, device_context, sprite, atlas)?
+                self.surface_for(composition, device_context, sprite, key, atlas)?
             {
                 let clip = make_visuals(&composition.comp_device, sprite, &surface, grid, now_ms)?;
                 unsafe { composition.comp_visual.AddVisual(&clip, true, None)? };
                 entries.push(Entry {
-                    sprite: *sprite,
+                    sprite: sprite.clone(),
                     clip,
+                    key,
                 });
             }
         }
@@ -67,8 +70,11 @@ impl CompositorVisuals {
         self.surfaces.retain(|(key, _, _)| {
             entries.iter().any(|entry| {
                 *key == (
-                    entry.sprite.tile.texture_id,
-                    entry.sprite.tile.tile_id.0,
+                    match &entry.sprite.contents {
+                        SpriteContents::Atlas(tile) => Some((tile.texture_id, tile.tile_id.0)),
+                        SpriteContents::Pixels { .. } => None,
+                    },
+                    entry.key,
                     entry.sprite.color.map(hsla_to_rgba),
                 )
             })
@@ -105,23 +111,39 @@ impl CompositorVisuals {
         composition: &DirectComposition,
         device_context: &ID3D11DeviceContext,
         sprite: &CompositorSprite,
+        group_key: Option<u64>,
         atlas: &DirectXAtlas,
     ) -> Result<Option<(IDCompositionSurface, (u32, u32))>> {
         let tint = sprite.color.map(hsla_to_rgba);
-        let key = (sprite.tile.texture_id, sprite.tile.tile_id.0, tint);
+        let key = (
+            match &sprite.contents {
+                SpriteContents::Atlas(tile) => Some((tile.texture_id, tile.tile_id.0)),
+                SpriteContents::Pixels { .. } => None,
+            },
+            group_key,
+            tint,
+        );
         if let Some((_, surface, grid)) =
             self.surfaces.iter().find(|(existing, ..)| *existing == key)
         {
             return Ok(Some((surface.clone(), *grid)));
         }
 
-        let Some((size, bytes)) = atlas.frame_grid(&sprite.tile) else {
-            return Ok(None);
+        let (size, bytes) = match &sprite.contents {
+            SpriteContents::Atlas(tile) => {
+                let Some(pixels) = atlas.frame_grid(tile) else {
+                    return Ok(None);
+                };
+                pixels
+            }
+            SpriteContents::Pixels { size, bytes } => (*size, bytes.clone()),
         };
         let (width, height) = (size.width.0 as u32, size.height.0 as u32);
         let pixel_count = width as usize * height as usize;
         let mut pixels = Vec::with_capacity(pixel_count * 4);
-        if let Some(tint) = tint {
+        if matches!(&sprite.contents, SpriteContents::Pixels { .. }) {
+            pixels.extend_from_slice(&bytes);
+        } else if let Some(tint) = tint {
             if bytes.len() != pixel_count {
                 return Ok(None);
             }
@@ -196,7 +218,11 @@ fn make_visuals(
     let count = frames.frame_count.max(1);
     let rows = count.div_ceil(columns);
     let (cell_width, cell_height) = (grid.0 / columns, grid.1 / rows);
-    let gutter = FRAME_GUTTER;
+    let gutter = if matches!(&sprite.contents, SpriteContents::Atlas(_)) {
+        FRAME_GUTTER
+    } else {
+        0
+    };
 
     unsafe {
         let clip = device.CreateVisual()?;
@@ -232,6 +258,40 @@ fn make_visuals(
             turn.AddRepeat((2 * period - phase) as f64 / 1000.0, period as f64 / 1000.0)?;
             rotate.SetAngle(&turn)?;
             window.SetTransform(&rotate)?;
+        }
+        let motion = &sprite.motion;
+        if motion.is_animated() {
+            let opacity = motion_animation(device, motion, motion.opacity, now_ms)?;
+            let effect = device.CreateEffectGroup()?;
+            effect.SetOpacity(&opacity)?;
+            window.SetEffect(&effect)?;
+            let x = motion_animation(
+                device,
+                motion,
+                (
+                    bounds.origin.x.0 - clip_bounds.origin.x.0 + motion.offset.0.x.0,
+                    bounds.origin.x.0 - clip_bounds.origin.x.0 + motion.offset.1.x.0,
+                ),
+                now_ms,
+            )?;
+            let y = motion_animation(
+                device,
+                motion,
+                (
+                    bounds.origin.y.0 - clip_bounds.origin.y.0 + motion.offset.0.y.0,
+                    bounds.origin.y.0 - clip_bounds.origin.y.0 + motion.offset.1.y.0,
+                ),
+                now_ms,
+            )?;
+            window.SetOffsetX(&x)?;
+            window.SetOffsetY(&y)?;
+            let scale = device.CreateScaleTransform()?;
+            scale.SetCenterX2(bounds.size.width.0 * motion.origin.x)?;
+            scale.SetCenterY2(bounds.size.height.0 * motion.origin.y)?;
+            let animation = motion_animation(device, motion, motion.scale, now_ms)?;
+            scale.SetScaleX(&animation)?;
+            scale.SetScaleY(&animation)?;
+            window.SetTransform(&scale)?;
         }
         clip.AddVisual(&window, true, None)?;
 
@@ -284,6 +344,106 @@ fn stepped(
             (2 * period_ms - phase_ms) as f64 / 1000.0,
             period_ms as f64 / 1000.0,
         )?;
+        Ok(animation)
+    }
+}
+
+/// Fits a looping motion curve to DirectComposition cubic segments and aligns its phase.
+fn motion_animation(
+    device: &IDCompositionDevice,
+    motion: &LayerMotion,
+    (from, to): (f32, f32),
+    now_ms: u32,
+) -> Result<IDCompositionAnimation> {
+    let duration = f64::from(motion.duration_ms) / 1000.0;
+    let delta = to - from;
+    let mut segments = Vec::new();
+    match motion.easing {
+        MotionEasing::Steps(n) => {
+            for i in 0..n {
+                segments.push((
+                    f64::from(i) * duration / f64::from(n),
+                    duration / f64::from(n),
+                    [from + delta * i as f32 / n as f32, 0.0, 0.0, 0.0],
+                ));
+            }
+        }
+        MotionEasing::CubicBezier([x1, y1, x2, y2]) => {
+            let [x1, y1, x2, y2] = [x1, y1, x2, y2].map(f64::from);
+            let sample = |x: f64| {
+                let (mut low, mut high) = (0.0, 1.0);
+                for _ in 0..32 {
+                    let t = (low + high) * 0.5;
+                    let u = 1.0 - t;
+                    let position = 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t;
+                    if position < x {
+                        low = t;
+                    } else {
+                        high = t;
+                    }
+                }
+                let t = (low + high) * 0.5;
+                let u = 1.0 - t;
+                let value = 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t;
+                let dx = 3.0 * u * u * x1 + 6.0 * u * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+                let dy = 3.0 * u * u * y1 + 6.0 * u * t * (y2 - y1) + 3.0 * t * t * (1.0 - y2);
+                (
+                    from + delta * value as f32,
+                    (f64::from(delta) * dy / dx / duration) as f32,
+                )
+            };
+            let h = duration as f32 / 8.0;
+            for i in 0..8 {
+                let (a, b) = sample(f64::from(i) / 8.0);
+                let (end, slope) = sample(f64::from(i + 1) / 8.0);
+                let c = (3.0 * (end - a) / h - 2.0 * b - slope) / h;
+                let d = (2.0 * (a - end) / h + b + slope) / (h * h);
+                segments.push((f64::from(i) * duration / 8.0, duration / 8.0, [a, b, c, d]));
+            }
+        }
+    }
+    let mut period = duration;
+    if motion.repeat == MotionRepeat::Alternate {
+        let reversed: Vec<_> = segments
+            .iter()
+            .rev()
+            .map(|&(begin, length, [a, b, c, d])| {
+                let h = length as f32;
+                (
+                    2.0 * duration - begin - length,
+                    length,
+                    [
+                        a + h * (b + h * (c + h * d)),
+                        -b - h * (2.0 * c + 3.0 * h * d),
+                        c + 3.0 * h * d,
+                        -d,
+                    ],
+                )
+            })
+            .collect();
+        segments.extend(reversed);
+        period *= 2.0;
+    }
+    let phase = (f64::from(now_ms.wrapping_sub(motion.start_ms)) / 1000.0) % period;
+    unsafe {
+        let animation = device.CreateAnimation()?;
+        for cycle in 0..2 {
+            for &(begin, length, [a, b, c, d]) in &segments {
+                let time = f64::from(cycle) * period + begin - phase;
+                if time + length <= 0.0 {
+                    continue;
+                }
+                let t = (-time).max(0.0) as f32;
+                animation.AddCubic(
+                    time.max(0.0),
+                    a + t * (b + t * (c + t * d)),
+                    b + t * (2.0 * c + 3.0 * t * d),
+                    c + 3.0 * t * d,
+                    d,
+                )?;
+            }
+        }
+        animation.AddRepeat(2.0 * period - phase, period)?;
         Ok(animation)
     }
 }

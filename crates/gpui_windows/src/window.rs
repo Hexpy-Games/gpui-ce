@@ -1206,6 +1206,14 @@ impl PlatformWindow for WindowsWindow {
             .render_to_image(scene, self.state.background_appearance.get())
     }
 
+    fn rasterize_offscreen(
+        &self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        self.state.renderer.borrow_mut().rasterize(scene, rect)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.renderer.borrow().sprite_atlas().clone()
     }

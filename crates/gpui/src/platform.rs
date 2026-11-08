@@ -49,7 +49,7 @@ use crate::{
     InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures, PlatformInput,
     Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
     RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
+    ScaledPixels, Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
     ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -966,6 +966,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Presents an animation tick of the scene last passed to `draw` (unchanged since).
     fn draw_animation_frame(&self, scene: &Scene) {
         self.draw(scene)
+    }
+    /// Rasterises a scene region as premultiplied, top-down BGRA pixels.
+    fn rasterize_offscreen(
+        &self,
+        _scene: &Scene,
+        _rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        None
     }
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;

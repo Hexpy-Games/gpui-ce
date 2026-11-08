@@ -4,7 +4,7 @@ use super::WgpuSurfaceConfig;
 
 /// Configuration and lifecycle state shared by window, canvas, and headless targets.
 pub(super) struct RenderTarget {
-    config: wgpu::SurfaceConfiguration,
+    pub(super) config: wgpu::SurfaceConfiguration,
     transparent_alpha_mode: wgpu::CompositeAlphaMode,
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
     maximum_dimension: u32,

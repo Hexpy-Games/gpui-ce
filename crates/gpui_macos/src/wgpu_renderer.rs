@@ -4,11 +4,14 @@
 
 mod compositor;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use compositor::CompositorLayers;
 use foreign_types::ForeignType as _;
-use gpui::{DevicePixels, GpuSpecs, Scene, Size};
+use gpui::{
+    Bounds, CompositorSprite, DevicePixels, FrameLoop, GpuSpecs, ScaledPixels, Scene, Size,
+    SpriteContents, point,
+};
 use gpui_apple::metal_renderer::new_window_layer;
 use gpui_wgpu::{
     GpuContext, WgpuAtlas, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
@@ -44,6 +47,7 @@ pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
     layer: MetalLayer,
     compositor: CompositorLayers,
+    group_pixels: HashMap<u64, (Size<DevicePixels>, Arc<[u8]>)>,
     presents_with_transaction: bool,
 }
 
@@ -65,6 +69,7 @@ impl MacWgpuRenderer {
             renderer,
             layer,
             compositor: CompositorLayers::default(),
+            group_pixels: HashMap::new(),
             presents_with_transaction: false,
         })
     }
@@ -117,19 +122,61 @@ impl MacWgpuRenderer {
         }
         // A frame that adds or removes a compositor sprite appears together with its layer.
         let root = self.layer.as_ptr() as *mut AnyObject;
-        let sprites = scene.compositor_sprites();
-        let sprites_changed = self.compositor.changed(root, sprites);
+        self.group_pixels.retain(|key, _| {
+            scene
+                .compositor_groups()
+                .iter()
+                .any(|group| group.key == *key)
+        });
+        let mut sprites = scene.compositor_sprites().to_vec();
+        for group in scene.compositor_groups() {
+            let pixels = match self.group_pixels.get(&group.key) {
+                Some(pixels) => pixels.clone(),
+                None => {
+                    let Some(pixels) = self.renderer.rasterize(&group.scene, group.rect) else {
+                        continue;
+                    };
+                    self.group_pixels.insert(group.key, pixels.clone());
+                    pixels
+                }
+            };
+            let mut motion = group.motion;
+            motion.origin = point(
+                (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
+                (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
+            );
+            sprites.push(CompositorSprite {
+                contents: SpriteContents::Pixels {
+                    size: pixels.0,
+                    bytes: pixels.1,
+                },
+                bounds: group.rect,
+                clip: group.content_mask.bounds,
+                color: None,
+                frames: FrameLoop::NONE,
+                motion,
+            });
+        }
+        let sprites_changed = self.compositor.changed(root, &sprites);
         if sprites_changed {
             self.layer.set_presents_with_transaction(true);
         }
         self.renderer.draw(scene);
         if sprites_changed {
             self.compositor
-                .update(root, sprites, self.renderer.sprite_atlas());
+                .update(root, &sprites, self.renderer.sprite_atlas());
             self.layer
                 .set_presents_with_transaction(self.presents_with_transaction);
         }
         self.renderer.needs_redraw()
+    }
+
+    pub fn rasterize(
+        &mut self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        self.renderer.rasterize(scene, rect)
     }
 
     /// Presents an animation tick of the scene last passed to [`Self::draw`]. Returns whether the

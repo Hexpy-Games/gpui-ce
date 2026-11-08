@@ -77,6 +77,7 @@ pub(crate) struct DirectXRenderer {
     direct_composition: Option<DirectComposition>,
     /// Visuals that draw the scene's compositor sprites (DirectComposition only).
     compositor: compositor::CompositorVisuals,
+    group_pixels: FxHashMap<u64, (Size<DevicePixels>, Arc<[u8]>)>,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -332,6 +333,7 @@ impl DirectXRenderer {
             pipelines,
             direct_composition,
             compositor: Default::default(),
+            group_pixels: FxHashMap::default(),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -459,6 +461,7 @@ impl DirectXRenderer {
             }
 
             self.compositor.clear();
+            self.group_pixels.clear();
             self.direct_composition.take();
             self.devices.take();
         }
@@ -515,6 +518,47 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        self.group_pixels.retain(|key, _| {
+            scene
+                .compositor_groups()
+                .iter()
+                .any(|group| group.key == *key)
+        });
+        let mut sprites = scene.compositor_sprites().to_vec();
+        let mut keys = vec![None; sprites.len()];
+        for group in scene.compositor_groups() {
+            let pixels = match self.group_pixels.get(&group.key) {
+                Some(pixels) => pixels.clone(),
+                None => {
+                    let Some(pixels) = self.rasterize(&group.scene, group.rect) else {
+                        continue;
+                    };
+                    self.group_pixels.insert(group.key, pixels.clone());
+                    pixels
+                }
+            };
+            let mut motion = group.motion;
+            motion.origin = point(
+                (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
+                (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
+            );
+            motion.offset = (
+                motion.offset.0 * scene.scale_factor,
+                motion.offset.1 * scene.scale_factor,
+            );
+            sprites.push(CompositorSprite {
+                contents: SpriteContents::Pixels {
+                    size: pixels.0,
+                    bytes: pixels.1,
+                },
+                bounds: group.rect,
+                clip: group.content_mask.bounds,
+                color: None,
+                frames: FrameLoop::NONE,
+                motion,
+            });
+            keys.push(Some(group.key));
+        }
         self.animation_time_ms = gpui::animation_time_ms();
         self.render(scene, background_appearance)?;
         self.present()?;
@@ -524,12 +568,10 @@ impl DirectXRenderer {
                 .as_ref()
                 .context("devices missing")?
                 .device_context;
-            if self.compositor.update(
-                composition,
-                device_context,
-                scene.compositor_sprites(),
-                &self.atlas,
-            )? {
+            if self
+                .compositor
+                .update(composition, device_context, &sprites, &keys, &self.atlas)?
+            {
                 unsafe { composition.comp_device.Commit()? };
             }
         }
@@ -894,6 +936,114 @@ impl DirectXRenderer {
 
         targets.assert_balanced();
         Ok(())
+    }
+
+    /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
+    pub(crate) fn rasterize(
+        &mut self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let devices = self.devices.as_ref()?;
+        let device = devices.device.clone();
+        let context = devices.device_context.clone();
+        let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
+        let mut texture = None;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: self.width,
+            Height: self.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: RENDER_TARGET_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            ..Default::default()
+        };
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .ok()?;
+        }
+        let texture = texture?;
+        let mut view = None;
+        unsafe {
+            device
+                .CreateRenderTargetView(&texture, None, Some(&mut view))
+                .ok()?;
+        }
+        let resources = self.resources.as_mut()?;
+        let previous_texture = resources.render_target.replace(texture.clone());
+        let previous_view = std::mem::replace(&mut resources.render_target_view, view);
+        let rendered = self.render(scene, WindowBackgroundAppearance::Transparent);
+        let resources = self.resources.as_mut()?;
+        resources.render_target = previous_texture;
+        resources.render_target_view = previous_view;
+        rendered.ok()?;
+        let mut staging = None;
+        unsafe {
+            device
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Width: width,
+                        Height: height,
+                        Usage: D3D11_USAGE_STAGING,
+                        BindFlags: 0,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                        ..desc
+                    },
+                    None,
+                    Some(&mut staging),
+                )
+                .ok()?;
+        }
+        let staging = staging?;
+        unsafe {
+            context.CopySubresourceRegion(
+                &staging,
+                0,
+                0,
+                0,
+                0,
+                &texture,
+                0,
+                Some(&D3D11_BOX {
+                    left: rect.origin.x.0 as u32,
+                    top: rect.origin.y.0 as u32,
+                    front: 0,
+                    right: rect.right().0 as u32,
+                    bottom: rect.bottom().0 as u32,
+                    back: 1,
+                }),
+            );
+        }
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .ok()?;
+        }
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+        // SAFETY: Map exposes RowPitch bytes per row until Unmap; each logical row is width * 4 bytes.
+        unsafe {
+            for row in 0..height as usize {
+                bytes.extend_from_slice(slice::from_raw_parts(
+                    mapped
+                        .pData
+                        .cast::<u8>()
+                        .add(row * mapped.RowPitch as usize),
+                    width as usize * 4,
+                ));
+            }
+            context.Unmap(&staging, 0);
+        }
+        Some((
+            size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            bytes.into(),
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]

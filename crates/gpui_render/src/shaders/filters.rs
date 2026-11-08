@@ -188,7 +188,6 @@ pub mod blur {
             content_mask.origin = origin + (content_mask.origin - origin) * scale;
             content_mask.size = content_mask.size * scale;
         }
-        content_mask.origin = content_mask.origin + offset;
         BlurCompositeVertexData {
             position: viewport_to_clip_position(viewport_position),
             texture_coordinates: unit_position,

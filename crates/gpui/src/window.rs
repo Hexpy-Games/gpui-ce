@@ -4208,18 +4208,20 @@ impl Window {
         if !motion.is_animated() {
             return paint(self);
         }
+        let parent = self.content_mask();
+        let viewport = Bounds::new(Point::default(), self.viewport_size());
         let scale_origin = point(
             bounds.origin.x + bounds.size.width * motion.origin.x,
             bounds.origin.y + bounds.size.height * motion.origin.y,
         )
         .scale(self.scale_factor());
-        let bounds = self.cover_bounds(Bounds::new(Point::default(), self.viewport_size()));
+        let bounds = self.cover_bounds(viewport);
         let boundary = FilterBoundary {
             order: 0,
             bounds,
             content_mask: ContentMask {
-                bounds,
-                fade_out: Edges::default(),
+                bounds: self.cover_bounds(parent.bounds),
+                fade_out: parent.fade_out.scale(self.scale_factor()),
             },
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,
@@ -4231,7 +4233,15 @@ impl Window {
             is_start: true,
             inline: false,
         };
-        self.with_filter_boundary(boundary, paint)
+        self.with_filter_boundary(boundary, |window| {
+            window.content_mask_stack.push(ContentMask {
+                bounds: viewport,
+                fade_out: Edges::default(),
+            });
+            let result = paint(window);
+            window.content_mask_stack.pop();
+            result
+        })
     }
 
     pub(crate) fn with_element_scale<R>(

@@ -23,7 +23,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 mod bounds;
 pub use bounds::*;
 mod compositor;
-pub use compositor::CompositorSprite;
+pub use compositor::{CompositorGroup, CompositorSprite, SpriteContents};
 mod damage;
 pub use damage::{DamagePlan, DamageRedraw};
 mod motion;
@@ -103,6 +103,7 @@ pub struct Scene {
     pub offload_animations: bool,
     pub scale_factor: f32,
     compositor_sprites: Vec<CompositorSprite>,
+    compositor_groups: Vec<CompositorGroup>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
@@ -129,6 +130,7 @@ impl Scene {
         self.surfaces.clear();
         self.surface_opacities.clear();
         self.compositor_sprites.clear();
+        self.compositor_groups.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
@@ -521,6 +523,11 @@ impl Scene {
     /// The animated sprites the platform compositor draws; see [`Self::offload_animations`].
     pub fn compositor_sprites(&self) -> &[CompositorSprite] {
         &self.compositor_sprites
+    }
+
+    /// The looping motion groups the platform rasterises and animates.
+    pub fn compositor_groups(&self) -> &[CompositorGroup] {
+        &self.compositor_groups
     }
 
     /// A process-unique id assigned by every `finish`; equal ids mean identical primitives.

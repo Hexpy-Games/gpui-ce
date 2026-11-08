@@ -2331,6 +2331,15 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    #[cfg(feature = "wgpu")]
+    fn rasterize_offscreen(
+        &self,
+        scene: &gpui::Scene,
+        rect: Bounds<gpui::ScaledPixels>,
+    ) -> Option<(Size<gpui::DevicePixels>, Arc<[u8]>)> {
+        self.0.lock().renderer.rasterize(scene, rect)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
     }

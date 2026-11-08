@@ -1,11 +1,11 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, WgpuContextHandle, WgpuDeviceRequirements};
-use gpui::{DevicePixels, GpuSpecs, Scene, Size};
+use gpui::{Bounds, DevicePixels, GpuSpecs, ScaledPixels, Scene, Size};
 
 #[cfg(test)]
 use gpui::BackdropFilter;
 #[cfg(all(test, feature = "test-support", not(target_family = "wasm")))]
-use gpui::{Bounds, ColorExt, Quad, ScaledPixels, Underline, blue, red, white};
+use gpui::{ColorExt, Quad, Underline, blue, red, white};
 #[cfg(test)]
 use gpui_render::blur::{BlurKernel, MAX_GAUSSIAN_SAMPLES_PER_SIDE};
 #[cfg(test)]
@@ -276,6 +276,108 @@ impl WgpuRenderer {
     #[cfg(feature = "test-support")]
     pub fn set_animation_time_ms(&mut self, ms: u32) {
         self.animation_time_ms = ms;
+    }
+
+    /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
+    pub fn rasterize(
+        &mut self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let device = self.resources().device.clone();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("motion_group"),
+            size: wgpu::Extent3d {
+                width: self.target.width(),
+                height: self.target.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
+        let row_bytes = width * 4;
+        let padded = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("motion_group_readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let (format, alpha, clear) = (
+            self.target.config.format,
+            self.target.config.alpha_mode,
+            self.target.clear_color,
+        );
+        self.target.config.format = wgpu::TextureFormat::Bgra8Unorm;
+        self.target.config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
+        self.target.clear_color = wgpu::Color::TRANSPARENT;
+        self.rebuild_pipelines();
+        let rendered = self.render_to_view(scene, &view);
+        self.target.config.format = format;
+        self.target.config.alpha_mode = alpha;
+        self.target.clear_color = clear;
+        self.rebuild_pipelines();
+        if !rendered {
+            return None;
+        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: rect.origin.x.0 as u32,
+                    y: rect.origin.y.0 as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = self.resources().queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .ok()?;
+        receiver.recv().ok()?.ok()?;
+        let mapped = buffer.slice(..).get_mapped_range();
+        let mut bytes = Vec::with_capacity(row_bytes as usize * height as usize);
+        for row in mapped.chunks_exact(padded as usize) {
+            bytes.extend_from_slice(&row[..row_bytes as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Some((
+            gpui::size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            bytes.into(),
+        ))
     }
 
     /// Encodes and submits a complete scene into an arbitrary color target.
