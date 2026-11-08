@@ -452,6 +452,10 @@ impl Scene {
     pub fn finish(&mut self) {
         let layers = std::mem::take(&mut self.live_layers);
         for layer in layers {
+            // A layer laid out at zero size has no surface to present to; it paints nothing.
+            if layer.bounds.size.width.0 < 1.0 || layer.bounds.size.height.0 < 1.0 {
+                continue;
+            }
             if !self.offload_animations
                 || compositor::covered(
                     self,
