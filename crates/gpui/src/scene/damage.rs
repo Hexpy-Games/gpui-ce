@@ -791,5 +791,28 @@ mod tests {
         };
         assert!(scene.animating_at(100));
         assert!(!scene.animating_at(250));
+
+        let mut boundary = scene.filter_boundaries.pop().unwrap();
+        boundary.motion = LayerMotion {
+            start_ms: crate::animation_time_ms().wrapping_sub(100),
+            duration_ms: 1,
+            repeat: MotionRepeat::Once,
+            opacity: (0.0, 1.0),
+            ..LayerMotion::NONE
+        };
+        scene.insert_primitive(boundary.clone());
+        scene.insert_primitive(Quad {
+            bounds: rect(10.0, 10.0, 20.0, 20.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        scene.finish();
+        assert!(scene.filter_boundaries.is_empty());
+        assert_eq!(scene.quads.len(), 1);
+        assert_eq!(scene.quads[0].bounds, rect(10.0, 10.0, 20.0, 20.0));
     }
 }

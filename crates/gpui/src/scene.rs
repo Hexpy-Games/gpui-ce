@@ -489,6 +489,32 @@ impl Scene {
         // the start (false = 0) ahead of the end (true = 1) so the pair stays well-formed.
         self.filter_boundaries
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
+        let now = animation_time_ms();
+        let mut pending_starts = SmallVec::<[usize; 4]>::new();
+        let mut removed_orders = FxHashSet::default();
+        for (index, boundary) in self.filter_boundaries.iter().enumerate() {
+            if boundary.is_start {
+                pending_starts.push(index);
+            } else if let Some(start_index) = pending_starts.pop() {
+                let start = &self.filter_boundaries[start_index];
+                if start.motion.is_animated()
+                    && !start.motion.is_active(now)
+                    && start.motion.rests_at_end()
+                    && start.opacity == 1.0
+                    && start.scale == 1.0
+                    && start.filters.is_empty()
+                {
+                    removed_orders.insert(start.order);
+                    removed_orders.insert(boundary.order);
+                }
+            }
+        }
+        self.filter_boundaries
+            .retain(|boundary| !removed_orders.contains(&boundary.order));
+        self.paint_operations.retain(|operation| {
+            !matches!(operation, PaintOperation::Primitive(Primitive::FilterBoundary(boundary))
+                if removed_orders.contains(&boundary.order))
+        });
         let commands = std::mem::take(&mut self.render_plan.commands);
         self.render_plan = ScenePlan::build(self, commands);
         // The plan says which filter groups are isolated, so sprites move out only after it.

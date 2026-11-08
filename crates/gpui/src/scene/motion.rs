@@ -115,6 +115,18 @@ impl LayerMotion {
         self.duration_ms > 0
     }
 
+    /// Whether the motion ends with identity composite parameters and remains visible.
+    pub fn rests_at_end(&self) -> bool {
+        self.opacity.1 == 1.0
+            && self.offset.1 == point(Pixels::ZERO, Pixels::ZERO)
+            && self.relative_offset.1 == point(0.0, 0.0)
+            && self.scale.1 == 1.0
+            && self.rotation.1 == 0.0
+            && self.clip.is_none()
+            && self.visible.0 <= 1.0
+            && self.visible.1 >= 1.0
+    }
+
     fn linear_progress(&self, now_ms: u32) -> f32 {
         if !self.is_animated() {
             return 0.0;
