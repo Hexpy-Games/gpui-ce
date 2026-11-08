@@ -8,7 +8,7 @@ use super::{
 use gpui::{
     BackdropFilter, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite, Point,
     PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow,
-    Size, SubpixelSprite, Underline,
+    Size, SubpixelSprite, Underline, backdrop_appear_parameters,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
@@ -557,12 +557,14 @@ impl<'a> FrameEncoder<'a> {
                             );
                             continue;
                         }
+                        let (lens, radius) =
+                            backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
                         let width = self.renderer.target.width();
                         let height = self.renderer.target.height();
                         let region = gpui_render::blur::backdrop_snapshot_region(
                             filter.bounds,
-                            filter.max_blur_radius(),
-                            &filter.lens,
+                            radius,
+                            &lens,
                             width,
                             height,
                         );
@@ -585,9 +587,8 @@ impl<'a> FrameEncoder<'a> {
                             // The plan promised a cache entry for every glass it does not re-blur.
                             return Err(DrawError::MissingIntermediateTarget);
                         }
-                        let radius = filter.max_blur_radius();
                         let snapshot = if hit {
-                            if filter.lens.is_active() {
+                            if lens.is_active() {
                                 self.renderer.resources().backdrop_snapshot_view.clone()
                             } else {
                                 None
@@ -600,7 +601,7 @@ impl<'a> FrameEncoder<'a> {
                                 self.targets.backdrop_layers(),
                                 region,
                             ))
-                        } else if filter.lens.is_active() {
+                        } else if lens.is_active() {
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 std::iter::once(self.targets.current()),
@@ -625,7 +626,7 @@ impl<'a> FrameEncoder<'a> {
                                 scale_origin: Point::default(),
                                 composite_offset: Point::default(),
                                 clip: FilterCompositeClip::RoundedBounds,
-                                lens: filter.lens,
+                                lens,
                             },
                             hit,
                             scissor,
@@ -645,7 +646,7 @@ impl<'a> FrameEncoder<'a> {
                                         ),
                                     )
                                 });
-                            let sharp = if filter.lens.is_active() {
+                            let sharp = if lens.is_active() {
                                 resources.backdrop_snapshot_texture.as_ref().map(|texture| {
                                     (
                                         texture,

@@ -460,6 +460,7 @@ fn smoothed_primitives_share_one_contour() {
         filters: smallvec![ScaledFilter::Blur(ScaledPixels(5.0))],
         opacity: 1.0,
         lens: Default::default(),
+        appear: None,
         wallpaper: None,
     });
 

@@ -504,7 +504,12 @@ impl Scene {
             || self
                 .filter_boundaries
                 .iter()
-                .any(|boundary| boundary.motion.is_animated());
+                .any(|boundary| boundary.motion.is_animated())
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_animated())
+            });
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.is_finished = true;
     }
@@ -529,6 +534,11 @@ impl Scene {
                 .filter_boundaries
                 .iter()
                 .any(|boundary| boundary.motion.is_active(now_ms))
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_active(now_ms))
+            })
     }
 
     /// Whether retained animation parameters differ between these clock values.
@@ -556,6 +566,11 @@ impl Scene {
                 .filter_boundaries
                 .iter()
                 .any(|boundary| boundary.motion.changes_between(a_ms, b_ms))
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.changes_between(a_ms, b_ms))
+            })
     }
 
     /// Procedural layers drawn on separate platform surfaces.
@@ -1220,8 +1235,33 @@ pub struct BackdropFilter {
     pub opacity: f32,
     /// Optional liquid-glass lens applied while compositing.
     pub lens: BackdropLens,
+    /// Optional starting lens and blur, interpolated at draw time.
+    pub appear: Option<BackdropAppear>,
     /// A procedural wallpaper drawn here instead of filtering the backdrop.
     pub wallpaper: Option<WallpaperPaint>,
+}
+
+/// Starting lens and blur in device pixels, with appearance timing.
+#[derive(Debug, Clone, Copy)]
+#[expect(missing_docs)]
+pub struct BackdropAppear {
+    pub lens: BackdropLens,
+    pub blur: f32,
+    pub motion: LayerMotion,
+}
+
+/// Resolves a backdrop filter's lens and blur at the wrapping animation clock value.
+pub fn backdrop_appear_parameters(filter: &BackdropFilter, now_ms: u32) -> (BackdropLens, f32) {
+    let blur = filter.max_blur_radius();
+    if let Some(appear) = filter.appear {
+        let p = appear.motion.progress(now_ms);
+        (
+            appear.lens.lerp(&filter.lens, p),
+            appear.blur + (blur - appear.blur) * p,
+        )
+    } else {
+        (filter.lens, blur)
+    }
 }
 
 /// One fullscreen shader pass of a [`WallpaperPaint`], rendered into its own cached texture of
@@ -1341,6 +1381,42 @@ pub struct BackdropLens {
 }
 
 impl BackdropLens {
+    /// Interpolates lens strengths, taking non-numeric fields from `to`.
+    pub fn lerp(&self, to: &Self, p: f32) -> Self {
+        Self {
+            bezel: self.bezel + (to.bezel - self.bezel) * p,
+            saturation: match (self.saturation, to.saturation) {
+                (Some(from), Some(to)) => Some(from + (to - from) * p),
+                _ => to.saturation,
+            },
+            refraction: self.refraction + (to.refraction - self.refraction) * p,
+            specular: self.specular + (to.specular - self.specular) * p,
+            dispersion: self.dispersion + (to.dispersion - self.dispersion) * p,
+            frost: self.frost + (to.frost - self.frost) * p,
+            lift: self.lift + (to.lift - self.lift) * p,
+            rim: self.rim + (to.rim - self.rim) * p,
+            depth: self.depth + (to.depth - self.depth) * p,
+            light_angle: self.light_angle + (to.light_angle - self.light_angle) * p,
+            opposite: self.opposite + (to.opposite - self.opposite) * p,
+            shade: self.shade + (to.shade - self.shade) * p,
+            fresnel: self.fresnel + (to.fresnel - self.fresnel) * p,
+            focus: self.focus + (to.focus - self.focus) * p,
+            ambient: self.ambient + (to.ambient - self.ambient) * p,
+            halo: self.halo + (to.halo - self.halo) * p,
+            fold: self.fold + (to.fold - self.fold) * p,
+            fold_band: self.fold_band + (to.fold_band - self.fold_band) * p,
+            fold_depth: self.fold_depth + (to.fold_depth - self.fold_depth) * p,
+            curve: self.curve + (to.curve - self.curve) * p,
+            sharp_rim: self.sharp_rim + (to.sharp_rim - self.sharp_rim) * p,
+            sharp_full: to.sharp_full,
+            tone: std::array::from_fn(|i| self.tone[i] + (to.tone[i] - self.tone[i]) * p),
+            hairline: std::array::from_fn(|i| {
+                self.hairline[i] + (to.hairline[i] - self.hairline[i]) * p
+            }),
+            exact: to.exact,
+        }
+    }
+
     /// Whether the lens changes anything.
     pub fn is_active(&self) -> bool {
         self.bezel > 0.0 || self.saturation.is_some()

@@ -982,10 +982,12 @@ impl DirectXRenderer {
                                 self.dx_draw_wallpaper(current_rtv, filter, paint)?;
                                 continue;
                             }
+                            let (lens, radius) =
+                                backdrop_appear_parameters(filter, self.animation_time_ms);
                             let region = backdrop_snapshot_region(
                                 filter.bounds,
-                                filter.max_blur_radius(),
-                                &filter.lens,
+                                radius,
+                                &lens,
                                 self.width,
                                 self.height,
                             );
@@ -1010,7 +1012,7 @@ impl DirectXRenderer {
                             // A lens reads the sharp full-resolution backdrop, so it needs a copy
                             // even when the backdrop is the target it composites into.
                             let source = if hit {
-                                if filter.lens.is_active() {
+                                if lens.is_active() {
                                     self.dx_snapshot_source()?
                                 } else {
                                     current_srv.clone()
@@ -1020,7 +1022,7 @@ impl DirectXRenderer {
                                     targets.backdrop_layers().map(|(_, source)| source),
                                     region,
                                 )?
-                            } else if filter.lens.is_active() {
+                            } else if lens.is_active() {
                                 self.dx_snapshot_backdrop(std::iter::once(current_srv), region)?
                             } else {
                                 current_srv.clone()
@@ -1032,13 +1034,13 @@ impl DirectXRenderer {
                                 filter.content_mask.bounds,
                                 filter.corner_radii,
                                 filter.corner_smoothing,
-                                filter.max_blur_radius(),
+                                radius,
                                 filter.opacity,
                                 true,
                                 1.0,
                                 Point::default(),
                                 Point::default(),
-                                filter.lens,
+                                lens,
                                 hit,
                             )?;
                             if let (false, Some(key)) = (hit, key) {
@@ -2105,7 +2107,7 @@ impl DirectXRenderer {
         ) else {
             return;
         };
-        let radius = filter.max_blur_radius();
+        let (lens, radius) = backdrop_appear_parameters(filter, self.animation_time_ms);
         let blurred = match (BlurKernel::for_radius(radius), blur.scratch.as_ref()) {
             (Some(_), Some([ping, _])) => Some((
                 &ping.texture,
@@ -2118,7 +2120,7 @@ impl DirectXRenderer {
             )),
             _ => None,
         };
-        let sharp = match (filter.lens.is_active(), blur.snapshot.as_ref()) {
+        let sharp = match (lens.is_active(), blur.snapshot.as_ref()) {
             (true, Some(snapshot)) => Some((
                 &snapshot.texture,
                 ScissorRectangle {

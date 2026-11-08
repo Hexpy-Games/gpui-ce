@@ -1,21 +1,21 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, BackdropLens, Background,
-    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
-    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
-    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
-    Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
-    LineLayoutIndex, LiveLayer, LivePaint, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    Motion, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, PopupMenuItem, Priority, PromptButton, PromptLevel, Quad,
-    RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage, RenderImageParams,
-    RenderSvgParams, Replay, ResizeEdge, ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels, Scene, Shadow,
-    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropAppear, BackdropFilter, BackdropLens,
+    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
+    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs,
+    InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, LiveLayer, LivePaint, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem, Priority,
+    PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
+    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
+    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
     TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
     Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
@@ -4873,6 +4873,79 @@ impl Window {
             filters,
             opacity: 1.0,
             lens,
+            appear: None,
+            wallpaper: None,
+        });
+    }
+
+    /// Paints a backdrop lens whose lens and blur interpolate from the given starting values.
+    /// `filters` must contain exactly one [`Filter::Blur`], giving the final blur radius.
+    /// Starting lens lengths and blur are in logical pixels, as in [`Self::paint_backdrop_lens`].
+    pub fn paint_backdrop_lens_appearing(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_smoothing: f32,
+        filters: &[Filter],
+        lens: BackdropLens,
+        from_lens: BackdropLens,
+        from_blur: Pixels,
+        motion: crate::LayerMotion,
+    ) {
+        if !motion.is_animated() {
+            self.paint_backdrop_lens(bounds, corner_radii, corner_smoothing, filters, lens);
+            return;
+        }
+        assert!(matches!(filters, [Filter::Blur(_)]));
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let filters: SmallVec<[ScaledFilter; 4]> = filters
+            .iter()
+            .filter(|filter| !filter.is_identity())
+            .map(|filter| filter.scale(scale_factor))
+            .collect();
+        if filters.is_empty() && !lens.is_active() {
+            return;
+        }
+        let lens = BackdropLens {
+            bezel: lens.bezel * scale_factor,
+            refraction: lens.refraction * scale_factor,
+            frost: lens.frost * scale_factor,
+            rim: lens.rim * scale_factor,
+            depth: lens.depth * scale_factor,
+            curve: lens.curve * scale_factor,
+            ..lens
+        };
+
+        let from_lens = BackdropLens {
+            bezel: from_lens.bezel * scale_factor,
+            refraction: from_lens.refraction * scale_factor,
+            frost: from_lens.frost * scale_factor,
+            rim: from_lens.rim * scale_factor,
+            depth: from_lens.depth * scale_factor,
+            curve: from_lens.curve * scale_factor,
+            ..from_lens
+        };
+
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: if lens.exact {
+                bounds.scale(scale_factor)
+            } else {
+                self.snap_bounds(bounds)
+            },
+            content_mask: self.snapped_content_mask(),
+            corner_radii: corner_radii.scale(scale_factor),
+            corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
+            filters,
+            opacity: 1.0,
+            lens,
+            appear: Some(BackdropAppear {
+                lens: from_lens,
+                blur: f32::from(from_blur) * scale_factor,
+                motion,
+            }),
             wallpaper: None,
         });
     }
@@ -4897,6 +4970,7 @@ impl Window {
             filters: SmallVec::new(),
             opacity: opacity.clamp(0.0, 1.0),
             lens: BackdropLens::default(),
+            appear: None,
             wallpaper: Some(wallpaper),
         });
     }

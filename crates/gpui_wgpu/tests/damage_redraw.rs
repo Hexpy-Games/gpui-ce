@@ -88,6 +88,7 @@ fn glass(glass_bounds: Bounds<ScaledPixels>) -> BackdropFilter {
         filters: smallvec![ScaledFilter::Blur(ScaledPixels(4.0))],
         opacity: 1.0,
         lens: Default::default(),
+        appear: None,
         wallpaper: None,
     }
 }

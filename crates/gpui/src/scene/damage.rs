@@ -99,13 +99,22 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
             ));
         }
     }
+    let mut reblur = SmallVec::<[usize; 4]>::new();
+    for (index, filter) in scene.backdrop_filters.iter().enumerate() {
+        if filter
+            .appear
+            .is_some_and(|appear| appear.motion.is_animated())
+        {
+            changed.push((filter.painted_bounds(), filter.order));
+            reblur.push(index);
+        }
+    }
     changed.retain(|(bounds, _)| !bounds.is_empty());
     let mut rect = changed
         .iter()
         .map(|(bounds, _)| *bounds)
         .reduce(|a, b| a.union(&b))?;
 
-    let mut reblur = SmallVec::<[usize; 4]>::new();
     loop {
         let mut added = false;
         for (index, filter) in scene.backdrop_filters.iter().enumerate() {
@@ -310,9 +319,9 @@ mod tests {
     // test-category: pure-logic
     use super::*;
     use crate::{
-        AtlasTextureId, AtlasTextureKind, AtlasTile, ContentMask, DevicePixels, FilterBoundary,
-        FrameLoop, LayerMotion, MonochromeSprite, MotionEasing, MotionRepeat, Quad, ScaledFilter,
-        TileId, bounds, px, size,
+        AtlasTextureId, AtlasTextureKind, AtlasTile, BackdropAppear, BackdropLens, ContentMask,
+        DevicePixels, FilterBoundary, FrameLoop, LayerMotion, MonochromeSprite, MotionEasing,
+        MotionRepeat, Quad, ScaledFilter, TileId, backdrop_appear_parameters, bounds, px, size,
     };
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
@@ -380,6 +389,41 @@ mod tests {
         ] {
             assert!((a - e).abs() < 1e-3, "{actual:?} != {expected:?}");
         }
+    }
+
+    #[test]
+    fn backdrop_appearance_animates_lens_and_blur_with_partial_damage() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(BackdropFilter {
+            filters: smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(20.0))],
+            lens: BackdropLens {
+                refraction: 10.0,
+                ..Default::default()
+            },
+            appear: Some(BackdropAppear {
+                lens: BackdropLens::default(),
+                blur: 0.0,
+                motion: LayerMotion {
+                    start_ms: 0,
+                    duration_ms: 200,
+                    repeat: MotionRepeat::Once,
+                    easing: MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
+                    ..LayerMotion::NONE
+                },
+            }),
+            ..glass(rect(100.0, 100.0, 40.0, 40.0))
+        });
+        scene.finish();
+
+        assert!(scene.has_animations());
+        let DamagePlan::Partial(damage) = scene.damage_plan() else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(damage.reblur.as_slice(), &[0]);
+        let (lens, blur) = backdrop_appear_parameters(&scene.backdrop_filters[0], 100);
+        assert_eq!(blur, 10.0);
+        assert_eq!(lens.refraction, 5.0);
+        assert!(!scene.animating_at(250));
     }
 
     #[test]
