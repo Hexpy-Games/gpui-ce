@@ -294,7 +294,7 @@ impl WgpuRenderer {
     ) -> bool {
         let clear = self.target.clear_color;
         self.target.clear_color = wgpu::Color::TRANSPARENT;
-        let rendered = frame::render_offscreen(self, scene, view, size);
+        let rendered = frame::render_offscreen(self, scene, view, size, Some(size));
         self.target.clear_color = clear;
         frame::write_shader_globals(self, self.target.viewport_size());
         rendered
@@ -317,7 +317,7 @@ impl WgpuRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8Unorm,
+            format: self.target.format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -332,30 +332,11 @@ impl WgpuRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        // Same pipelines as the window when its target already matches; the window keeps its
-        // retained frame, backdrop keys and surface cache.
-        let wanted = (
-            wgpu::TextureFormat::Bgra8Unorm,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-        );
-        let (format, alpha, clear) = (
-            self.target.config.format,
-            self.target.config.alpha_mode,
-            self.target.clear_color,
-        );
-        let rebuild = (format, alpha) != wanted;
-        (self.target.config.format, self.target.config.alpha_mode) = wanted;
+        let clear = self.target.clear_color;
         self.target.clear_color = wgpu::Color::TRANSPARENT;
-        if rebuild {
-            self.rebuild_pipelines();
-        }
-        let rendered = frame::render_offscreen(self, scene, &view, self.target.viewport_size());
-        self.target.config.format = format;
-        self.target.config.alpha_mode = alpha;
+        let rendered =
+            frame::render_offscreen(self, scene, &view, self.target.viewport_size(), None);
         self.target.clear_color = clear;
-        if rebuild {
-            self.rebuild_pipelines();
-        }
         if !rendered {
             return None;
         }
@@ -406,6 +387,11 @@ impl WgpuRenderer {
         }
         drop(mapped);
         buffer.unmap();
+        if self.target.format() == wgpu::TextureFormat::Rgba8Unorm {
+            for pixel in bytes.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
         Some((
             gpui::size(DevicePixels(width as i32), DevicePixels(height as i32)),
             bytes.into(),
@@ -435,8 +421,10 @@ fn begin_color_render_pass<'encoder>(
     label: &'encoder str,
     target: &'encoder wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
+    extent: Option<Size<DevicePixels>>,
+    mut scissor: Option<gpui_render::blur::ScissorRectangle>,
 ) -> wgpu::RenderPass<'encoder> {
-    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: target,
@@ -449,7 +437,34 @@ fn begin_color_render_pass<'encoder>(
         })],
         depth_stencil_attachment: None,
         ..Default::default()
-    })
+    });
+    if let Some(extent) = extent {
+        let width = extent.width.0 as u32;
+        let height = extent.height.0 as u32;
+        pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+        scissor = Some(scissor.map_or(
+            gpui_render::blur::ScissorRectangle {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            |scissor| {
+                let x = scissor.x.min(width);
+                let y = scissor.y.min(height);
+                gpui_render::blur::ScissorRectangle {
+                    x,
+                    y,
+                    width: (scissor.x + scissor.width).min(width) - x,
+                    height: (scissor.y + scissor.height).min(height) - y,
+                }
+            },
+        ));
+    }
+    if let Some(scissor) = scissor {
+        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
+    }
+    pass
 }
 
 #[cfg(test)]

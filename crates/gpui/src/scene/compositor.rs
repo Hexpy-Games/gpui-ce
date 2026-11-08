@@ -1,8 +1,8 @@
 //! Animated sprites the platform compositor draws instead of the GPU frame.
 
 use super::{
-    DrawOrder, FilterRenderTarget, FrameLoop, PaintOperation, PaintedBounds, Primitive,
-    RenderCommand, Scene,
+    BackdropFilter, DrawOrder, FilterRenderTarget, FrameLoop, PaintOperation, PaintedBounds,
+    Primitive, RenderCommand, Scene,
 };
 use crate::{
     AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Hsla, LayerMotion, MotionRepeat, Point,
@@ -63,7 +63,7 @@ pub struct CompositorGroup {
 /// scene's sprite lists into `compositor_sprites`. Returns whether any moved.
 ///
 /// Such a sprite has no transformation, sits in no isolated filter group, is outside its content
-/// mask's fade, and has nothing at or above its draw order that paints over it or samples it.
+/// mask's fade, and has nothing at or above its draw order that paints over it.
 pub(super) fn offload(scene: &mut Scene) -> bool {
     let boundaries = &scene.filter_boundaries;
     let isolated: SmallVec<[(DrawOrder, DrawOrder); 4]> = scene
@@ -301,8 +301,8 @@ pub(super) fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledP
 }
 
 /// Whether a primitive other than `sprite` at or after `order` paints inside `painted`, or a
-/// backdrop filter there samples from it. Primitives in one paint layer share an order, so an equal
-/// order may still draw above.
+/// backdrop filter there paints inside it. Primitives in one paint layer share an order, so an
+/// equal order may still draw above.
 pub(super) fn covered(
     scene: &Scene,
     sprite: *const (),
@@ -348,5 +348,5 @@ pub(super) fn covered(
         || scene
             .backdrop_filters
             .iter()
-            .any(|item| above(item.order) && hit(item.sampling_region()))
+            .any(|item| above(item.order) && hit(BackdropFilter::painted_bounds(item)))
 }

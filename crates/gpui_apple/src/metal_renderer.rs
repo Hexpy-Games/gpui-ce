@@ -1358,7 +1358,7 @@ impl MetalRenderer {
                     );
                 }
 
-                (ping, blur_size)
+                (ping, full_size)
             } else {
                 (source, full_size)
             };

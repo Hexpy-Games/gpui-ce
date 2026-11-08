@@ -210,7 +210,7 @@ pub mod blur {
         texture_sample_level(
             BLUR_TEXTURE,
             BLUR_SAMPLER,
-            position / get!(BLUR_LOCALS).target_size,
+            position / get!(BLUR_LOCALS).source_size,
             0.0,
         )
     }
@@ -700,7 +700,12 @@ pub mod blur {
             );
             return texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, source_coordinates, 0.0);
         }
-        texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, input.texture_coordinates, 0.0)
+        texture_sample_level(
+            BLUR_TEXTURE,
+            BLUR_SAMPLER,
+            input.position.xy() / get!(BLUR_LOCALS).source_size,
+            0.0,
+        )
     }
 
     pub fn sample_blur_texture(texture_coordinates: Vec2f) -> Vec4f {

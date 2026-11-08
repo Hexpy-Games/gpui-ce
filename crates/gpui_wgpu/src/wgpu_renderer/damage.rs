@@ -46,6 +46,7 @@ pub(super) fn render_damage_to_view(
         &plan.commands,
         Some(plan),
         Some(scissor),
+        None,
         targets,
     );
     submit(renderer, encoder, readback)

@@ -1952,7 +1952,7 @@ impl DirectXRenderer {
             corner_smoothing,
             opacity,
             clip,
-            source_size,
+            full_size,
             full_size,
         )
         .with_lens(lens)
