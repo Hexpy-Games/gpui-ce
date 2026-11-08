@@ -102,6 +102,19 @@ impl MacWgpuRenderer {
         self.renderer.needs_redraw()
     }
 
+    /// Presents an animation tick of the scene last passed to [`Self::draw`]. Returns whether the
+    /// next frame must render the scene again, uncached.
+    pub fn draw_animation_frame(&mut self, scene: &Scene) -> bool {
+        if self.renderer.device_lost() {
+            if let Err(error) = self.renderer.recover_metal_layer(&self.layer) {
+                log::warn!("GPU recovery failed, will retry on next frame: {error}");
+            }
+            return true;
+        }
+        self.renderer.draw_animation_frame(scene);
+        self.renderer.needs_redraw()
+    }
+
     pub fn gpu_specs(&self) -> GpuSpecs {
         self.renderer.gpu_specs()
     }

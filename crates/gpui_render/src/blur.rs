@@ -82,6 +82,15 @@ impl BlurUniforms {
         )
     }
 
+    /// A fill of the pass's scissor with `color`, drawn with the overwrite downsample pipeline;
+    /// the colour travels in `wp_mode`, unused outside wallpaper passes.
+    pub fn fill(color: [f32; 4]) -> Self {
+        Self {
+            wp_mode: wgsl_rs::std::vec4f(color[0], color[1], color[2], color[3]),
+            ..empty_uniforms(DownsampleMode::Fill)
+        }
+    }
+
     pub fn gaussian(axis: BlurAxis, texture_size: [f32; 2], kernel: BlurKernel) -> Self {
         let direction = match axis {
             BlurAxis::Horizontal => vec2f(1.0 / texture_size[0], 0.0),

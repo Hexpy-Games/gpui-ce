@@ -340,6 +340,9 @@ impl<V: View> IntoElement for ViewElement<V> {
 struct ViewElementState {
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
+    /// Element states the view's render and request_layout used when the render happened in
+    /// request_layout (the probe), before `prepaint_range` began; reuse keeps them alive too.
+    layout_states: Range<usize>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
 }
@@ -350,6 +353,7 @@ pub struct ViewElementRequestLayoutState {
     element: Option<AnyElement>,
     detached_layout_id: Option<LayoutId>,
     accessed_entities: FxHashSet<EntityId>,
+    layout_states: Range<usize>,
 }
 
 #[derive(Default)]
@@ -412,6 +416,7 @@ impl<V: View> Element for ViewElement<V> {
                     !known || window.dirty_views.contains(&entity_id) || window.refreshing;
 
                 if should_probe {
+                    let layout_states_start = window.element_states_index();
                     let ((element, detached_layout_id), accessed_entities) = cx
                         .detect_accessed_entities(|cx| {
                             let mut element = render_view(self.view.take().unwrap(), window, cx);
@@ -430,6 +435,7 @@ impl<V: View> Element for ViewElement<V> {
                             element: Some(element),
                             detached_layout_id: Some(detached_layout_id),
                             accessed_entities,
+                            layout_states: layout_states_start..window.element_states_index(),
                         },
                     );
                 }
@@ -498,6 +504,8 @@ impl<V: View> Element for ViewElement<V> {
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {
+                            element_state.layout_states =
+                                window.reuse_element_states(element_state.layout_states.clone());
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
@@ -549,6 +557,7 @@ impl<V: View> Element for ViewElement<V> {
                                 accessed_entities,
                                 prepaint_range: prepaint_start..prepaint_end,
                                 paint_range: PaintIndex::default()..PaintIndex::default(),
+                                layout_states: mem::take(&mut request_layout.layout_states),
                                 cache_key,
                             },
                         )

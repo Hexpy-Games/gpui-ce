@@ -99,7 +99,6 @@ painted_bounds_is_bounds!(
     Quad,
     Path<ScaledPixels>,
     Underline,
-    PolychromeSprite,
     PaintSurface,
     BackdropFilter,
 );
@@ -112,9 +111,42 @@ impl PaintedBounds for Shadow {
     }
 }
 
+/// The square around the centre of `bounds` that a sprite turning about that centre stays within:
+/// its half side is half the bounds' diagonal.
+fn turn_square(bounds: &Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+    let half = 0.5 * bounds.size.width.0.hypot(bounds.size.height.0);
+    let center = bounds.center();
+    Bounds::from_corners(
+        point(
+            ScaledPixels(center.x.0 - half),
+            ScaledPixels(center.y.0 - half),
+        ),
+        point(
+            ScaledPixels(center.x.0 + half),
+            ScaledPixels(center.y.0 + half),
+        ),
+    )
+}
+
 impl PaintedBounds for MonochromeSprite {
     fn painted_bounds(&self) -> Bounds<ScaledPixels> {
-        transformed(&self.bounds, &self.transformation).intersect(&self.content_mask.bounds)
+        let reach = if self.frames.turn_period_ms != 0 {
+            turn_square(&self.bounds)
+        } else {
+            self.bounds
+        };
+        transformed(&reach, &self.transformation).intersect(&self.content_mask.bounds)
+    }
+}
+
+impl PaintedBounds for PolychromeSprite {
+    fn painted_bounds(&self) -> Bounds<ScaledPixels> {
+        let reach = if self.frames.turn_period_ms != 0 {
+            turn_square(&self.bounds)
+        } else {
+            self.bounds
+        };
+        reach.intersect(&self.content_mask.bounds)
     }
 }
 

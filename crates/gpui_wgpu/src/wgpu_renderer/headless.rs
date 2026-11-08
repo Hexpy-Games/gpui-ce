@@ -220,6 +220,27 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
         self.renderer.read_offscreen_target(target, submission)
     }
 
+    fn set_animation_time_ms(&mut self, time_ms: u32) {
+        self.renderer.set_animation_time_ms(time_ms);
+    }
+
+    fn render_animation_frame_to_image(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.ensure_target(size)?;
+        let target = self.target.as_ref().expect("target was just ensured");
+        let submission = super::damage::render_damage_to_view(
+            &mut self.renderer,
+            scene,
+            &target.view,
+            Some(target.readback_copy()),
+        )
+        .ok_or_else(|| anyhow::anyhow!("the animation tick needs a full encode"))?;
+        self.renderer.read_offscreen_target(target, submission)
+    }
+
     fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.ensure_target(size)?;
         let target = self.target.as_ref().expect("target was just ensured");

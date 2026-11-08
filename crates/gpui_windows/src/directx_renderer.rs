@@ -95,6 +95,14 @@ pub(crate) struct DirectXRenderer {
     path_sprites: Vec<PathSprite>,
     /// Cached wallpaper pass targets and noise textures (wallpapers.rs).
     wallpapers: wallpapers::DxWallpaperCacheCell,
+    /// The animation clock the shaders read, in milliseconds.
+    animation_time_ms: u32,
+    /// Generation of the scene whose complete frame the offscreen scene target holds.
+    retained: Option<u64>,
+    /// Generation and backdrop-cache keys of the last full encode; damage ticks reuse them.
+    frame_keys: (u64, Vec<Option<u64>>),
+    /// The damage rectangle every draw is clipped to while a damage redraw runs.
+    damage_scissor: Option<windows::Win32::Foundation::RECT>,
 }
 
 /// Direct3D objects
@@ -329,6 +337,10 @@ impl DirectXRenderer {
             path_rasterization_vertices: Vec::new(),
             path_sprites: Vec::new(),
             wallpapers: Default::default(),
+            animation_time_ms: 0,
+            retained: None,
+            frame_keys: (0, Vec::new()),
+            damage_scissor: None,
         })
     }
 
@@ -336,7 +348,8 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
-    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+    /// Uploads the per-frame global and font constants.
+    fn upload_globals(&self) -> Result<()> {
         let resources = self.resources.as_ref().expect("resources missing");
         let device_context = &self
             .devices
@@ -351,7 +364,7 @@ impl DirectXRenderer {
                 // DirectComposition wants premultiplied output, but path rasterization
                 // premultiplies in-shader; scene geometry blends straight alpha as before.
                 premultiplied_alpha: ShaderBool::Disabled,
-                padding: 0,
+                animation_time_ms: self.animation_time_ms,
             }],
         )?;
         update_buffer(
@@ -370,6 +383,17 @@ impl DirectXRenderer {
                 padding: 0,
             }],
         )?;
+        Ok(())
+    }
+
+    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+        self.upload_globals()?;
+        let resources = self.resources.as_ref().expect("resources missing");
+        let device_context = &self
+            .devices
+            .as_ref()
+            .expect("devices missing")
+            .device_context;
         unsafe {
             device_context.ClearRenderTargetView(
                 resources
@@ -469,6 +493,7 @@ impl DirectXRenderer {
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
+        self.retained = None;
         Ok(())
     }
 
@@ -482,6 +507,7 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        self.animation_time_ms = gpui::animation_time_ms();
         self.render(scene, background_appearance)?;
         self.present()
     }
@@ -493,6 +519,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        self.retained = None;
         self.pre_draw(&match background_appearance {
             appearance if appearance.is_opaque() => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -500,7 +527,7 @@ impl DirectXRenderer {
 
         self.upload_scene_buffers(scene)?;
 
-        let use_offscreen = scene.requires_offscreen_rendering();
+        let use_offscreen = scene.requires_offscreen_rendering() || scene.has_animations();
         let requirements = scene.render_plan().requirements();
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
@@ -564,12 +591,48 @@ impl DirectXRenderer {
             use_offscreen.then(|| scene_srv.clone()).flatten(),
         ));
 
+        self.encode_commands(scene, scene.render_commands(), &mut targets, &groups, None)?;
+
+        // Present the offscreen scene by blitting it into the swapchain.
+        if use_offscreen {
+            self.dx_blit(&scene_srv, &swapchain_rtv)?;
+        }
+        self.active_render_target = None;
+        self.retained = use_offscreen.then(|| scene.generation());
+        Ok(())
+    }
+
+    /// Encodes `commands` (the whole scene, or a damage plan's restricted list) into the targets.
+    /// A full encode also records the frame's backdrop-cache keys for later damage ticks.
+    fn encode_commands(
+        &mut self,
+        scene: &Scene,
+        commands: &[RenderCommand],
+        targets: &mut TargetStack<(
+            Option<ID3D11RenderTargetView>,
+            Option<ID3D11ShaderResourceView>,
+        )>,
+        groups: &[(
+            Option<ID3D11RenderTargetView>,
+            Option<ID3D11ShaderResourceView>,
+        )],
+        damage: Option<&DamageRedraw>,
+    ) -> Result<()> {
+        let ctx = self
+            .devices
+            .as_ref()
+            .context("devices missing")?
+            .device_context
+            .clone();
         let annotation = self
             .devices
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
-        let backdrop_keys = if scene.backdrop_filters.is_empty() {
+        let backdrop_keys = if damage.is_some() {
+            // A damage tick reuses the keys of the full frame it patches.
+            self.frame_keys.1.clone()
+        } else if scene.backdrop_filters.is_empty() {
             Vec::new()
         } else {
             gpui_render::backdrop_key::backdrop_keys(
@@ -577,7 +640,10 @@ impl DirectXRenderer {
                 size(DevicePixels(self.width as i32), DevicePixels(self.height as i32)),
             )
         };
-        for command in scene.render_commands() {
+        if damage.is_none() {
+            self.frame_keys = (scene.generation(), backdrop_keys.clone());
+        }
+        for command in commands {
             let _annotation = annotation
                 .as_ref()
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(command.label())));
@@ -643,12 +709,22 @@ impl DirectXRenderer {
                             );
                             // The cache holds the blurred backdrop (and a lens's sharp copy) of a
                             // filter whose sampling region did not change since it was stored.
-                            let key = if targets.inherits_backdrop() {
+                            let reblur = damage
+                                .is_some_and(|plan| plan.reblur.contains(&(range.start + index)));
+                            let key = if targets.inherits_backdrop() || reblur {
                                 None
                             } else {
                                 backdrop_keys.get(range.start + index).copied().flatten()
                             };
                             let hit = key.is_some_and(|key| self.dx_restore_backdrop(key));
+                            if damage.is_some()
+                                && !reblur
+                                && !hit
+                                && damage::uses_blurred_backdrop(filter)
+                            {
+                                // The plan promised a cache entry for every glass it does not re-blur.
+                                anyhow::bail!("damage redraw is missing a cached backdrop");
+                            }
                             // A lens reads the sharp full-resolution backdrop, so it needs a copy
                             // even when the backdrop is the target it composites into.
                             let source = if hit {
@@ -773,12 +849,6 @@ impl DirectXRenderer {
         }
 
         targets.assert_balanced();
-
-        // Present the offscreen scene by blitting it into the swapchain.
-        if use_offscreen {
-            self.dx_blit(&scene_srv, &swapchain_rtv)?;
-        }
-        self.active_render_target = None;
         Ok(())
     }
 
@@ -866,6 +936,7 @@ impl DirectXRenderer {
         }
         self.width = width;
         self.height = height;
+        self.retained = None;
 
         // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -1295,7 +1366,7 @@ impl DirectXRenderer {
     }
 
     /// Runs `pass` with the scissor test limited to `scissor` (half-resolution blur passes only
-    /// shade the blurred bounds, as on wgpu), then restores the plain rasterizer state.
+    /// shade the blurred bounds, as on wgpu), then restores the batch rasterizer state.
     fn dx_scissored(
         &self,
         scissor: &ScissorRectangle,
@@ -1317,8 +1388,26 @@ impl DirectXRenderer {
             ctx.RSSetScissorRects(Some(slice::from_ref(&rect)));
         }
         let result = pass();
-        unsafe { ctx.RSSetState(&self.pipelines.plain_rasterizer) };
+        self.restore_rasterizer();
         result
+    }
+
+    /// Sets the rasterizer state batch draws inherit: scissored to the damage rectangle during a
+    /// damage redraw, plain otherwise.
+    fn restore_rasterizer(&self) {
+        let Some(devices) = self.devices.as_ref() else {
+            return;
+        };
+        let ctx = &devices.device_context;
+        unsafe {
+            match self.damage_scissor {
+                Some(rect) => {
+                    ctx.RSSetState(&self.pipelines.scissor_rasterizer);
+                    ctx.RSSetScissorRects(Some(slice::from_ref(&rect)));
+                }
+                None => ctx.RSSetState(&self.pipelines.plain_rasterizer),
+            }
+        }
     }
 
     /// Blur `source_srv` (full-resolution) using the half-res ping/pong textures and composite the
@@ -2743,6 +2832,7 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 const BUFFER_COUNT: usize = 3;
 
 mod backdrop_cache;
+mod damage;
 mod wallpapers;
 
 use backdrop_cache::DxBackdropCache;
@@ -3286,6 +3376,7 @@ mod tests {
             color: green.into(),
             tile: mono,
             transformation: Default::default(),
+            frames: FrameLoop::NONE,
         });
         scene.insert_primitive(PolychromeSprite {
             order: 0,
@@ -3296,6 +3387,7 @@ mod tests {
             content_mask: full_mask(),
             corner_radii: Default::default(),
             tile: poly,
+            frames: FrameLoop::NONE,
         });
         // Overlapping the image lifts this quad above it, splitting the quads into two
         // batches. The second one starts at instance 1 of the frame's quad buffer.

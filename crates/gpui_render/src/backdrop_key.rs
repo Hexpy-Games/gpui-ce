@@ -50,6 +50,18 @@ fn filter_key(
     {
         return None;
     }
+    // An animated sprite changes every tick, so what is behind this filter is never the same.
+    let monochrome_end = scene.monochrome_sprites.partition_point(|p| p.order < order);
+    let polychrome_end = scene.polychrome_sprites.partition_point(|p| p.order < order);
+    if scene.monochrome_sprites[..monochrome_end]
+        .iter()
+        .any(|sprite| sprite.frames.is_animated() && touches(sprite.painted_bounds()))
+        || scene.polychrome_sprites[..polychrome_end]
+            .iter()
+            .any(|sprite| sprite.frames.is_animated() && touches(sprite.painted_bounds()))
+    {
+        return None;
+    }
     let filters_end = scene.backdrop_filters[..index].partition_point(|p| p.order < order);
     let mut entries: Vec<(DrawOrder, u8, u64)> = Vec::new();
     for (lower_index, lower) in scene.backdrop_filters[..filters_end].iter().enumerate() {
@@ -207,9 +219,7 @@ mod tests {
         scene.insert_primitive(BackdropFilter {
             bounds: scaled_bounds(100.0, 100.0, 100.0),
             content_mask: mask,
-            filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
-                .into_iter()
-                .collect(),
+            filters: [ScaledFilter::Blur(ScaledPixels(4.0))].into_iter().collect(),
             opacity: 1.0,
             ..Default::default()
         });

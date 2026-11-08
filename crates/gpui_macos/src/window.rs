@@ -2321,6 +2321,16 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn draw_animation_frame(&self, scene: &gpui::Scene) {
+        let mut this = self.0.lock();
+        #[cfg(feature = "wgpu")]
+        if this.renderer.draw_animation_frame(scene) {
+            this.force_render_pending = true;
+        }
+        #[cfg(not(feature = "wgpu"))]
+        this.renderer.draw(scene);
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
     }

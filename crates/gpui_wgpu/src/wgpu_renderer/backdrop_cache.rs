@@ -115,6 +115,11 @@ fn store_copy(
 }
 
 impl BackdropCache {
+    /// Whether an entry exists for `key`.
+    pub(super) fn contains(&self, key: u64) -> bool {
+        self.entries.contains_key(&key)
+    }
+
     /// Copies the entry for `key` back into `ping` (half-res) and `snapshot` (full-res) at their
     /// original rects; false when there is no entry or a needed target is missing.
     pub(super) fn restore(

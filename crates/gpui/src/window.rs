@@ -1890,12 +1890,30 @@ impl Window {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .log_err();
+                } else {
+                    // Nothing changed but the scene carries animated primitives: the GPU
+                    // advances them, so present the same scene again.
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            if window.rendered_frame.scene.has_animations() {
+                                window
+                                    .platform_window
+                                    .draw_animation_frame(&window.rendered_frame.scene);
+                            }
+                        })
+                        .log_err();
                 }
 
+                let animating = handle
+                    .update(&mut cx, |_, window, _| {
+                        window.rendered_frame.scene.has_animations()
+                    })
+                    .unwrap_or(false);
                 handle
                     .update(&mut cx, |_, window, _| {
                         if window.invalidator.is_dirty()
                             || !window.next_frame_callbacks.borrow().is_empty()
+                            || animating
                         {
                             window.platform_window.schedule_frame();
                         }
@@ -1907,7 +1925,8 @@ impl Window {
                 // after this frame (the window was re-invalidated mid-draw, or
                 // animations scheduled next-frame callbacks), re-arm the frame
                 // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() || animating
+                {
                     invalidator.wake_platform();
                 }
             }
@@ -3826,6 +3845,21 @@ impl Window {
         }
     }
 
+    /// How many element states the frame being drawn has used so far.
+    pub(crate) fn element_states_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// Keeps the element states of `range` of the rendered frame for the frame being drawn, as
+    /// if they were used again, and returns where they now sit.
+    pub(crate) fn reuse_element_states(&mut self, range: Range<usize>) -> Range<usize> {
+        let start = self.next_frame.accessed_element_states.len();
+        self.next_frame
+            .accessed_element_states
+            .extend_from_slice(&self.rendered_frame.accessed_element_states[range]);
+        start..self.next_frame.accessed_element_states.len()
+    }
+
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
@@ -5096,6 +5130,7 @@ impl Window {
                     color: mask_color.into(),
                     tile,
                     transformation: TransformationMatrix::unit(),
+                    frames: crate::FrameLoop::NONE,
                 });
             }
             RasterizedGlyphFormat::BgraSubpixelMask => {
@@ -5119,6 +5154,7 @@ impl Window {
                     content_mask,
                     tile,
                     opacity: 1.0,
+                    frames: crate::FrameLoop::NONE,
                 });
             }
         }
@@ -5261,8 +5297,116 @@ impl Window {
             color: color.into(),
             tile,
             transformation,
+            frames: crate::FrameLoop::NONE,
         });
 
+        Ok(())
+    }
+
+    /// Paints a looping flipbook in `bounds`. The first paint rasterizes `frame(i)` (SVG bytes of
+    /// frame i) for every frame into one atlas grid, cached by `key`, device size, frame count and
+    /// colour mode. `Some(color)` tints an alpha mask (monochrome sprite); `None` keeps the SVG's
+    /// colours (polychrome sprite). The scene then stays unchanged while the loop plays.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_svg_frames(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        key: SharedString,
+        frames: crate::FrameSpec,
+        frame: &dyn Fn(usize) -> Vec<u8>,
+        color: Option<Hsla>,
+        cx: &App,
+    ) -> Result<()> {
+        // Largest grid side; under every backend's atlas texture limit.
+        const MAX_GRID_SIDE: usize = 4096;
+
+        self.invalidator.debug_assert_paint();
+        anyhow::ensure!(
+            frames.frame_count > 0,
+            "a flipbook needs at least one frame"
+        );
+
+        // Rasterize 1:1 with the device pixels, so a cell maps pixel for pixel onto the sprite.
+        let bounds = self.snap_bounds(bounds);
+        let size = bounds.size.map(|value| DevicePixels(value.0.ceil() as i32));
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            return Ok(());
+        }
+        let gutter = 2 * crate::FRAME_GUTTER as usize;
+        let cell_width = size.width.0 as usize + gutter;
+        let cell_height = size.height.0 as usize + gutter;
+        let columns = (MAX_GRID_SIDE / cell_width).clamp(1, frames.frame_count);
+        let rows = frames.frame_count.div_ceil(columns);
+        anyhow::ensure!(
+            columns * cell_width <= MAX_GRID_SIDE && rows * cell_height <= MAX_GRID_SIDE,
+            "a flipbook of {} frames at {}x{} does not fit one atlas tile",
+            frames.frame_count,
+            size.width.0,
+            size.height.0,
+        );
+
+        let polychrome = color.is_none();
+        let params = crate::RenderFramesParams {
+            key,
+            size,
+            frame_count: frames.frame_count,
+            polychrome,
+        };
+        let Some(tile) =
+            self.sprite_atlas
+                .get_or_insert_with(&crate::AtlasKey::Frames(params), &mut || {
+                    let (grid_size, bytes) = cx.svg_renderer.render_frame_grid(
+                        size,
+                        frames.frame_count,
+                        columns,
+                        polychrome,
+                        frame,
+                    )?;
+                    Ok(Some((grid_size, Cow::Owned(bytes))))
+                })?
+        else {
+            return Ok(());
+        };
+
+        let millis = |duration: std::time::Duration| {
+            u32::try_from(duration.as_millis())
+                .unwrap_or(u32::MAX)
+                .max(1)
+        };
+        let frame_loop = crate::FrameLoop {
+            frame_count: frames.frame_count as u32,
+            columns: columns as u32,
+            period_ms: millis(frames.period),
+            start_ms: frames.start_ms,
+            turn_period_ms: frames.turn.map_or(0, millis),
+            padding: 0,
+        };
+        let content_mask = self.snapped_content_mask();
+        if let Some(color) = color {
+            self.next_frame.scene.insert_primitive(MonochromeSprite {
+                order: 0,
+                padding: 0,
+                bounds,
+                content_mask,
+                color: color.into(),
+                tile,
+                transformation: TransformationMatrix::unit(),
+                frames: frame_loop,
+            });
+        } else {
+            self.next_frame.scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                grayscale: false.into(),
+                corner_smoothing: 0.0,
+                bounds,
+                corner_radii: Default::default(),
+                content_mask,
+                tile,
+                opacity: 1.0,
+                frames: frame_loop,
+            });
+        }
         Ok(())
     }
 
@@ -5369,6 +5513,7 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity: 1.0,
+            frames: crate::FrameLoop::NONE,
         });
         Ok(())
     }
@@ -9874,5 +10019,52 @@ mod tests {
             assert_eq!(renders.get(), initial_renders);
             assert_eq!(paints.get(), initial_paints);
         }
+    }
+
+    struct KeyedStateChild {
+        seen: Rc<RefCell<Vec<EntityId>>>,
+    }
+
+    impl Render for KeyedStateChild {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let state = window.use_keyed_state("kept", cx, |_, _| 0usize);
+            self.seen.borrow_mut().push(state.entity_id());
+            div().size(px(10.0))
+        }
+    }
+
+    struct KeyedStateParent {
+        child: Entity<KeyedStateChild>,
+    }
+
+    impl Render for KeyedStateParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut child_style = div().size(px(10.0));
+            div().size(px(20.0)).child(
+                self.child
+                    .clone()
+                    .cached(child_style.style().clone())
+                    .into_any_element(),
+            )
+        }
+    }
+
+    #[test]
+    fn cached_view_keeps_render_time_state_across_reuse() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut app = TestApp::new();
+        let mut test_window = app.open_window(|_, cx| KeyedStateParent {
+            child: cx.new(|_| KeyedStateChild { seen: seen.clone() }),
+        });
+        test_window.draw();
+        // The parent redraws and reuses the cached child as it is.
+        test_window.update(|_, _, cx| cx.notify());
+        test_window.draw();
+        // The child renders again: the state it keyed during render is still the same entity.
+        test_window.update(|parent, _, cx| parent.child.update(cx, |_, cx| cx.notify()));
+        test_window.draw();
+        let seen = seen.borrow();
+        assert!(seen.len() >= 2, "the child rendered {} times", seen.len());
+        assert!(seen.windows(2).all(|pair| pair[0] == pair[1]));
     }
 }

@@ -963,6 +963,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Presents an animation tick of the scene last passed to `draw` (unchanged since).
+    fn draw_animation_frame(&self, scene: &Scene) {
+        self.draw(scene)
+    }
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
@@ -1170,6 +1174,19 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// Sets the animation clock the next renders read.
+    fn set_animation_time_ms(&mut self, _time_ms: u32) {}
+
+    /// Redraws an animation tick over the frame the previous render of the same scene retained,
+    /// and reads it back; errors when the tick needs a full encode.
+    fn render_animation_frame_to_image(
+        &mut self,
+        _scene: &Scene,
+        _size: Size<DevicePixels>,
+    ) -> Result<RgbaImage> {
+        anyhow::bail!("animation frames are not supported")
+    }
 }
 
 /// Type alias for runnables with metadata.
@@ -1893,6 +1910,20 @@ pub enum AtlasKey {
     },
     Svg(RenderSvgParams),
     Image(RenderImageParams),
+    Frames(RenderFramesParams),
+}
+
+/// Identity of a flipbook grid in the sprite atlas.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RenderFramesParams {
+    /// Caller-chosen identity of the animation.
+    pub key: SharedString,
+    /// Size of one frame, in device pixels, without its gutter.
+    pub size: Size<DevicePixels>,
+    /// Number of frames in the grid.
+    pub frame_count: usize,
+    /// Whether the grid keeps the frames' colours (polychrome) or is an alpha mask (monochrome).
+    pub polychrome: bool,
 }
 
 impl AtlasKey {
@@ -1913,6 +1944,8 @@ impl AtlasKey {
             },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
             AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
+            AtlasKey::Frames(params) if params.polychrome => AtlasTextureKind::Polychrome,
+            AtlasKey::Frames(_) => AtlasTextureKind::Monochrome,
         }
     }
 }
@@ -1926,6 +1959,12 @@ impl From<(RenderGlyphParams, RasterizedGlyphFormat)> for AtlasKey {
 impl From<RenderSvgParams> for AtlasKey {
     fn from(params: RenderSvgParams) -> Self {
         Self::Svg(params)
+    }
+}
+
+impl From<RenderFramesParams> for AtlasKey {
+    fn from(params: RenderFramesParams) -> Self {
+        Self::Frames(params)
     }
 }
 

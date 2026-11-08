@@ -1,7 +1,7 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
-use super::{AtlasTextureId, BatchIterator, FilterBoundary, Scene};
+use super::{AtlasTextureId, BatchIterator, DamagePlan, FilterBoundary, Scene};
 use smallvec::SmallVec;
-use std::ops::Range;
+use std::{ops::Range, sync::OnceLock};
 
 /// Inline capacity of renderer isolation stacks. Deeper groups allocate additional targets.
 pub const MAX_FILTER_GROUP_DEPTH: usize = 2;
@@ -58,6 +58,7 @@ pub struct ScenePlan {
     pub(super) commands: Vec<RenderCommand>,
     requirements: ScenePlanRequirements,
     scene_lengths: SceneLengths,
+    pub(super) damage: OnceLock<DamagePlan>,
 }
 
 impl ScenePlan {
@@ -65,6 +66,7 @@ impl ScenePlan {
         self.commands.clear();
         self.requirements = ScenePlanRequirements::default();
         self.scene_lengths = SceneLengths::default();
+        self.damage = OnceLock::new();
     }
 
     pub(super) fn build(scene: &Scene, mut commands: Vec<RenderCommand>) -> Self {
@@ -83,7 +85,6 @@ impl ScenePlan {
 
         let mut filter_stack = SmallVec::<[(usize, FilterRenderTarget); 4]>::new();
         let mut isolated_depth = 0;
-        let mut requirements = ScenePlanRequirements::default();
 
         for batch in BatchIterator::new(scene) {
             match batch {
@@ -97,10 +98,6 @@ impl ScenePlan {
                         };
                         if target.is_isolated() {
                             isolated_depth += 1;
-                            requirements.uses_offscreen_target = true;
-                            requirements.uses_blur_target |= boundary.max_blur_radius() > 0.0;
-                            requirements.isolated_target_count =
-                                requirements.isolated_target_count.max(isolated_depth);
                         }
                         filter_stack.push((boundary_index, target));
                         commands.push(RenderCommand::BeginFilter {
@@ -110,7 +107,6 @@ impl ScenePlan {
                     } else if let Some((start_index, target)) = filter_stack.pop() {
                         if target.is_isolated() {
                             isolated_depth -= 1;
-                            requirements.isolated_filter_count += 1;
                         }
                         commands.push(RenderCommand::EndFilter {
                             boundary_index: start_index,
@@ -126,28 +122,16 @@ impl ScenePlan {
                         });
                     }
                 }
-                batch => {
-                    if let PrimitiveBatch::BackdropFilters(range) = &batch {
-                        let filters = &scene.backdrop_filters[range.clone()];
-                        requirements.uses_blur_target |=
-                            filters.iter().any(|filter| filter.max_blur_radius() > 0.0);
-                        requirements.backdrop_lens_count += filters
-                            .iter()
-                            .filter(|filter| filter.lens.is_active())
-                            .count();
-                    }
-
-                    requirements.include_batch(&batch);
-                    commands.push(RenderCommand::Batch(batch));
-                }
+                batch => commands.push(RenderCommand::Batch(batch)),
             }
         }
 
-        requirements.command_count = commands.len();
+        let requirements = requirements_for(scene, &commands);
         Self {
             commands,
             requirements,
             scene_lengths: SceneLengths::for_scene(scene),
+            damage: OnceLock::new(),
         }
     }
 
@@ -168,6 +152,44 @@ impl ScenePlan {
             "scene primitive storage changed after Scene::finish"
         );
     }
+}
+
+/// The resource totals for `commands`, a stream compiled from (or restricted from) `scene`.
+pub(super) fn requirements_for(scene: &Scene, commands: &[RenderCommand]) -> ScenePlanRequirements {
+    let mut requirements = ScenePlanRequirements::default();
+    for command in commands {
+        match command {
+            RenderCommand::Batch(batch) => {
+                if let PrimitiveBatch::BackdropFilters(range) = batch {
+                    let filters = &scene.backdrop_filters[range.clone()];
+                    requirements.uses_blur_target |=
+                        filters.iter().any(|filter| filter.max_blur_radius() > 0.0);
+                    requirements.backdrop_lens_count += filters
+                        .iter()
+                        .filter(|filter| filter.lens.is_active())
+                        .count();
+                }
+                requirements.include_batch(batch);
+            }
+            RenderCommand::BeginFilter {
+                boundary_index,
+                target: FilterRenderTarget::Isolated(index),
+            } => {
+                requirements.uses_offscreen_target = true;
+                requirements.uses_blur_target |=
+                    scene.filter_boundaries[*boundary_index].max_blur_radius() > 0.0;
+                requirements.isolated_target_count =
+                    requirements.isolated_target_count.max(index.as_usize() + 1);
+            }
+            RenderCommand::EndFilter {
+                target: FilterRenderTarget::Isolated(_),
+                ..
+            } => requirements.isolated_filter_count += 1,
+            RenderCommand::BeginFilter { .. } | RenderCommand::EndFilter { .. } => {}
+        }
+    }
+    requirements.command_count = commands.len();
+    requirements
 }
 
 impl ScenePlanRequirements {

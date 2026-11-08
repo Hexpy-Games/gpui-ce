@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 mod backdrop_cache;
 mod buffers;
+mod damage;
 mod drawing;
 mod filters;
 mod frame;
@@ -72,6 +73,12 @@ pub struct WgpuRenderer {
     adapter_info: wgpu::AdapterInfo,
     uploaded_globals: Option<frame::GlobalUniformState>,
     faults: GpuFaultState,
+    /// The animation clock the next frame's shaders read, in milliseconds.
+    animation_time_ms: u32,
+    /// The scene generation whose complete frame `scene_color` holds, if any.
+    retained: Option<u64>,
+    /// The backdrop-cache keys of the last full frame, with that frame's scene generation.
+    frame_keys: (u64, Vec<Option<u64>>),
 }
 
 impl WgpuRenderer {
@@ -130,6 +137,9 @@ impl WgpuRenderer {
             dual_source_blending,
             adapter_info,
             uploaded_globals: None,
+            animation_time_ms: 0,
+            retained: None,
+            frame_keys: (0, Vec::new()),
             faults: GpuFaultState {
                 pending_error: last_error,
                 consecutive_failed_frames: 0,
@@ -144,6 +154,7 @@ impl WgpuRenderer {
         if !self.target.resize(size) {
             return;
         }
+        self.retained = None;
         let config = self.target.configuration().clone();
         let Some(resources) = self.resources.as_mut() else {
             return;
@@ -161,6 +172,7 @@ impl WgpuRenderer {
 
     /// Updates platform-specific text rasterization parameters.
     pub fn set_font_rasterization_settings(&mut self, settings: FontRasterizationSettings) {
+        self.retained = None;
         self.rendering_params.font_rasterization = settings;
         self.subpixel_order = settings.subpixel_order;
     }
@@ -178,6 +190,7 @@ impl WgpuRenderer {
         if !self.target.set_transparent(transparent) {
             return;
         }
+        self.retained = None;
         let config = self.target.configuration().clone();
         if let Some(resources) = self.resources.as_ref() {
             if let Some(surface) = resources.surface.as_ref() {
@@ -257,6 +270,12 @@ impl WgpuRenderer {
 
     pub fn max_texture_size(&self) -> u32 {
         self.target.maximum_dimension()
+    }
+
+    /// Sets the animation clock the next frames read; the headless override of the wall clock.
+    #[cfg(feature = "test-support")]
+    pub fn set_animation_time_ms(&mut self, ms: u32) {
+        self.animation_time_ms = ms;
     }
 
     /// Encodes and submits a complete scene into an arbitrary color target.
@@ -411,8 +430,9 @@ mod tests {
         scene.finish();
 
         assert_eq!(
-            frame::FrameRequirements::for_scene(
-                &scene,
+            frame::FrameRequirements::for_commands(
+                scene.render_commands(),
+                scene.render_plan().requirements(),
                 super::buffers::InstanceTransport::StorageBuffer
             )
             .uniforms,
@@ -831,7 +851,7 @@ mod tests {
             filters,
             opacity,
             scale: 1.0,
-            scale_origin: Point::default(),
+            scale_origin: gpui::Point::default(),
             is_start: true,
             inline: false,
         };

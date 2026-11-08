@@ -1190,6 +1190,14 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    fn draw_animation_frame(&self, scene: &Scene) {
+        self.state
+            .renderer
+            .borrow_mut()
+            .draw_animation_frame(scene, self.state.background_appearance.get())
+            .log_err();
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state

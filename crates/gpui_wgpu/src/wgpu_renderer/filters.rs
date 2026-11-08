@@ -64,6 +64,7 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         blurred_ready: bool,
+        target_scissor: Option<ScissorRectangle>,
     ) {
         if parameters.blur_radius <= 0.0
             && !parameters.lens.is_active()
@@ -75,7 +76,14 @@ impl WgpuRenderer {
         let full_size = [self.target.width() as f32, self.target.height() as f32];
 
         let Some(kernel) = BlurKernel::for_radius(parameters.blur_radius) else {
-            self.composite_texture(encoder, source, target, parameters, full_size);
+            self.composite_texture(
+                encoder,
+                source,
+                target,
+                parameters,
+                full_size,
+                target_scissor,
+            );
 
             return;
         };
@@ -149,7 +157,14 @@ impl WgpuRenderer {
             );
         }
 
-        self.composite_texture(encoder, &horizontal_target, target, parameters, blur_size);
+        self.composite_texture(
+            encoder,
+            &horizontal_target,
+            target,
+            parameters,
+            blur_size,
+            target_scissor,
+        );
         if parameters.lens.is_active() && parameters.lens.sharp_rim > 0.0 {
             self.composite_texture_with(
                 encoder,
@@ -158,6 +173,7 @@ impl WgpuRenderer {
                 parameters,
                 full_size,
                 parameters.lens.sharp_rim,
+                target_scissor,
             );
         }
     }
@@ -169,10 +185,20 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
+        scissor: Option<ScissorRectangle>,
     ) {
-        self.composite_texture_with(encoder, source, target, parameters, source_size, 0.0);
+        self.composite_texture_with(
+            encoder,
+            source,
+            target,
+            parameters,
+            source_size,
+            0.0,
+            scissor,
+        );
     }
 
+    /// `scissor` limits the pass to a damage rectangle of `target`.
     /// `sharp_rim` > 0: the lens's sharp-rim pass (see `BlurUniforms::with_sharp_rim_pass`).
     fn composite_texture_with(
         &self,
@@ -182,6 +208,7 @@ impl WgpuRenderer {
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
         sharp_rim: f32,
+        scissor: Option<ScissorRectangle>,
     ) {
         let clips_to_bounds = matches!(parameters.clip, FilterCompositeClip::RoundedBounds);
         let composite_bounds = if clips_to_bounds {
@@ -219,7 +246,7 @@ impl WgpuRenderer {
             source,
             uniforms,
             wgpu::LoadOp::Load,
-            None,
+            scissor,
         );
     }
 
@@ -283,6 +310,7 @@ impl WgpuRenderer {
                     lens: Default::default(),
                 },
                 full_size,
+                None,
             );
         }
 

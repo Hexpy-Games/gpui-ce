@@ -75,7 +75,7 @@ impl SceneUniforms {
                 // Metal composites straight-alpha; paths premultiply in-shader, matching
                 // the neutral (disabled) shader behavior.
                 premultiplied_alpha: ShaderBool::Disabled,
-                padding: 0,
+                animation_time_ms: gpui::animation_time_ms(),
             },
             // Metal text is gamma-corrected grayscale; font corrections stay neutral.
             font: FontRasterizationUniforms {
@@ -2278,6 +2278,7 @@ mod tests {
             color: white().into(),
             tile,
             transformation: TransformationMatrix::unit(),
+            frames: gpui::FrameLoop::NONE,
         });
         scene.finish();
 
@@ -2855,6 +2856,7 @@ mod tests {
             },
             corner_radii: Corners::all(ScaledPixels(1.0)),
             tile,
+            frames: gpui::FrameLoop::NONE,
         });
         sprite.finish();
         let Some(image) = render_for_contracts(

@@ -1,5 +1,5 @@
 use crate::{
-    AssetRegistry, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
+    AssetRegistry, DevicePixels, FRAME_GUTTER, IsZero, RenderImage, Result, SharedString, Size,
     swap_rgba_pa_to_bgra,
 };
 use image::Frame;
@@ -262,6 +262,72 @@ impl SvgRenderer {
         } else {
             Ok(None)
         }
+    }
+
+    /// Rasterizes `count` SVG frames at exactly `size` into one row-major grid with a
+    /// `FRAME_GUTTER` border per cell: an alpha mask, or straight BGRA when `polychrome`.
+    pub(crate) fn render_frame_grid(
+        &self,
+        size: Size<DevicePixels>,
+        count: usize,
+        columns: usize,
+        polychrome: bool,
+        frame: &dyn Fn(usize) -> Vec<u8>,
+    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
+        anyhow::ensure!(!size.is_zero(), "can't render at a zero size");
+        anyhow::ensure!(
+            columns > 0 && count > 0,
+            "a flipbook needs frames and columns"
+        );
+        let gutter = FRAME_GUTTER as usize;
+        let (width, height) = (
+            i32::from(size.width) as usize,
+            i32::from(size.height) as usize,
+        );
+        let (cell_width, cell_height) = (width + 2 * gutter, height + 2 * gutter);
+        let rows = count.div_ceil(columns);
+        let (grid_width, grid_height) = (columns * cell_width, rows * cell_height);
+        let bytes_per_pixel = if polychrome { 4 } else { 1 };
+        let mut grid = vec![0u8; grid_width * grid_height * bytes_per_pixel];
+
+        for index in 0..count {
+            let tree = usvg::Tree::from_data(&frame(index), &self.usvg_options)?;
+            let pixmap = rasterize_tree(&tree, SvgSize::ExactSize(size))?;
+            anyhow::ensure!(
+                pixmap.width() as usize == width && pixmap.height() as usize == height,
+                "flipbook frame {index} was rasterized at {}x{}, not {width}x{height}",
+                pixmap.width(),
+                pixmap.height(),
+            );
+            let origin_x = (index % columns) * cell_width + gutter;
+            let origin_y = (index / columns) * cell_height + gutter;
+            for (row, pixels) in pixmap.pixels().chunks_exact(width).enumerate() {
+                let start = ((origin_y + row) * grid_width + origin_x) * bytes_per_pixel;
+                let destination = &mut grid[start..start + width * bytes_per_pixel];
+                if polychrome {
+                    for (out, pixel) in destination.chunks_exact_mut(4).zip(pixels) {
+                        out.copy_from_slice(&[
+                            pixel.red(),
+                            pixel.green(),
+                            pixel.blue(),
+                            pixel.alpha(),
+                        ]);
+                        swap_rgba_pa_to_bgra(out);
+                    }
+                } else {
+                    for (out, pixel) in destination.iter_mut().zip(pixels) {
+                        *out = pixel.alpha();
+                    }
+                }
+            }
+        }
+        Ok((
+            Size::new(
+                DevicePixels(grid_width as i32),
+                DevicePixels(grid_height as i32),
+            ),
+            grid,
+        ))
     }
 
     fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap, usvg::Error> {

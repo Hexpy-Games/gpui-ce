@@ -6,15 +6,17 @@ use super::{
     path_types,
 };
 use gpui::{
-    FilterRenderTarget, MonochromeSprite, Point, PolychromeSprite, PrimitiveBatch, Quad,
-    RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
+    BackdropFilter, DamageRedraw, FilterRenderTarget, MonochromeSprite, Point, PolychromeSprite,
+    PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite,
+    Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
-    BlurKernel, FilterCompositeClip, FilterCompositeParameters,
-    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
+    BlurKernel, FilterCompositeClip, FilterCompositeParameters, GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS,
+    ScissorRectangle,
 };
 use gpui_render::shaders::{
+    blur::BlurUniforms,
     common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool},
     interface as shader_interface,
 };
@@ -25,14 +27,34 @@ pub(super) fn render_to_view(
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
 ) -> Option<wgpu::SubmissionIndex> {
-    let Some(targets) = PreparedTargets::prepare(renderer, scene, frame_view) else {
+    let mut planned = *scene.render_plan().requirements();
+    planned.uses_offscreen_target |= scene.has_animations();
+    let commands = scene.render_commands();
+    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, frame_view)
+    else {
+        renderer.retained = None;
         return None;
     };
     // Prune once against the complete scene. Doing this inside each draw batch would evict a
     // texture that reappears after an intervening primitive and recreate its platform view.
     renderer.retain_surface_cache(&scene.surfaces);
 
-    match FrameEncoder::new(renderer, scene, targets).encode(readback) {
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    let offscreen = encoder.offscreen.is_some();
+    let keys = encoder.backdrop_keys.clone();
+    let submission = submit(renderer, encoder, readback);
+    renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
+    renderer.frame_keys = (scene.generation(), keys);
+    submission
+}
+
+/// Encodes and submits `encoder`; `None` when encoding failed (nothing is submitted).
+pub(super) fn submit(
+    renderer: &WgpuRenderer,
+    encoder: FrameEncoder<'_>,
+    readback: Option<ReadbackCopy<'_>>,
+) -> Option<wgpu::SubmissionIndex> {
+    match encoder.encode(readback) {
         Ok(command_buffer) => Some(renderer.resources().queue.submit([command_buffer])),
         Err(DrawError::ExternalSurface) => None,
         Err(DrawError::CapacityPlanningInvariant) => {
@@ -54,7 +76,7 @@ pub(super) struct ReadbackCopy<'a> {
     pub(super) height: u32,
 }
 
-struct PreparedTargets {
+pub(super) struct PreparedTargets {
     active: wgpu::TextureView,
     presentation: wgpu::TextureView,
     offscreen: Option<wgpu::TextureView>,
@@ -62,18 +84,24 @@ struct PreparedTargets {
 }
 
 impl PreparedTargets {
-    fn prepare(
+    /// Sizes and uploads for `commands`; `extra_filter_uniforms` reserves slots the encoder
+    /// writes beyond what `planned` accounts for. `planned.uses_offscreen_target` selects the
+    /// offscreen target.
+    pub(super) fn prepare(
         renderer: &mut WgpuRenderer,
-        scene: &Scene,
+        commands: &[RenderCommand],
+        planned: ScenePlanRequirements,
+        extra_filter_uniforms: u64,
         frame_view: &wgpu::TextureView,
     ) -> Option<Self> {
         if !begin_frame(renderer) {
             return None;
         }
-        let requirements = {
+        let mut requirements = {
             let transport = renderer.resources().instances.transport();
-            FrameRequirements::for_scene(scene, transport)
+            FrameRequirements::for_commands(commands, &planned, transport)
         };
+        requirements.uniforms.filter_count += extra_filter_uniforms;
         let device = renderer.resources().device.clone();
         let resources = renderer.resources_mut();
         if !resources.instances.ensure_capacity(
@@ -135,6 +163,7 @@ fn begin_frame(renderer: &mut WgpuRenderer) -> bool {
         return true;
     };
 
+    renderer.retained = None;
     renderer.faults.consecutive_failed_frames += 1;
     log::error!(
         "GPU error during frame (failure {} of 10): {error}",
@@ -188,7 +217,7 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         premultiplied_alpha: ShaderBool::from(
             renderer.target.alpha_mode() == wgpu::CompositeAlphaMode::PreMultiplied,
         ),
-        padding: 0,
+        animation_time_ms: renderer.animation_time_ms,
     };
     let path_globals = GlobalUniforms {
         premultiplied_alpha: ShaderBool::Disabled,
@@ -245,8 +274,11 @@ pub(super) struct FrameRequirements {
 }
 
 impl FrameRequirements {
-    pub(super) fn for_scene(scene: &Scene, transport: InstanceTransport) -> Self {
-        let planned = scene.render_plan().requirements();
+    pub(super) fn for_commands(
+        commands: &[RenderCommand],
+        planned: &ScenePlanRequirements,
+        transport: InstanceTransport,
+    ) -> Self {
         let mut storage_bytes = 0_u64;
         let mut instance_batches = 0_u64;
         let mut reserve = |element_size: usize, count: usize| {
@@ -258,7 +290,7 @@ impl FrameRequirements {
             }
         };
 
-        for command in scene.render_commands() {
+        for command in commands {
             let RenderCommand::Batch(batch) = command else {
                 continue;
             };
@@ -320,9 +352,15 @@ impl FrameRequirements {
     }
 }
 
-struct FrameEncoder<'a> {
+pub(super) struct FrameEncoder<'a> {
     renderer: &'a WgpuRenderer,
     scene: &'a Scene,
+    /// The commands to encode: the whole scene, or a damage plan's restricted list.
+    commands: &'a [RenderCommand],
+    /// Set for a damage redraw over the retained frame.
+    damage: Option<&'a DamageRedraw>,
+    /// The damage rectangle every pass that writes the scene target is limited to.
+    scissor: Option<ScissorRectangle>,
     encoder: wgpu::CommandEncoder,
     targets: TargetStack<wgpu::TextureView>,
     offscreen: Option<wgpu::TextureView>,
@@ -331,8 +369,20 @@ struct FrameEncoder<'a> {
     backdrop_keys: Vec<Option<u64>>,
 }
 
+/// Whether compositing `filter` reads a blurred backdrop that the cache can supply.
+pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
+    BlurKernel::for_radius(filter.max_blur_radius()).is_some() || filter.lens.is_active()
+}
+
 impl<'a> FrameEncoder<'a> {
-    fn new(renderer: &'a WgpuRenderer, scene: &'a Scene, targets: PreparedTargets) -> Self {
+    pub(super) fn new(
+        renderer: &'a WgpuRenderer,
+        scene: &'a Scene,
+        commands: &'a [RenderCommand],
+        damage: Option<&'a DamageRedraw>,
+        scissor: Option<ScissorRectangle>,
+        targets: PreparedTargets,
+    ) -> Self {
         let encoder =
             renderer
                 .resources()
@@ -340,7 +390,10 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
-        let backdrop_keys = if scene.backdrop_filters.is_empty() {
+        let backdrop_keys = if damage.is_some() {
+            // Damage ticks reuse the keys of the full frame they patch.
+            renderer.frame_keys.1.clone()
+        } else if scene.backdrop_filters.is_empty() {
             Vec::new()
         } else {
             gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size())
@@ -348,6 +401,9 @@ impl<'a> FrameEncoder<'a> {
         Self {
             renderer,
             scene,
+            commands,
+            damage,
+            scissor,
             encoder,
             targets: TargetStack::new(targets.active),
             offscreen: targets.offscreen,
@@ -357,7 +413,7 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn encode(
+    pub(super) fn encode(
         mut self,
         readback: Option<ReadbackCopy<'_>>,
     ) -> Result<wgpu::CommandBuffer, DrawError> {
@@ -393,15 +449,47 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn encode_commands(&mut self) -> DrawResult {
+        let scissor = self.scissor;
+        let damage = self.damage;
+        let load = if let Some(scissor) = scissor.filter(|_| damage.is_some()) {
+            // A clear ignores the scissor, so the damage rectangle is overwritten with the
+            // frame's clear colour by a scissored draw instead.
+            let renderer = self.renderer;
+            let ping = renderer
+                .resources()
+                .blur_ping_view
+                .clone()
+                .ok_or(DrawError::MissingIntermediateTarget)?;
+            let clear = renderer.target.clear_color();
+            renderer.draw_filter_pass(
+                &mut self.encoder,
+                "damage_clear",
+                &renderer.resources().pipelines.blur_downsample,
+                self.targets.current(),
+                &ping,
+                BlurUniforms::fill([
+                    clear.r as f32,
+                    clear.g as f32,
+                    clear.b as f32,
+                    clear.a as f32,
+                ]),
+                wgpu::LoadOp::Load,
+                Some(scissor),
+            );
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(self.renderer.target.clear_color())
+        };
         let mut pass = begin_scene_render_pass(
             self.renderer,
             &mut self.encoder,
             "main_pass",
             self.targets.current(),
-            wgpu::LoadOp::Clear(self.renderer.target.clear_color()),
+            load,
+            scissor,
         );
 
-        for command in self.scene.render_commands() {
+        for command in self.commands {
             match command {
                 RenderCommand::Batch(PrimitiveBatch::Paths {
                     range,
@@ -424,6 +512,7 @@ impl<'a> FrameEncoder<'a> {
                         "after_paths",
                         self.targets.current(),
                         wgpu::LoadOp::Load,
+                        scissor,
                     );
                     rasterized?;
                     self.renderer.draw_paths_from_intermediate(
@@ -442,6 +531,7 @@ impl<'a> FrameEncoder<'a> {
                                 self.targets.current(),
                                 filter,
                                 paint,
+                                scissor,
                             );
                             continue;
                         }
@@ -454,7 +544,8 @@ impl<'a> FrameEncoder<'a> {
                             width,
                             height,
                         );
-                        let key = if self.targets.inherits_backdrop() {
+                        let reblur = damage.is_some_and(|plan| plan.reblur.contains(&index));
+                        let key = if self.targets.inherits_backdrop() || reblur {
                             None
                         } else {
                             self.backdrop_keys.get(index).copied().flatten()
@@ -468,10 +559,17 @@ impl<'a> FrameEncoder<'a> {
                                 resources.backdrop_snapshot_texture.as_ref(),
                             )
                         });
+                        if damage.is_some() && !reblur && !hit && uses_blurred_backdrop(filter) {
+                            // The plan promised a cache entry for every glass it does not re-blur.
+                            return Err(DrawError::MissingIntermediateTarget);
+                        }
                         let radius = filter.max_blur_radius();
                         let snapshot = if hit {
                             if filter.lens.is_active() {
-                                self.renderer.resources().backdrop_snapshot_view.clone()
+                                self.renderer
+                                    .resources()
+                                    .backdrop_snapshot_view
+                                    .clone()
                             } else {
                                 None
                             }
@@ -510,6 +608,7 @@ impl<'a> FrameEncoder<'a> {
                                 lens: filter.lens,
                             },
                             hit,
+                            scissor,
                         );
                         if let (false, Some(key)) = (hit, key) {
                             let resources = self.renderer.resources();
@@ -556,6 +655,7 @@ impl<'a> FrameEncoder<'a> {
                         "after_backdrop_filter",
                         self.targets.current(),
                         wgpu::LoadOp::Load,
+                        scissor,
                     );
                 }
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
@@ -587,6 +687,7 @@ impl<'a> FrameEncoder<'a> {
                         "filter_group",
                         self.targets.current(),
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        scissor,
                     );
                 }
                 RenderCommand::EndFilter {
@@ -614,6 +715,7 @@ impl<'a> FrameEncoder<'a> {
                             lens: Default::default(),
                         },
                         false,
+                        scissor,
                     );
                     pass = begin_scene_render_pass(
                         self.renderer,
@@ -621,6 +723,7 @@ impl<'a> FrameEncoder<'a> {
                         "after_content_filter",
                         self.targets.current(),
                         wgpu::LoadOp::Load,
+                        scissor,
                     );
                 }
                 RenderCommand::BeginFilter {
@@ -645,6 +748,7 @@ fn begin_scene_render_pass<'a>(
     label: &'a str,
     target: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
+    scissor: Option<ScissorRectangle>,
 ) -> wgpu::RenderPass<'a> {
     let mut pass = begin_color_render_pass(encoder, label, target, load);
     pass.set_bind_group(
@@ -652,6 +756,9 @@ fn begin_scene_render_pass<'a>(
         &renderer.resources().globals_bind_group,
         &[],
     );
+    if let Some(scissor) = scissor {
+        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
+    }
     pass
 }
 

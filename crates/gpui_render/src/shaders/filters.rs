@@ -677,6 +677,9 @@ pub mod blur {
 
     #[fragment]
     pub fn fragment_blur_downsample(input: BlurVarying) -> Vec4f {
+        if get!(BLUR_LOCALS).downsample_mode == DownsampleMode::Fill {
+            return get!(BLUR_LOCALS).wp_mode;
+        }
         if get!(BLUR_LOCALS).downsample_mode == DownsampleMode::HalfResolution {
             let destination = floor(input.position.xy());
             let source_coordinates = min(

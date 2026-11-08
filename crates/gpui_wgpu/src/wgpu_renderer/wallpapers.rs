@@ -6,7 +6,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpui::{BackdropFilter, WallpaperPaint};
-use gpui_render::{blur::FilterCompositeClip, shaders::blur::BlurUniforms};
+use gpui_render::{
+    blur::{FilterCompositeClip, ScissorRectangle},
+    shaders::blur::BlurUniforms,
+};
 
 use super::WgpuRenderer;
 
@@ -91,6 +94,7 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         filter: &BackdropFilter,
         paint: &WallpaperPaint,
+        scissor: Option<ScissorRectangle>,
     ) {
         if paint.passes.is_empty() {
             return;
@@ -193,7 +197,7 @@ impl WgpuRenderer {
             views.last().expect("views"),
             uniforms,
             wgpu::LoadOp::Load,
-            None,
+            scissor,
         );
     }
 }

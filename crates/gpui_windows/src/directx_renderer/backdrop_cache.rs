@@ -4,8 +4,6 @@
 //! passes can be skipped. Entries are keyed by `gpui_render::backdrop_key::backdrop_keys`.
 use std::collections::HashMap;
 
-use gpui_util::ResultExt as _;
-
 use super::*;
 
 /// A rect-sized copy of part of a render target.
@@ -92,9 +90,9 @@ impl DxBackdropCache {
         }
     }
 
-    /// Drops every entry.
-    pub(super) fn clear(&mut self) {
-        self.entries.clear();
+    /// Whether an entry for `key` exists.
+    pub(super) fn contains(&self, key: u64) -> bool {
+        self.entries.contains_key(&key)
     }
 }
 

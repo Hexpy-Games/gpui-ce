@@ -15,10 +15,17 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 mod bounds;
 pub use bounds::*;
+mod damage;
+pub use damage::{DamagePlan, DamageRedraw};
+mod frame_loop;
+pub use frame_loop::*;
 mod plan;
 pub use plan::*;
 mod abi;
@@ -91,6 +98,8 @@ pub struct Scene {
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
     is_finished: bool,
+    has_animations: bool,
+    generation: u64,
 }
 
 #[expect(missing_docs)]
@@ -114,6 +123,8 @@ impl Scene {
         self.filter_boundaries.clear();
         self.render_plan.clear();
         self.is_finished = false;
+        self.has_animations = false;
+        self.generation = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -204,6 +215,7 @@ impl Scene {
                 color: sprite.color,
                 tile: sprite.tile,
                 transformation: sprite.transformation,
+                frames: FrameLoop::NONE,
             });
         }
 
@@ -233,6 +245,13 @@ impl Scene {
                 Primitive::BackdropFilter(filter) => filter
                     .sampling_region()
                     .intersect(&filter.content_mask.bounds),
+                // A turning sprite sweeps past its bounds; order it above what it can reach.
+                Primitive::MonochromeSprite(MonochromeSprite { frames, .. })
+                | Primitive::PolychromeSprite(PolychromeSprite { frames, .. })
+                    if frames.turn_period_ms != 0 =>
+                {
+                    primitive.painted_bounds().unwrap_or(clipped_bounds)
+                }
                 _ => clipped_bounds,
             };
             self.layer_stack
@@ -424,7 +443,31 @@ impl Scene {
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
         let commands = std::mem::take(&mut self.render_plan.commands);
         self.render_plan = ScenePlan::build(self, commands);
+        self.has_animations = self
+            .monochrome_sprites
+            .iter()
+            .any(|sprite| sprite.frames.is_animated())
+            || self
+                .polychrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated());
+        self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.is_finished = true;
+    }
+
+    /// Whether any primitive carries an animated motion (set by `finish`).
+    pub fn has_animations(&self) -> bool {
+        self.has_animations
+    }
+
+    /// A process-unique id assigned by every `finish`; equal ids mean identical primitives.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// What an animation tick redraws; computed once per finished scene.
+    pub fn damage_plan(&self) -> &DamagePlan {
+        self.render_plan().damage.get_or_init(|| damage::plan(self))
     }
 
     #[cfg_attr(
@@ -587,10 +630,17 @@ impl Primitive {
         }
     }
 
-    /// The device-pixel area this primitive can change, clipped to its content mask; `None` for
-    /// a filter boundary, which marks a group rather than painting.
+    /// The device-pixel area this primitive can change, clipped to its content mask. A group
+    /// that filters or scales its content can draw anywhere in its bounds, so its start marker
+    /// claims them; any other boundary is `None`, since an opacity-only group draws no more than
+    /// its content.
     fn painted_bounds(&self) -> Option<Bounds<ScaledPixels>> {
         Some(match self {
+            Primitive::FilterBoundary(boundary)
+                if boundary.is_start && (!boundary.filters.is_empty() || boundary.scale != 1.0) =>
+            {
+                boundary.bounds.intersect(&boundary.content_mask.bounds)
+            }
             Primitive::FilterBoundary(_) => return None,
             Primitive::Shadow(shadow) => shadow.painted_bounds(),
             Primitive::Quad(quad) => quad.painted_bounds(),
@@ -1372,6 +1422,7 @@ pub struct MonochromeSprite {
     pub color: SceneHsla,
     pub tile: AtlasTile,
     pub transformation: TransformationMatrix,
+    pub frames: FrameLoop,
 }
 
 impl From<MonochromeSprite> for Primitive {
@@ -1411,6 +1462,7 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub frames: FrameLoop,
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -1667,6 +1719,7 @@ mod tests {
                 padding: 0,
                 bounds: Bounds::<DevicePixels>::default(),
             },
+            frames: FrameLoop::NONE,
         }
     }
 
