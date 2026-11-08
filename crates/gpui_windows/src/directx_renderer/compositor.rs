@@ -262,14 +262,24 @@ fn make_visuals(
         let motion = &sprite.motion;
         if motion.is_animated() {
             if let Some((from, to)) = motion.clip {
-                let left = motion_animation(device, motion, (from.left.0, to.left.0), now_ms)?;
-                let top = motion_animation(device, motion, (from.top.0, to.top.0), now_ms)?;
+                let left = motion_animation(
+                    device,
+                    motion,
+                    (f32::from(from.left), f32::from(to.left)),
+                    now_ms,
+                )?;
+                let top = motion_animation(
+                    device,
+                    motion,
+                    (f32::from(from.top), f32::from(to.top)),
+                    now_ms,
+                )?;
                 let right = motion_animation(
                     device,
                     motion,
                     (
-                        bounds.size.width.0 - from.right.0,
-                        bounds.size.width.0 - to.right.0,
+                        bounds.size.width.0 - f32::from(from.right),
+                        bounds.size.width.0 - f32::from(to.right),
                     ),
                     now_ms,
                 )?;
@@ -277,8 +287,8 @@ fn make_visuals(
                     device,
                     motion,
                     (
-                        bounds.size.height.0 - from.bottom.0,
-                        bounds.size.height.0 - to.bottom.0,
+                        bounds.size.height.0 - f32::from(from.bottom),
+                        bounds.size.height.0 - f32::from(to.bottom),
                     ),
                     now_ms,
                 )?;
@@ -295,8 +305,8 @@ fn make_visuals(
                 device,
                 motion,
                 (
-                    bounds.origin.x.0 - clip_bounds.origin.x.0 + motion.offset.0.x.0,
-                    bounds.origin.x.0 - clip_bounds.origin.x.0 + motion.offset.1.x.0,
+                    bounds.origin.x.0 - clip_bounds.origin.x.0 + f32::from(motion.offset.0.x),
+                    bounds.origin.x.0 - clip_bounds.origin.x.0 + f32::from(motion.offset.1.x),
                 ),
                 now_ms,
             )?;
@@ -304,8 +314,8 @@ fn make_visuals(
                 device,
                 motion,
                 (
-                    bounds.origin.y.0 - clip_bounds.origin.y.0 + motion.offset.0.y.0,
-                    bounds.origin.y.0 - clip_bounds.origin.y.0 + motion.offset.1.y.0,
+                    bounds.origin.y.0 - clip_bounds.origin.y.0 + f32::from(motion.offset.0.y),
+                    bounds.origin.y.0 - clip_bounds.origin.y.0 + f32::from(motion.offset.1.y),
                 ),
                 now_ms,
             )?;
