@@ -783,7 +783,7 @@ impl DirectXRenderer {
             self.upload_globals()?;
             rendered?;
             unsafe {
-                swap_chain.Present(0, DXGI_PRESENT_NONE).ok()?;
+                swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
             }
         }
         Ok(())

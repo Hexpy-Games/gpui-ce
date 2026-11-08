@@ -1351,6 +1351,7 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     last_frame_ms: Cell<u32>,
     last_live_frame_ms: Cell<u32>,
+    layout_transition_until: Cell<u32>,
     covered_live_keys: FxHashSet<u64>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
@@ -2142,6 +2143,7 @@ impl Window {
             focused_text_input: None,
             last_frame_ms: Cell::new(0),
             last_live_frame_ms: Cell::new(0),
+            layout_transition_until: Cell::new(0),
             covered_live_keys: FxHashSet::default(),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -4221,6 +4223,25 @@ impl Window {
         };
 
         self.with_filter_boundary(boundary, paint)
+    }
+
+    /// Lets elements with a [`crate::LayoutMotion`] animate layout changes that happen in the
+    /// next `duration_ms`. Call it when a deliberate layout transition starts (an expand, a
+    /// panel opening); layout changes outside such a window jump, so content that merely
+    /// grows does not glide.
+    pub fn animate_layout(&self, duration_ms: u32) {
+        let until = crate::animation_time_ms().wrapping_add(duration_ms);
+        let current = self.layout_transition_until.get();
+        if !self.layout_transition_active(crate::animation_time_ms())
+            || until.wrapping_sub(current) < 1 << 31
+        {
+            self.layout_transition_until.set(until);
+        }
+    }
+
+    /// Whether a layout transition started by [`Self::animate_layout`] is open at `now_ms`.
+    pub fn layout_transition_active(&self, now_ms: u32) -> bool {
+        self.layout_transition_until.get().wrapping_sub(now_ms) < 1 << 31
     }
 
     /// Paints a retained subtree with a time-driven composite transform.

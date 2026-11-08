@@ -3292,6 +3292,7 @@ impl Interactivity {
                                 let mut active = previous.as_ref().and_then(|state| state.active);
                                 if let Some(previous) = previous
                                     && previous.viewport == viewport
+                                    && window.layout_transition_active(now)
                                     && [
                                         rest.origin.x - previous.rest.origin.x,
                                         rest.origin.y - previous.rest.origin.y,
@@ -3320,15 +3321,16 @@ impl Interactivity {
                                         repeat: crate::MotionRepeat::Once,
                                         easing: config.easing,
                                         offset: (from, Point::default()),
-                                        clip: (growth.width > px(0.0) || growth.height > px(0.0))
-                                            .then_some((
-                                                crate::Edges {
-                                                    right: growth.width.max(px(0.0)),
-                                                    bottom: growth.height.max(px(0.0)),
-                                                    ..Default::default()
-                                                },
-                                                crate::Edges::default(),
-                                            )),
+                                        // The old size shows through the clip: a grown element is revealed
+                                        // from it, a shrunk one keeps painting past its new bounds and closes.
+                                        clip: Some((
+                                            crate::Edges {
+                                                right: growth.width,
+                                                bottom: growth.height,
+                                                ..Default::default()
+                                            },
+                                            crate::Edges::default(),
+                                        )),
                                         ..crate::LayerMotion::NONE
                                     });
                                 }
@@ -5382,6 +5384,7 @@ mod tests {
         cx.update_window(view.into(), |_, window, cx| {
             window.draw(cx).clear(cx);
             top_height.set(px(50.0));
+            window.animate_layout(1000);
             window.refresh();
             window.draw(cx).clear(cx);
             let second = window
