@@ -20,7 +20,7 @@ pub(super) struct FrameUniformRequirements {
     pub(super) surface_count: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 448);
+const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 464);
 
 impl WgpuRenderer {
     pub(super) fn draw_filter_pass(
@@ -218,7 +218,7 @@ impl WgpuRenderer {
                 GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * parameters.blur_radius,
             ))
         };
-        let uniforms = BlurUniforms::composite(
+        let mut uniforms = BlurUniforms::composite(
             composite_bounds,
             parameters.content_mask,
             parameters.corner_radii,
@@ -231,6 +231,10 @@ impl WgpuRenderer {
         .with_lens(parameters.lens)
         .with_composite_scale(parameters.scale, parameters.scale_origin)
         .with_sharp_rim_pass(sharp_rim);
+        uniforms.composite_offset = wgsl_rs::std::vec2f(
+            parameters.composite_offset.x.0,
+            parameters.composite_offset.y.0,
+        );
         let resources = self.resources();
         let pipeline = if uniforms.corner_smoothing > 0.0 {
             &resources.pipelines.smoothed_blur_composite
@@ -306,6 +310,7 @@ impl WgpuRenderer {
                     opacity: 1.0,
                     scale: 1.0,
                     scale_origin: Point::default(),
+                    composite_offset: Point::default(),
                     clip: FilterCompositeClip::ContentShape,
                     lens: Default::default(),
                 },

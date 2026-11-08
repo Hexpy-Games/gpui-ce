@@ -392,6 +392,9 @@ pub struct Style {
     /// Opacity applied to this element and its children after compositing them as a group.
     pub opacity: Option<f32>,
 
+    /// Time-driven composite transform of this element and its children.
+    pub motion: Option<crate::Motion>,
+
     /// Uniform scale applied to this element and its children after compositing them as a group.
     pub scale: Option<f32>,
 
@@ -980,17 +983,23 @@ impl Style {
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
         window.with_element_opacity(self.opacity, |window| {
-            if let Some(fragments) = window.current_inline_fragments.clone() {
-                for fragment in fragments.iter() {
-                    self.paint_box(*fragment, window, cx, |_, _| {});
-                }
+            window.with_motion(
+                self.motion.unwrap_or(crate::Motion::NONE),
+                bounds,
+                |window| {
+                    if let Some(fragments) = window.current_inline_fragments.clone() {
+                        for fragment in fragments.iter() {
+                            self.paint_box(*fragment, window, cx, |_, _| {});
+                        }
 
-                continuation(window, cx);
+                        continuation(window, cx);
 
-                return;
-            }
+                        return;
+                    }
 
-            self.paint_box(bounds, window, cx, continuation);
+                    self.paint_box(bounds, window, cx, continuation);
+                },
+            );
         });
     }
 
@@ -1167,6 +1176,7 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            motion: None,
             scale: None,
             transform_origin: point(0.5, 0.5),
             grid_rows: None,

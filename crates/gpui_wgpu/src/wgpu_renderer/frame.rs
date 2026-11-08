@@ -448,7 +448,8 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn encode_commands(&mut self) -> DrawResult {
-        let scissor = self.scissor;
+        let mut scissor = self.scissor;
+        let mut motion_target = None;
         let damage = self.damage;
         let load = if let Some(scissor) = scissor.filter(|_| damage.is_some()) {
             // A clear ignores the scissor, so the damage rectangle is overwritten with the
@@ -600,6 +601,7 @@ impl<'a> FrameEncoder<'a> {
                                 opacity: filter.opacity,
                                 scale: 1.0,
                                 scale_origin: Point::default(),
+                                composite_offset: Point::default(),
                                 clip: FilterCompositeClip::RoundedBounds,
                                 lens: filter.lens,
                             },
@@ -671,6 +673,14 @@ impl<'a> FrameEncoder<'a> {
                     drop(pass);
                     let target =
                         self.renderer.resources().filter_group_views[index.as_usize()].clone();
+                    if motion_target.is_none()
+                        && self.scene.filter_boundaries[*boundary_index]
+                            .motion
+                            .is_animated()
+                    {
+                        motion_target = Some(*index);
+                        scissor = None;
+                    }
                     self.targets.enter(
                         target,
                         self.scene.filter_boundaries[*boundary_index]
@@ -688,12 +698,21 @@ impl<'a> FrameEncoder<'a> {
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
-                    target: FilterRenderTarget::Isolated(_),
+                    target: FilterRenderTarget::Isolated(index),
                     ..
                 } => {
                     drop(pass);
                     let (filtered, parent) = self.targets.exit();
+                    if motion_target == Some(*index) {
+                        motion_target = None;
+                        scissor = self.scissor;
+                    }
                     let boundary = &self.scene.filter_boundaries[*boundary_index];
+                    let (opacity, scale, composite_offset) = gpui::motion_composite_parameters(
+                        boundary,
+                        self.renderer.animation_time_ms,
+                        self.scene.scale_factor,
+                    );
                     self.renderer.blur_and_composite(
                         &mut self.encoder,
                         &filtered,
@@ -704,8 +723,9 @@ impl<'a> FrameEncoder<'a> {
                             corner_radii: boundary.corner_radii,
                             corner_smoothing: boundary.corner_smoothing,
                             blur_radius: boundary.max_blur_radius(),
-                            opacity: boundary.opacity,
-                            scale: boundary.scale,
+                            opacity,
+                            scale,
+                            composite_offset,
                             scale_origin: boundary.scale_origin,
                             clip: FilterCompositeClip::ContentShape,
                             lens: Default::default(),

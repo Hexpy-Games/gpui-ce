@@ -83,6 +83,16 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
     {
         changed.push((sprite.painted_bounds(), sprite.order));
     }
+    for boundary in &scene.filter_boundaries {
+        if boundary.is_start && boundary.motion.is_animated() {
+            changed.push((
+                boundary
+                    .motion
+                    .sweep(boundary.bounds, boundary.scale_origin, scene.scale_factor),
+                boundary.order,
+            ));
+        }
+    }
     changed.retain(|(bounds, _)| !bounds.is_empty());
     let mut rect = changed
         .iter()
@@ -127,6 +137,7 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
     // Open isolated groups that were kept, and nested groups inside a dropped group.
     let mut depth = 0usize;
     let mut skip = 0usize;
+    let mut motion_depth = None;
     for command in scene.render_commands() {
         if skip > 0 {
             match command {
@@ -138,6 +149,10 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
         }
         match command {
             RenderCommand::Batch(batch) => {
+                if motion_depth.is_some() {
+                    commands.push(command.clone());
+                    continue;
+                }
                 let kept = match batch {
                     PrimitiveBatch::Shadows { range, smoothed } => {
                         trim(range, &scene.shadows, &rect).map(|range| PrimitiveBatch::Shadows {
@@ -226,16 +241,34 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
                 target: FilterRenderTarget::Isolated(_),
             } => {
                 let boundary = &scene.filter_boundaries[*boundary_index];
-                let reach = boundary
-                    .bounds
+                if motion_depth.is_some() {
+                    depth += 1;
+                    commands.push(command.clone());
+                    continue;
+                }
+                let bounds = if boundary.motion.is_animated() {
+                    boundary.motion.sweep(
+                        boundary.bounds,
+                        boundary.scale_origin,
+                        scene.scale_factor,
+                    )
+                } else {
+                    boundary.bounds
+                };
+                let reach = bounds
                     .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
                     .intersect(&boundary.content_mask.bounds);
                 if !hits(reach, &rect) {
                     skip = 1;
-                } else if boundary.max_blur_radius() > 0.0 || boundary.scale != 1.0 {
+                } else if !boundary.motion.is_animated()
+                    && (boundary.max_blur_radius() > 0.0 || boundary.scale != 1.0)
+                {
                     return DamagePlan::Full;
                 } else {
                     depth += 1;
+                    if boundary.motion.is_animated() {
+                        motion_depth = Some(depth);
+                    }
                     commands.push(command.clone());
                 }
             }
@@ -243,6 +276,9 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
                 target: FilterRenderTarget::Isolated(_),
                 ..
             } => {
+                if motion_depth == Some(depth) {
+                    motion_depth = None;
+                }
                 depth = depth.saturating_sub(1);
                 commands.push(command.clone());
             }
@@ -267,8 +303,9 @@ mod tests {
     // test-category: pure-logic
     use super::*;
     use crate::{
-        AtlasTextureId, AtlasTextureKind, AtlasTile, ContentMask, DevicePixels, FrameLoop,
-        MonochromeSprite, Quad, ScaledFilter, TileId, bounds, size,
+        AtlasTextureId, AtlasTextureKind, AtlasTile, ContentMask, DevicePixels, FilterBoundary,
+        FrameLoop, MonochromeSprite, Motion, MotionEasing, MotionRepeat, Quad, ScaledFilter,
+        TileId, bounds, px, size,
     };
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
@@ -455,5 +492,107 @@ mod tests {
             assert_eq!(scene.monochrome_sprites.len(), 1);
             assert!(scene.has_animations());
         }
+    }
+    #[test]
+    fn motion_group_damage_keeps_the_sweep_and_group_commands() {
+        let mut scene = Scene {
+            scale_factor: 1.0,
+            ..Scene::default()
+        };
+        scene.insert_primitive(Quad {
+            bounds: rect(0.0, 0.0, 400.0, 400.0),
+            content_mask: mask(),
+            background: crate::white().into(),
+            ..Default::default()
+        });
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds: mask().bounds,
+            content_mask: mask(),
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
+            motion: Motion {
+                duration_ms: 1000,
+                repeat: MotionRepeat::Loop,
+                easing: MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
+                offset: (point(px(0.0), px(0.0)), point(px(40.0), px(0.0))),
+                ..Motion::NONE
+            },
+            is_start: true,
+            inline: false,
+        };
+        scene.insert_primitive(boundary.clone());
+        scene.insert_primitive(Quad {
+            bounds: rect(10.0, 10.0, 20.0, 20.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        scene.insert_primitive(Quad {
+            bounds: rect(300.0, 300.0, 10.0, 10.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.finish();
+        assert!(scene.has_animations());
+        let DamagePlan::Partial(damage) = scene.damage_plan() else {
+            panic!("expected a partial redraw");
+        };
+        let swept = rect(10.0, 10.0, 60.0, 20.0);
+        assert!(damage.rect.origin.x <= swept.origin.x);
+        assert!(damage.rect.origin.y <= swept.origin.y);
+        assert!(damage.rect.bottom_right().x >= swept.bottom_right().x);
+        assert!(damage.rect.bottom_right().y >= swept.bottom_right().y);
+        assert!(
+            damage
+                .commands
+                .iter()
+                .any(|command| matches!(command, RenderCommand::BeginFilter { .. }))
+        );
+        assert!(
+            damage
+                .commands
+                .iter()
+                .any(|command| matches!(command, RenderCommand::EndFilter { .. }))
+        );
+    }
+
+    #[test]
+    fn motion_steps_and_once_determine_frame_changes_and_activity() {
+        let mut scene = Scene::default();
+        scene.filter_boundaries.push(FilterBoundary {
+            order: 0,
+            bounds: mask().bounds,
+            content_mask: mask(),
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Default::default(),
+            motion: Motion {
+                duration_ms: 1000,
+                repeat: MotionRepeat::Loop,
+                easing: MotionEasing::Steps(2),
+                ..Motion::NONE
+            },
+            is_start: true,
+            inline: false,
+        });
+        assert!(!scene.changes_between(100, 400));
+        assert!(scene.changes_between(400, 600));
+        scene.filter_boundaries[0].motion = Motion {
+            duration_ms: 200,
+            ..Motion::NONE
+        };
+        assert!(scene.animating_at(100));
+        assert!(!scene.animating_at(250));
     }
 }

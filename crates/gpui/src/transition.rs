@@ -3,7 +3,9 @@ use std::{
     time::Instant,
 };
 
-use crate::{Animated, App, Entity, EntityId, Motion, Progress, Window, lerp::Lerp};
+use crate::{
+    Animated, App, Entity, EntityId, Progress, TransitionMotion as Motion, Window, lerp::Lerp,
+};
 
 #[derive(Clone)]
 struct TransitionCache<T> {

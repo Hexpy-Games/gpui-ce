@@ -26,6 +26,8 @@ mod compositor;
 pub use compositor::CompositorSprite;
 mod damage;
 pub use damage::{DamagePlan, DamageRedraw};
+mod motion;
+pub use motion::*;
 mod frame_loop;
 pub use frame_loop::*;
 mod plan;
@@ -99,6 +101,7 @@ pub struct Scene {
     /// Set by the window before painting: whether the platform compositor draws animated sprites
     /// that nothing covers, so `finish` moves them out of the sprite lists.
     pub offload_animations: bool,
+    pub scale_factor: f32,
     compositor_sprites: Vec<CompositorSprite>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
@@ -342,10 +345,10 @@ impl Scene {
     /// is then.
     fn close_opacity_group(&mut self, group: &FilterGroup) {
         let start = &self.filter_boundaries[group.start_index];
-        if !start.filters.is_empty() || start.scale != 1.0 {
+        if !start.motion.is_animated() && (!start.filters.is_empty() || start.scale != 1.0) {
             return;
         }
-        if self.inline_single_primitive_group(group) {
+        if !start.motion.is_animated() && self.inline_single_primitive_group(group) {
             return;
         }
         let content = self.paint_operations[group.start_len..]
@@ -358,7 +361,9 @@ impl Scene {
             .unwrap_or_default();
         let start = &mut self.filter_boundaries[group.start_index];
         start.bounds = start.bounds.intersect(&content);
-        start.content_mask.bounds = start.content_mask.bounds.intersect(&content);
+        if !start.motion.is_animated() {
+            start.content_mask.bounds = start.content_mask.bounds.intersect(&content);
+        }
     }
 
     /// Compositing a group of one primitive at `opacity` equals drawing that primitive with its
@@ -462,7 +467,11 @@ impl Scene {
             || self
                 .polychrome_sprites
                 .iter()
-                .any(|sprite| sprite.frames.is_animated());
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.is_animated());
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.is_finished = true;
     }
@@ -470,6 +479,43 @@ impl Scene {
     /// Whether any primitive carries an animated motion (set by `finish`).
     pub fn has_animations(&self) -> bool {
         self.has_animations
+    }
+
+    /// Whether any retained animation is still playing at this clock value.
+    pub fn animating_at(&self, now_ms: u32) -> bool {
+        self.monochrome_sprites
+            .iter()
+            .any(|sprite| sprite.frames.is_animated())
+            || self
+                .polychrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.is_active(now_ms))
+    }
+
+    /// Whether retained animation parameters differ between these clock values.
+    pub fn changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
+        self.monochrome_sprites
+            .iter()
+            .map(|sprite| &sprite.frames)
+            .chain(self.polychrome_sprites.iter().map(|sprite| &sprite.frames))
+            .any(|frames| {
+                frames.turn_period_ms != 0
+                    || (frames.frame_count > 1
+                        && a_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+                            * frames.frame_count
+                            / frames.period_ms
+                            != b_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+                                * frames.frame_count
+                                / frames.period_ms)
+            })
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.changes_between(a_ms, b_ms))
     }
 
     /// The animated sprites the platform compositor draws; see [`Self::offload_animations`].
@@ -1284,6 +1330,8 @@ pub struct FilterBoundary {
     pub scale: f32,
     /// Origin of the group scale in scene (device-pixel) space.
     pub scale_origin: Point<ScaledPixels>,
+    /// Time-driven composite transform.
+    pub motion: Motion,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
     /// The group holds one primitive that already carries the group's opacity, so it is drawn
@@ -1830,6 +1878,7 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: Point::default(),
+            motion: Motion::NONE,
             is_start,
             inline: false,
         }

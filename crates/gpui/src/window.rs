@@ -7,19 +7,19 @@ use crate::{
     Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
     Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
-    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    PopupMenuItem, Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
-    SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
-    TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
-    WindowParams, WindowTextSystem,
+    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
+    MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem,
+    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
+    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
+    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Transition,
+    TransitionMotion as Motion, TransitionState, Underline, UnderlineStyle, UnicodeBidi,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
     point, px, rems, size, transparent_black,
@@ -1349,6 +1349,7 @@ pub struct Window {
     focused_text_input: Option<FocusId>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
+    last_frame_ms: Cell<u32>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
@@ -1895,10 +1896,17 @@ impl Window {
                     // advances them, so present the same scene again.
                     handle
                         .update(&mut cx, |_, window, _| {
-                            if window.rendered_frame.scene.has_animations() {
+                            let now = crate::animation_time_ms();
+                            if window.rendered_frame.scene.has_animations()
+                                && window
+                                    .rendered_frame
+                                    .scene
+                                    .changes_between(window.last_frame_ms.get(), now)
+                            {
                                 window
                                     .platform_window
                                     .draw_animation_frame(&window.rendered_frame.scene);
+                                window.last_frame_ms.set(now);
                             }
                         })
                         .log_err();
@@ -1906,7 +1914,10 @@ impl Window {
 
                 let animating = handle
                     .update(&mut cx, |_, window, _| {
-                        window.rendered_frame.scene.has_animations()
+                        window
+                            .rendered_frame
+                            .scene
+                            .animating_at(window.last_frame_ms.get())
                     })
                     .unwrap_or(false);
                 handle
@@ -2119,6 +2130,7 @@ impl Window {
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
+            last_frame_ms: Cell::new(0),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
@@ -3305,6 +3317,7 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        self.next_frame.scene.scale_factor = self.scale_factor();
         self.next_frame.scene.offload_animations =
             self.platform_window.supports_compositor_sprites();
         if !cx.mode.skip_drawing() {
@@ -3412,6 +3425,7 @@ impl Window {
             self.refresh();
         }
         self.needs_present.set(true);
+        self.last_frame_ms.set(crate::animation_time_ms());
 
         #[cfg(feature = "profiler")]
         {
@@ -4176,10 +4190,47 @@ impl Window {
             opacity,
             scale: 1.0,
             scale_origin: Point::default(),
+            motion: crate::Motion::NONE,
             is_start: true,
             inline: false,
         };
 
+        self.with_filter_boundary(boundary, paint)
+    }
+
+    /// Paints a retained subtree with a time-driven composite transform.
+    pub fn with_motion<R>(
+        &mut self,
+        motion: crate::Motion,
+        bounds: Bounds<Pixels>,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if !motion.is_animated() {
+            return paint(self);
+        }
+        let scale_origin = point(
+            bounds.origin.x + bounds.size.width * motion.origin.x,
+            bounds.origin.y + bounds.size.height * motion.origin.y,
+        )
+        .scale(self.scale_factor());
+        let bounds = self.cover_bounds(Bounds::new(Point::default(), self.viewport_size()));
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds,
+            content_mask: ContentMask {
+                bounds,
+                fade_out: Edges::default(),
+            },
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin,
+            motion,
+            is_start: true,
+            inline: false,
+        };
         self.with_filter_boundary(boundary, paint)
     }
 
@@ -4208,6 +4259,7 @@ impl Window {
             opacity: 1.0,
             scale,
             scale_origin: origin.scale(self.scale_factor()),
+            motion: crate::Motion::NONE,
             is_start: true,
             inline: false,
         };
@@ -4851,6 +4903,7 @@ impl Window {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: Point::default(),
+            motion: crate::Motion::NONE,
             is_start: true,
             inline: false,
         };

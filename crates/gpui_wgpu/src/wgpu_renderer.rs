@@ -852,6 +852,7 @@ mod tests {
             opacity,
             scale: 1.0,
             scale_origin: gpui::Point::default(),
+            motion: gpui::Motion::NONE,
             is_start: true,
             inline: false,
         };

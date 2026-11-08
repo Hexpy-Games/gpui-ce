@@ -642,6 +642,8 @@ impl DirectXRenderer {
         )],
         damage: Option<&DamageRedraw>,
     ) -> Result<()> {
+        let damage_scissor = self.damage_scissor;
+        let mut motion_target = None;
         let ctx = self
             .devices
             .as_ref()
@@ -782,6 +784,7 @@ impl DirectXRenderer {
                                 true,
                                 1.0,
                                 Point::default(),
+                                Point::default(),
                                 filter.lens,
                                 hit,
                             )?;
@@ -802,6 +805,11 @@ impl DirectXRenderer {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(target_index),
                 } => {
+                    if motion_target.is_none() && scene.filter_boundaries[*boundary_index].motion.is_animated() {
+                        motion_target = Some(*target_index);
+                        self.damage_scissor = None;
+                        self.restore_rasterizer();
+                    }
                     targets.enter(
                         groups[target_index.as_usize()].clone(),
                         scene.filter_boundaries[*boundary_index].filters.is_empty(),
@@ -820,11 +828,19 @@ impl DirectXRenderer {
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
-                    target: FilterRenderTarget::Isolated(_),
+                    target: FilterRenderTarget::Isolated(index),
                     ..
                 } => {
                     let boundary = &scene.filter_boundaries[*boundary_index];
                     let ((_, source), (parent_rtv, _)) = targets.exit();
+                    if motion_target == Some(*index) {
+                        motion_target = None;
+                        self.damage_scissor = damage_scissor;
+                        self.restore_rasterizer();
+                    }
+                    let (opacity, scale, composite_offset) = gpui::motion_composite_parameters(
+                        boundary, self.animation_time_ms, scene.scale_factor,
+                    );
                     let result = self.dx_blur_and_composite(
                         &source,
                         parent_rtv,
@@ -833,10 +849,11 @@ impl DirectXRenderer {
                         boundary.corner_radii,
                         boundary.corner_smoothing,
                         boundary.max_blur_radius(),
-                        boundary.opacity,
+                        opacity,
                         false,
-                        boundary.scale,
+                        scale,
                         boundary.scale_origin,
+                        composite_offset,
                         BackdropLens::default(),
                         false,
                     );
@@ -1455,6 +1472,7 @@ impl DirectXRenderer {
         clip_rounded: bool,
         scale: f32,
         scale_origin: Point<ScaledPixels>,
+        composite_offset: Point<ScaledPixels>,
         lens: BackdropLens,
         // The blurred backdrop was restored into the ping texture, so the blur passes are skipped.
         blurred_ready: bool,
@@ -1558,7 +1576,7 @@ impl DirectXRenderer {
                 GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
             ))
         };
-        let composite_uniforms = BlurUniforms::composite(
+        let mut composite_uniforms = BlurUniforms::composite(
             composite_bounds,
             content_mask,
             corner_radii,
@@ -1570,6 +1588,8 @@ impl DirectXRenderer {
         )
         .with_lens(lens)
         .with_composite_scale(scale, scale_origin);
+        composite_uniforms.composite_offset =
+            wgsl_rs::std::vec2f(composite_offset.x.0, composite_offset.y.0);
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -1602,19 +1622,10 @@ impl DirectXRenderer {
                 &self.pipelines.blur_blend_composite,
                 target_rtv,
                 source_srv,
-                BlurUniforms::composite(
-                    composite_bounds,
-                    content_mask,
-                    corner_radii,
-                    corner_smoothing,
-                    opacity,
-                    clip,
-                    full_size,
-                    full_size,
-                )
-                .with_lens(lens)
-                .with_composite_scale(scale, scale_origin)
-                .with_sharp_rim_pass(lens.sharp_rim),
+                BlurUniforms {
+                    source_size: wgsl_rs::std::vec2f(full_size[0], full_size[1]),
+                    ..composite_uniforms.with_sharp_rim_pass(lens.sharp_rim)
+                },
                 &resources.viewport,
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
                 4,
@@ -1682,6 +1693,7 @@ impl DirectXRenderer {
                 1.0,
                 false,
                 1.0,
+                Point::default(),
                 Point::default(),
                 BackdropLens::default(),
                 false,

@@ -41,6 +41,7 @@ pub struct FilterCompositeParameters {
     pub opacity: f32,
     pub scale: f32,
     pub scale_origin: gpui::Point<ScaledPixels>,
+    pub composite_offset: gpui::Point<ScaledPixels>,
     pub clip: FilterCompositeClip,
     pub lens: BackdropLens,
 }
@@ -398,6 +399,8 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         composite_scale: 1.0,
         composite_scale_padding: 0.0,
         composite_scale_origin: vec2f(0.0, 0.0),
+        composite_offset: vec2f(0.0, 0.0),
+        composite_offset_padding: vec2f(0.0, 0.0),
     }
 }
 

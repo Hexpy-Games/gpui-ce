@@ -1,6 +1,6 @@
 use std::{ops::RangeInclusive, time::Duration};
 
-use crate::{Hsla, Motion, Pixels, Rems, Rgba, SpringDescription};
+use crate::{Hsla, Pixels, Rems, Rgba, SpringDescription, TransitionMotion as Motion};
 
 const CRITICAL_DAMPING_TOLERANCE: f32 = 1e-4;
 pub(crate) const DEFAULT_SPRING_EPSILON: f32 = 0.001;
