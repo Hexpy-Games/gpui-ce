@@ -2,7 +2,7 @@
 use crate::editable_text::{
     BLINK_INTERVAL_500MS, Caret, EditableTextState,
     actions::{DEFAULT_INPUT_CONTEXT, EditableTextActionElement, EditableTextActionHandler},
-    layout::{EditableTextLayoutResult, EditableTextLayoutState},
+    layout::{DisplayMap, EditableTextLayoutResult, EditableTextLayoutState},
     state::run_position,
 };
 use gpui::{
@@ -30,6 +30,7 @@ pub fn editable_text(id: impl Into<ElementId>) -> EditableTextElement {
         supports_multiline: true,
         placeholder: None,
         accepts_input: true,
+        mask: None,
         colors: EditableTextColors::default(),
         caret_blink_interval: None,
         caret_width: px(2.),
@@ -79,6 +80,12 @@ pub struct EditableTextElement {
     /// Configures whether the element is enabled and can accept input.
     #[setters(generate)]
     accepts_input: bool,
+    /// Draws this character in place of each grapheme, as password fields do (e.g. `Some('•')`).
+    ///
+    /// Only the drawn text changes: storage, events and IME keep the real text. Copy and cut do
+    /// nothing, and word movement and double-click treat the text as one word.
+    #[setters(generate, rename = "masked")]
+    mask: Option<char>,
     colors: EditableTextColors,
     /// Sets the blinking interval of the caret.
     #[setters(generate, strip_option)]
@@ -207,6 +214,8 @@ struct PrelayoutState {
     show_placeholder: bool,
     text: Option<SharedString>,
     placeholder_color: Hsla,
+    mask: Option<char>,
+    display_map: DisplayMap,
     marked_range: Option<Range<usize>>,
     marked_color: Hsla,
     supports_multiline: bool,
@@ -245,11 +254,15 @@ fn accessibility_prepaint(
     document_origin: Point<Pixels>,
     scale: f32,
 ) -> AccessibilityPrepaint {
-    let metrics = state.accessibility_text_metrics();
-    let (anchor, focus) = metrics.character_indices_for_selection(state.caret_selection());
-    let Some(runs) = state.accessibility_runs() else {
+    let (text, metrics) = state.accessibility_text();
+    let selection = state
+        .layout_data
+        .display_map
+        .display_selection(state.caret_selection());
+    let (anchor, focus) = metrics.character_indices_for_selection(selection);
+    let Some(runs) = state.accessibility_runs(text, &metrics) else {
         let mut text_run = accesskit::Node::new(accesskit::Role::TextRun);
-        text_run.set_value(state.as_str());
+        text_run.set_value(text);
         text_run.set_character_lengths(metrics.character_lengths.clone());
         return AccessibilityPrepaint {
             runs: vec![text_run],
@@ -264,7 +277,7 @@ fn accessibility_prepaint(
         .into_iter()
         .map(|run| {
             let mut node = accesskit::Node::new(accesskit::Role::TextRun);
-            node.set_value(&state.as_str()[run.byte_range]);
+            node.set_value(&text[run.byte_range]);
             node.set_character_lengths(metrics.character_lengths[run.characters].to_vec());
             let y0 = (document_origin.y.as_f32() + line_height * run.line_index as f32) * scale;
             node.set_bounds(accesskit::Rect {
@@ -331,6 +344,9 @@ impl Element for EditableTextElement {
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
         self.interactivity.write_a11y_info(node);
+        if self.mask.is_some() {
+            node.set_role(accesskit::Role::PasswordInput);
+        }
         if !self.accepts_input {
             node.set_read_only();
         }
@@ -391,11 +407,17 @@ impl Element for EditableTextElement {
         let (prelayout, next_scroll_offset, direction_text) = {
             let state = entity.read(cx);
             let show_placeholder = state.as_str().is_empty();
-            let direction_text = SharedString::from(state.as_str());
+            let display_map = DisplayMap::new(state.as_str(), self.mask);
+            let direction_text =
+                SharedString::from(display_map.masked_text().unwrap_or(state.as_str()));
             let text = match show_placeholder {
                 false => Some(direction_text.clone()),
                 true => self.placeholder.clone(),
             };
+            let marked_range = state
+                .marked_range()
+                .filter(|_| !show_placeholder)
+                .map(|range| display_map.display_range(range));
 
             let prelayout = PrelayoutState {
                 state: entity.clone(),
@@ -404,7 +426,9 @@ impl Element for EditableTextElement {
                 storage_version: state.version(),
                 text,
                 placeholder_color: self.colors.placeholder,
-                marked_range: state.marked_range().filter(|_| !show_placeholder),
+                mask: self.mask,
+                display_map,
+                marked_range,
                 marked_color: self.colors.ime_underline,
                 supports_multiline: self.supports_multiline,
                 accepts_input: self.accepts_input,
@@ -789,6 +813,7 @@ impl PrelayoutState {
                     && self.storage_version == layout_state.last_seen_storage_version
                     && layout_state.options == options
                     && layout_state.marked_range == self.marked_range
+                    && layout_state.mask == self.mask
                 {
                     return size;
                 }
@@ -838,9 +863,11 @@ impl PrelayoutState {
                         size: Some(size),
                         last_seen_storage_version: self.storage_version,
                         marked_range: self.marked_range.clone(),
+                        mask: self.mask,
                         options,
                     },
                     document,
+                    display_map: self.display_map.clone(),
                     line_height,
                     document_offset,
                     next_scroll_offset: initial_scroll,
@@ -900,15 +927,16 @@ impl PrepaintElements {
         let document_origin = prepaint.document_origin();
         elements.document = Some(document.clone());
 
+        let display_map = &state.layout_data.display_map;
         let len = document.text.len();
-        let range = state.selected_byte_range();
+        let range = display_map.display_range(state.selected_byte_range());
         let field = prepaint.inner_bounds.left() - document_origin.x
             ..prepaint.inner_bounds.right() - document_origin.x;
         elements.selection.extend(
             selection_rects(
                 document,
                 range.start.min(len)..range.end.min(len),
-                state.caret_selection(),
+                display_map.display_selection(state.caret_selection()),
                 line_height,
                 field,
             )
@@ -923,7 +951,10 @@ impl PrepaintElements {
         if prepaint.caret_visible && range.is_empty() {
             let caret_point = document_origin
                 + document
-                    .visual_position_for_caret(state.visible_caret(), line_height)
+                    .visual_position_for_caret(
+                        display_map.display_caret(state.visible_caret()),
+                        line_height,
+                    )
                     .unwrap_or_default();
             let caret_height = caret_height.to_pixels(line_height.into(), window.rem_size());
             let vertical_offset = (line_height - caret_height) / 2.;
@@ -2255,6 +2286,117 @@ mod tests {
             assert_eq!(input.read(cx).marked_range(), None);
             assert_eq!(input.read(cx).as_str(), "abc");
         });
+    }
+
+    #[test]
+    fn masked_input_stores_text_draws_masks_and_keeps_it_off_the_clipboard() {
+        struct MaskedInputView {
+            input: Entity<EditableTextState>,
+        }
+
+        impl Render for MaskedInputView {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().p(px(24.)).child(
+                    text_input("password")
+                        .state(self.input.downgrade())
+                        .masked(Some('•'))
+                        .w(px(300.))
+                        .bg(INPUT_COLOR)
+                        .text_color(TEXT_COLOR)
+                        .text_size(px(20.))
+                        .whitespace_nowrap(),
+                )
+            }
+        }
+
+        let system = ParleyTextSystem::new_with_system_font(SystemFonts::Skip, "IBM Plex Sans");
+        system
+            .add_fonts(vec![Cow::Borrowed(*gpui_fonts::IBM_PLEX)])
+            .unwrap();
+        let mut cx = HeadlessAppContext::new(Arc::new(system));
+        let input =
+            cx.update(|cx| cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)));
+        let window = cx
+            .open_window(size(px(400.), px(100.)), |window, cx| {
+                window.set_scale_factor(1.);
+                cx.new(|_| MaskedInputView {
+                    input: input.clone(),
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let text = "aé한b";
+        window
+            .update(&mut cx, |_view, window, cx| {
+                let focus_handle = input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+                input.update(cx, |state, cx| {
+                    for grapheme in ["a", "é", "한", "b"] {
+                        state.replace_text_in_range(None, grapheme, window, cx);
+                    }
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let state = input.read(cx);
+            assert_eq!(state.as_str(), text);
+            let document = state.layout_data.document.as_ref().unwrap();
+            assert_eq!(document.text.as_str(), "••••");
+        });
+
+        // Click in the gap between the second and third masks: after "é", before "한".
+        let mut glyphs = cx.glyph_bounds(window.into(), TEXT_COLOR).unwrap();
+        glyphs.sort_by(|left, right| left.origin.x.partial_cmp(&right.origin.x).unwrap());
+        assert_eq!(glyphs.len(), 4);
+        let position = point(
+            px((glyphs[1].right().as_f32() + glyphs[2].left().as_f32()) / 2.),
+            px((glyphs[1].top().as_f32() + glyphs[1].bottom().as_f32()) / 2.),
+        );
+        for event in [
+            PlatformInput::MouseDown(MouseDownEvent {
+                position,
+                button: MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+            PlatformInput::MouseUp(MouseUpEvent {
+                position,
+                button: MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+        ] {
+            window
+                .update(&mut cx, |_view, window, cx| {
+                    window.dispatch_event(event, cx);
+                })
+                .unwrap();
+        }
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).caret_selection().caret.index, "aé".len());
+        });
+
+        window
+            .update(&mut cx, |_view, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.select_document(cx);
+                    state.copy(&crate::editable_text::actions::Copy, window, cx);
+                });
+            })
+            .unwrap();
+        assert!(cx.update(|cx| cx.read_from_clipboard()).is_none());
+
+        window
+            .update(&mut cx, |_view, window, cx| window.blur(cx))
+            .unwrap();
+        cx.run_until_parked();
     }
 
     #[test]
