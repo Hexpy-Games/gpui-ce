@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Pixels, Point,
-    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point, px,
 };
 use smallvec::SmallVec;
 use std::{
@@ -177,7 +177,7 @@ impl Scene {
                             .push(PaintOperation::Primitive(primitive));
                         return;
                     }
-                    self.inline_single_primitive_group(&group);
+                    self.close_opacity_group(&group);
                 }
             }
             Primitive::FilterBoundary(_) => {}
@@ -308,19 +308,39 @@ impl Scene {
         }
     }
 
-    /// A group of one primitive needs no isolation: compositing it at `opacity` equals drawing
-    /// it with its alpha multiplied by `opacity`. Only the drawn copy and the start marker change;
-    /// the recorded operations stay as painted, so `replay` applies whatever opacity the
-    /// enclosing group has then.
-    fn inline_single_primitive_group(&mut self, group: &FilterGroup) {
+    /// An opacity-only group draws no more than its content. A group of one primitive draws it
+    /// with its alpha multiplied ([`FilterBoundary::inline`]); any other group composites only the
+    /// union of its contents instead of the whole window. Only the drawn copies change: the
+    /// recorded operations stay as painted, so `replay` derives both again from the group as it
+    /// is then.
+    fn close_opacity_group(&mut self, group: &FilterGroup) {
         let start = &self.filter_boundaries[group.start_index];
         if !start.filters.is_empty() || start.scale != 1.0 {
             return;
         }
-        let factor = start.opacity;
+        if self.inline_single_primitive_group(group) {
+            return;
+        }
+        let content = self.paint_operations[group.start_len..]
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOperation::Primitive(primitive) => primitive.painted_bounds(),
+                _ => None,
+            })
+            .reduce(|a, b| a.union(&b))
+            .unwrap_or_default();
+        let start = &mut self.filter_boundaries[group.start_index];
+        start.bounds = start.bounds.intersect(&content);
+        start.content_mask.bounds = start.content_mask.bounds.intersect(&content);
+    }
+
+    /// Compositing a group of one primitive at `opacity` equals drawing that primitive with its
+    /// alpha multiplied by `opacity`; marks the group inline when it holds exactly one.
+    fn inline_single_primitive_group(&mut self, group: &FilterGroup) -> bool {
+        let factor = self.filter_boundaries[group.start_index].opacity;
         let [PaintOperation::Primitive(primitive)] = &self.paint_operations[group.start_len..]
         else {
-            return;
+            return false;
         };
         match primitive {
             Primitive::Shadow(_) => {
@@ -365,9 +385,10 @@ impl Scene {
                 }
             }
             // A surface has no alpha of its own to carry the opacity; nested groups stay isolated.
-            Primitive::Surface(_) | Primitive::FilterBoundary(_) => return,
+            Primitive::Surface(_) | Primitive::FilterBoundary(_) => return false,
         }
         self.filter_boundaries[group.start_index].inline = true;
+        true
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -563,6 +584,50 @@ impl Primitive {
             Primitive::BackdropFilter(filter) => &filter.content_mask,
             Primitive::FilterBoundary(boundary) => &boundary.content_mask,
         }
+    }
+
+    /// The device-pixel area this primitive can change, clipped to its content mask; `None` for
+    /// a filter boundary, which marks a group rather than painting.
+    fn painted_bounds(&self) -> Option<Bounds<ScaledPixels>> {
+        // The renderers cut a gaussian off at this many standard deviations (`gpui_render`).
+        const GAUSSIAN_CUTOFF: f32 = 3.0;
+        let transformed = |bounds: &Bounds<ScaledPixels>, matrix: &TransformationMatrix| {
+            let corners = [
+                bounds.origin,
+                bounds.top_right(),
+                bounds.bottom_left(),
+                bounds.bottom_right(),
+            ]
+            .map(|corner| matrix.apply(point(px(corner.x.0), px(corner.y.0))));
+            let min_x = corners.iter().map(|c| c.x.0).fold(f32::INFINITY, f32::min);
+            let min_y = corners.iter().map(|c| c.y.0).fold(f32::INFINITY, f32::min);
+            let max_x = corners
+                .iter()
+                .map(|c| c.x.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_y = corners
+                .iter()
+                .map(|c| c.y.0)
+                .fold(f32::NEG_INFINITY, f32::max);
+            Bounds::from_corners(
+                point(ScaledPixels(min_x), ScaledPixels(min_y)),
+                point(ScaledPixels(max_x), ScaledPixels(max_y)),
+            )
+        };
+        let bounds = match self {
+            Primitive::FilterBoundary(_) => return None,
+            Primitive::Shadow(shadow) => shadow
+                .bounds
+                .dilate(ScaledPixels(GAUSSIAN_CUTOFF * shadow.blur_radius.0)),
+            Primitive::MonochromeSprite(sprite) => {
+                transformed(&sprite.bounds, &sprite.transformation)
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                transformed(&sprite.bounds, &sprite.transformation)
+            }
+            other => *other.bounds(),
+        };
+        Some(bounds.intersect(&self.content_mask().bounds))
     }
 }
 
@@ -2012,5 +2077,8 @@ mod tests {
         let scene = finished_group(0.5, vec![quad(), quad()]);
 
         assert_eq!(scene.render_plan().requirements().isolated_target_count, 1);
+        // The group composites its content's area, not the window.
+        let content = quad().bounds.intersect(&quad().content_mask.bounds);
+        assert_eq!(scene.filter_boundaries[0].bounds, content);
     }
 }
