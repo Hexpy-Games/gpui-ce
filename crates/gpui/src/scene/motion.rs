@@ -14,15 +14,18 @@ pub enum MotionRepeat {
     Alternate,
 }
 
+/// Most points a [`MotionEasing::Linear`] curve holds.
+pub const MAX_LINEAR_POINTS: usize = 24;
+
 /// The timing curve applied to linear progress.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum MotionEasing {
     /// CSS cubic-bezier(x1, y1, x2, y2).
     CubicBezier([f32; 4]),
-    /// CSS linear() with up to eight (time, value) points.
+    /// CSS linear() with up to [`MAX_LINEAR_POINTS`] (time, value) points; the design tokens use up to 21.
     Linear {
         /// The (time, value) points in ascending time order.
-        points: [(f32, f32); 8],
+        points: [(f32, f32); MAX_LINEAR_POINTS],
         /// Number of populated points.
         len: u8,
     },
@@ -31,11 +34,11 @@ pub enum MotionEasing {
 }
 
 impl MotionEasing {
-    /// Creates a CSS linear() timing curve with at most eight points.
+    /// Creates a CSS linear() timing curve with at most [`MAX_LINEAR_POINTS`] points.
     pub fn linear(points: &[(f32, f32)]) -> Self {
-        debug_assert!(points.len() <= 8);
-        let len = points.len().min(8);
-        let mut stored = [(0.0, 0.0); 8];
+        debug_assert!(points.len() <= MAX_LINEAR_POINTS);
+        let len = points.len().min(MAX_LINEAR_POINTS);
+        let mut stored = [(0.0, 0.0); MAX_LINEAR_POINTS];
         stored[..len].copy_from_slice(&points[..len]);
         Self::Linear {
             points: stored,
