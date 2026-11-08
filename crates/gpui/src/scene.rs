@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Pixels, Point,
-    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point, px,
+    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use smallvec::SmallVec;
 use std::{
@@ -17,6 +17,8 @@ use std::{
     slice,
 };
 
+mod bounds;
+pub use bounds::*;
 mod plan;
 pub use plan::*;
 mod abi;
@@ -229,8 +231,7 @@ impl Scene {
             // A backdrop reads past its bounds; order it above everything it samples.
             let order_bounds = match &primitive {
                 Primitive::BackdropFilter(filter) => filter
-                    .bounds
-                    .dilate(ScaledPixels(filter.sampling_margin()))
+                    .sampling_region()
                     .intersect(&filter.content_mask.bounds),
                 _ => clipped_bounds,
             };
@@ -589,45 +590,18 @@ impl Primitive {
     /// The device-pixel area this primitive can change, clipped to its content mask; `None` for
     /// a filter boundary, which marks a group rather than painting.
     fn painted_bounds(&self) -> Option<Bounds<ScaledPixels>> {
-        // The renderers cut a gaussian off at this many standard deviations (`gpui_render`).
-        const GAUSSIAN_CUTOFF: f32 = 3.0;
-        let transformed = |bounds: &Bounds<ScaledPixels>, matrix: &TransformationMatrix| {
-            let corners = [
-                bounds.origin,
-                bounds.top_right(),
-                bounds.bottom_left(),
-                bounds.bottom_right(),
-            ]
-            .map(|corner| matrix.apply(point(px(corner.x.0), px(corner.y.0))));
-            let min_x = corners.iter().map(|c| c.x.0).fold(f32::INFINITY, f32::min);
-            let min_y = corners.iter().map(|c| c.y.0).fold(f32::INFINITY, f32::min);
-            let max_x = corners
-                .iter()
-                .map(|c| c.x.0)
-                .fold(f32::NEG_INFINITY, f32::max);
-            let max_y = corners
-                .iter()
-                .map(|c| c.y.0)
-                .fold(f32::NEG_INFINITY, f32::max);
-            Bounds::from_corners(
-                point(ScaledPixels(min_x), ScaledPixels(min_y)),
-                point(ScaledPixels(max_x), ScaledPixels(max_y)),
-            )
-        };
-        let bounds = match self {
+        Some(match self {
             Primitive::FilterBoundary(_) => return None,
-            Primitive::Shadow(shadow) => shadow
-                .bounds
-                .dilate(ScaledPixels(GAUSSIAN_CUTOFF * shadow.blur_radius.0)),
-            Primitive::MonochromeSprite(sprite) => {
-                transformed(&sprite.bounds, &sprite.transformation)
-            }
-            Primitive::SubpixelSprite(sprite) => {
-                transformed(&sprite.bounds, &sprite.transformation)
-            }
-            other => *other.bounds(),
-        };
-        Some(bounds.intersect(&self.content_mask().bounds))
+            Primitive::Shadow(shadow) => shadow.painted_bounds(),
+            Primitive::Quad(quad) => quad.painted_bounds(),
+            Primitive::Path(path) => path.painted_bounds(),
+            Primitive::Underline(underline) => underline.painted_bounds(),
+            Primitive::MonochromeSprite(sprite) => sprite.painted_bounds(),
+            Primitive::SubpixelSprite(sprite) => sprite.painted_bounds(),
+            Primitive::PolychromeSprite(sprite) => sprite.painted_bounds(),
+            Primitive::Surface(surface) => surface.painted_bounds(),
+            Primitive::BackdropFilter(filter) => filter.painted_bounds(),
+        })
     }
 }
 
@@ -1115,19 +1089,6 @@ impl BackdropFilter {
     /// Largest gaussian blur radius in this filter chain, in device pixels.
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
-    }
-
-    /// How far outside `bounds` compositing reads the backdrop, in device pixels: the blur runs
-    /// at half resolution with sigma = radius/2 texels, reaching 3 sigma, i.e. 3 * radius here.
-    /// A lens reads only its frost radius past the rim.
-    pub fn sampling_margin(&self) -> f32 {
-        let radius = self.max_blur_radius();
-        let blur = if radius > 0.0 {
-            3.0 * radius + 2.0
-        } else {
-            0.0
-        };
-        blur.max(self.lens.sampling_margin())
     }
 }
 

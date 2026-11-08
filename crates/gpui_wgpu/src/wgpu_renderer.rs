@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+mod backdrop_cache;
 mod buffers;
 mod drawing;
 mod filters;

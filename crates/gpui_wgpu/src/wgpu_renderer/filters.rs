@@ -63,6 +63,7 @@ impl WgpuRenderer {
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
+        blurred_ready: bool,
     ) {
         if parameters.blur_radius <= 0.0
             && !parameters.lens.is_active()
@@ -110,41 +111,43 @@ impl WgpuRenderer {
             }
         };
 
-        self.draw_filter_pass(
-            encoder,
-            "blur_downsample",
-            &self.resources().pipelines.blur_downsample,
-            &horizontal_target,
-            source,
-            BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-            // No clear for backdrops: each pass writes its whole scissor, and the composite only
-            // reads texels the passes wrote (the bounds lie 3 sigma inside the scissor), so
-            // whatever an earlier lens left outside it is never sampled; a full clear per pass
-            // per lens cost more than the passes. Content blurs composite out to the scissor's
-            // edge, so they keep the clear (transparent outside).
-            load,
-            Some(scissor),
-        );
-        self.draw_filter_pass(
-            encoder,
-            "blur_horizontal",
-            &self.resources().pipelines.blur,
-            &vertical_target,
-            &horizontal_target,
-            BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
-            load,
-            Some(scissor),
-        );
-        self.draw_filter_pass(
-            encoder,
-            "blur_vertical",
-            &self.resources().pipelines.blur,
-            &horizontal_target,
-            &vertical_target,
-            BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
-            load,
-            Some(scissor),
-        );
+        if !blurred_ready {
+            self.draw_filter_pass(
+                encoder,
+                "blur_downsample",
+                &self.resources().pipelines.blur_downsample,
+                &horizontal_target,
+                source,
+                BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
+                // No clear for backdrops: each pass writes its whole scissor, and the composite only
+                // reads texels the passes wrote (the bounds lie 3 sigma inside the scissor), so
+                // whatever an earlier lens left outside it is never sampled; a full clear per pass
+                // per lens cost more than the passes. Content blurs composite out to the scissor's
+                // edge, so they keep the clear (transparent outside).
+                load,
+                Some(scissor),
+            );
+            self.draw_filter_pass(
+                encoder,
+                "blur_horizontal",
+                &self.resources().pipelines.blur,
+                &vertical_target,
+                &horizontal_target,
+                BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
+                load,
+                Some(scissor),
+            );
+            self.draw_filter_pass(
+                encoder,
+                "blur_vertical",
+                &self.resources().pipelines.blur,
+                &horizontal_target,
+                &vertical_target,
+                BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
+                load,
+                Some(scissor),
+            );
+        }
 
         self.composite_texture(encoder, &horizontal_target, target, parameters, blur_size);
         if parameters.lens.is_active() && parameters.lens.sharp_rim > 0.0 {

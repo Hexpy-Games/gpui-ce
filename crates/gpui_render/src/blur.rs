@@ -9,7 +9,7 @@ pub use crate::shaders::{
 use gpui::{BackdropLens, Bounds, Corners, ScaledPixels, WallpaperPass};
 use wgsl_rs::std::vec2f;
 
-pub const DOWNSAMPLE_FACTOR: u32 = 2;
+pub const DOWNSAMPLE_FACTOR: u32 = gpui::BLUR_DOWNSAMPLE_FACTOR;
 
 /// Texture dimension for the downsampled blur passes; allocations must agree.
 pub fn downsampled_dimension(dimension: u32) -> u32 {
@@ -243,28 +243,15 @@ pub fn backdrop_snapshot_region(
     full_width: u32,
     full_height: u32,
 ) -> Bounds<ScaledPixels> {
-    let short = bounds.size.width.0.min(bounds.size.height.0) * 0.5;
-    let fold_reach = if lens.is_active() {
-        (lens.fold_depth.max(0.0) * (1.0 + lens.dispersion.abs()) - 1.0).max(0.0) * short
-    } else {
-        0.0
-    };
-    let margin = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius
-        + lens.sampling_margin()
-        + lens.depth.max(0.0)
-        + fold_reach
-        + 4.0;
-    let half = ScissorRectangle::for_blurred_bounds(bounds, margin, full_width, full_height);
-    let x0 = (half.x * DOWNSAMPLE_FACTOR).min(full_width);
-    let y0 = (half.y * DOWNSAMPLE_FACTOR).min(full_height);
-    let x1 = ((half.x + half.width) * DOWNSAMPLE_FACTOR).min(full_width);
-    let y1 = ((half.y + half.height) * DOWNSAMPLE_FACTOR).min(full_height);
+    let region = gpui::backdrop_sampling_region(bounds, blur_radius, lens);
+    let clamp = |value: f32, limit: u32| value.clamp(0.0, limit as f32);
+    let x0 = clamp(region.origin.x.0, full_width);
+    let y0 = clamp(region.origin.y.0, full_height);
+    let x1 = clamp(region.origin.x.0 + region.size.width.0, full_width).max(x0);
+    let y1 = clamp(region.origin.y.0 + region.size.height.0, full_height).max(y0);
     Bounds::new(
-        gpui::point(ScaledPixels(x0 as f32), ScaledPixels(y0 as f32)),
-        gpui::size(
-            ScaledPixels((x1 - x0) as f32),
-            ScaledPixels((y1 - y0) as f32),
-        ),
+        gpui::point(ScaledPixels(x0), ScaledPixels(y0)),
+        gpui::size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)),
     )
 }
 

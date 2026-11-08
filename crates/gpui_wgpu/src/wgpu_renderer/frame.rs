@@ -10,7 +10,10 @@ use gpui::{
     RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
 };
 use gpui_render::TargetStack;
-use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
+use gpui_render::blur::{
+    BlurKernel, FilterCompositeClip, FilterCompositeParameters,
+    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
+};
 use gpui_render::shaders::{
     common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool},
     interface as shader_interface,
@@ -325,6 +328,7 @@ struct FrameEncoder<'a> {
     offscreen: Option<wgpu::TextureView>,
     presentation: wgpu::TextureView,
     instances: InstanceUpload,
+    backdrop_keys: Vec<Option<u64>>,
 }
 
 impl<'a> FrameEncoder<'a> {
@@ -336,6 +340,11 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
+        let backdrop_keys = if scene.backdrop_filters.is_empty() {
+            Vec::new()
+        } else {
+            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size())
+        };
         Self {
             renderer,
             scene,
@@ -344,6 +353,7 @@ impl<'a> FrameEncoder<'a> {
             offscreen: targets.offscreen,
             presentation: targets.presentation,
             instances: targets.instances,
+            backdrop_keys,
         }
     }
 
@@ -424,7 +434,8 @@ impl<'a> FrameEncoder<'a> {
                 }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     drop(pass);
-                    for filter in &self.scene.backdrop_filters[range.clone()] {
+                    for index in range.clone() {
+                        let filter = &self.scene.backdrop_filters[index];
                         if let Some(paint) = &filter.wallpaper {
                             self.renderer.draw_wallpaper(
                                 &mut self.encoder,
@@ -434,16 +445,39 @@ impl<'a> FrameEncoder<'a> {
                             );
                             continue;
                         }
+                        let width = self.renderer.target.width();
+                        let height = self.renderer.target.height();
                         let region = gpui_render::blur::backdrop_snapshot_region(
                             filter.bounds,
                             filter.max_blur_radius(),
                             &filter.lens,
-                            self.renderer.target.width(),
-                            self.renderer.target.height(),
+                            width,
+                            height,
                         );
-                        // A lens reads the sharp full-resolution backdrop, so it needs a copy even
-                        // when the backdrop is the target it composites into.
-                        let snapshot = if self.targets.inherits_backdrop() {
+                        let key = if self.targets.inherits_backdrop() {
+                            None
+                        } else {
+                            self.backdrop_keys.get(index).copied().flatten()
+                        };
+                        let hit = key.is_some_and(|key| {
+                            let resources = self.renderer.resources();
+                            resources.backdrop_cache.borrow_mut().restore(
+                                key,
+                                &mut self.encoder,
+                                resources.blur_ping_texture.as_ref(),
+                                resources.backdrop_snapshot_texture.as_ref(),
+                            )
+                        });
+                        let radius = filter.max_blur_radius();
+                        let snapshot = if hit {
+                            if filter.lens.is_active() {
+                                self.renderer.resources().backdrop_snapshot_view.clone()
+                            } else {
+                                None
+                            }
+                        } else if self.targets.inherits_backdrop() {
+                            // A lens reads the sharp full-resolution backdrop, so it needs a copy
+                            // even when the backdrop is the target it composites into.
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
@@ -468,14 +502,53 @@ impl<'a> FrameEncoder<'a> {
                                 content_mask: filter.content_mask.bounds,
                                 corner_radii: filter.corner_radii,
                                 corner_smoothing: filter.corner_smoothing,
-                                blur_radius: filter.max_blur_radius(),
+                                blur_radius: radius,
                                 opacity: filter.opacity,
                                 scale: 1.0,
                                 scale_origin: Point::default(),
                                 clip: FilterCompositeClip::RoundedBounds,
                                 lens: filter.lens,
                             },
+                            hit,
                         );
+                        if let (false, Some(key)) = (hit, key) {
+                            let resources = self.renderer.resources();
+                            let blurred = BlurKernel::for_radius(radius)
+                                .and_then(|_| resources.blur_ping_texture.as_ref())
+                                .map(|ping| {
+                                    (
+                                        ping,
+                                        ScissorRectangle::for_blurred_bounds(
+                                            filter.bounds,
+                                            GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * radius,
+                                            width,
+                                            height,
+                                        ),
+                                    )
+                                });
+                            let sharp = if filter.lens.is_active() {
+                                resources.backdrop_snapshot_texture.as_ref().map(|texture| {
+                                    (
+                                        texture,
+                                        ScissorRectangle {
+                                            x: region.origin.x.0 as u32,
+                                            y: region.origin.y.0 as u32,
+                                            width: region.size.width.0 as u32,
+                                            height: region.size.height.0 as u32,
+                                        },
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            resources.backdrop_cache.borrow_mut().store(
+                                &resources.device,
+                                &mut self.encoder,
+                                key,
+                                blurred,
+                                sharp,
+                            );
+                        }
                     }
                     pass = begin_scene_render_pass(
                         self.renderer,
@@ -540,6 +613,7 @@ impl<'a> FrameEncoder<'a> {
                             clip: FilterCompositeClip::ContentShape,
                             lens: Default::default(),
                         },
+                        false,
                     );
                     pass = begin_scene_render_pass(
                         self.renderer,

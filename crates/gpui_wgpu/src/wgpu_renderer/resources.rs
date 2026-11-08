@@ -53,6 +53,7 @@ pub(super) struct WgpuResources {
     pub(super) filter_uniforms: DynamicUniformBuffer<BlurUniforms>,
     blur_bind_groups: RefCell<BlurBindGroups>,
     pub(super) wallpapers: super::wallpapers::WallpaperCacheCell,
+    pub(super) backdrop_cache: super::backdrop_cache::BackdropCacheCell,
     pub(super) globals_buffer: wgpu::Buffer,
     pub(super) globals_bind_group: wgpu::BindGroup,
     pub(super) path_globals_bind_group: wgpu::BindGroup,
@@ -190,6 +191,7 @@ impl WgpuResources {
             filter_uniforms,
             blur_bind_groups: RefCell::default(),
             wallpapers: RefCell::default(),
+            backdrop_cache: RefCell::default(),
             globals_buffer,
             globals_bind_group,
             path_globals_bind_group,
@@ -214,6 +216,7 @@ impl WgpuResources {
     pub(super) fn invalidate_intermediate_textures(&mut self) {
         self.instances.invalidate_texture_bindings();
         self.blur_bind_groups.get_mut().groups.clear();
+        self.backdrop_cache.get_mut().clear();
         self.path_intermediate_texture = None;
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
@@ -389,7 +392,10 @@ fn sampled_render_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

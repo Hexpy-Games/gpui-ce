@@ -1,5 +1,6 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use std::{
+    cell::RefCell,
     slice,
     sync::{Arc, OnceLock},
 };
@@ -155,7 +156,6 @@ impl PathResources {
 }
 
 struct ColorTarget {
-    #[expect(dead_code)]
     texture: ID3D11Texture2D,
     target: Option<ID3D11RenderTargetView>,
     source: Option<ID3D11ShaderResourceView>,
@@ -167,6 +167,8 @@ struct BlurResources {
     scratch: Option<[ColorTarget; 2]>,
     snapshot: Option<ColorTarget>,
     groups: Vec<ColorTarget>,
+    /// Blurred backdrops kept across frames; dropped with these resources.
+    cache: RefCell<DxBackdropCache>,
 }
 
 struct DirectXRenderPipelines {
@@ -567,6 +569,14 @@ impl DirectXRenderer {
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
+        let backdrop_keys = if scene.backdrop_filters.is_empty() {
+            Vec::new()
+        } else {
+            gpui_render::backdrop_key::backdrop_keys(
+                scene,
+                size(DevicePixels(self.width as i32), DevicePixels(self.height as i32)),
+            )
+        };
         for command in scene.render_commands() {
             let _annotation = annotation
                 .as_ref()
@@ -616,7 +626,10 @@ impl DirectXRenderer {
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     let (current_rtv, current_srv) = targets.current();
                     let result = (|| {
-                        for filter in &scene.backdrop_filters[range.clone()] {
+                        for (index, filter) in scene.backdrop_filters[range.clone()]
+                            .iter()
+                            .enumerate()
+                        {
                             if let Some(paint) = &filter.wallpaper {
                                 self.dx_draw_wallpaper(current_rtv, filter, paint)?;
                                 continue;
@@ -628,9 +641,23 @@ impl DirectXRenderer {
                                 self.width,
                                 self.height,
                             );
+                            // The cache holds the blurred backdrop (and a lens's sharp copy) of a
+                            // filter whose sampling region did not change since it was stored.
+                            let key = if targets.inherits_backdrop() {
+                                None
+                            } else {
+                                backdrop_keys.get(range.start + index).copied().flatten()
+                            };
+                            let hit = key.is_some_and(|key| self.dx_restore_backdrop(key));
                             // A lens reads the sharp full-resolution backdrop, so it needs a copy
                             // even when the backdrop is the target it composites into.
-                            let source = if targets.inherits_backdrop() {
+                            let source = if hit {
+                                if filter.lens.is_active() {
+                                    self.dx_snapshot_source()?
+                                } else {
+                                    current_srv.clone()
+                                }
+                            } else if targets.inherits_backdrop() {
                                 self.dx_snapshot_backdrop(
                                     targets.backdrop_layers().map(|(_, source)| source),
                                     region,
@@ -653,7 +680,11 @@ impl DirectXRenderer {
                                 1.0,
                                 Point::default(),
                                 filter.lens,
+                                hit,
                             )?;
+                            if let (false, Some(key)) = (hit, key) {
+                                self.dx_store_backdrop(key, filter, region);
+                            }
                         }
                         Ok::<(), anyhow::Error>(())
                     })();
@@ -704,6 +735,7 @@ impl DirectXRenderer {
                         boundary.scale,
                         boundary.scale_origin,
                         BackdropLens::default(),
+                        false,
                     );
                     self.active_render_target = parent_rtv.clone();
                     unsafe {
@@ -1308,6 +1340,8 @@ impl DirectXRenderer {
         scale: f32,
         scale_origin: Point<ScaledPixels>,
         lens: BackdropLens,
+        // The blurred backdrop was restored into the ping texture, so the blur passes are skipped.
+        blurred_ready: bool,
     ) -> Result<()> {
         if clip_rounded && blur_radius <= 0.0 && !lens.is_active() {
             return Ok(());
@@ -1354,42 +1388,44 @@ impl DirectXRenderer {
             }
             // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
             // shading only the blurred bounds.
-            self.dx_scissored(&scissor, || {
-                self.dx_blur_pass(
-                    &self.pipelines.blur_downsample_vertex,
-                    &self.pipelines.blur_downsample_fragment,
-                    &self.pipelines.blur_blend_replace,
-                    &ping.target,
-                    source_srv,
-                    BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-                    &half_vp,
-                    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                    3,
-                    // Backdrops skip the clear: each pass writes its whole scissor and the
-                    // composite only reads texels the passes wrote (as on wgpu); content blurs
-                    // composite out to the scissor's edge and keep it.
-                    !clip_rounded,
-                )?;
-
-                for (axis, source, target) in [
-                    (BlurAxis::Horizontal, &ping.source, &pong.target),
-                    (BlurAxis::Vertical, &pong.source, &ping.target),
-                ] {
+            if !blurred_ready {
+                self.dx_scissored(&scissor, || {
                     self.dx_blur_pass(
-                        &self.pipelines.blur_vertex,
-                        &self.pipelines.blur_fragment,
+                        &self.pipelines.blur_downsample_vertex,
+                        &self.pipelines.blur_downsample_fragment,
                         &self.pipelines.blur_blend_replace,
-                        target,
-                        source,
-                        BlurUniforms::gaussian(axis, blur_size, kernel),
+                        &ping.target,
+                        source_srv,
+                        BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
                         &half_vp,
                         D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                         3,
+                        // Backdrops skip the clear: each pass writes its whole scissor and the
+                        // composite only reads texels the passes wrote (as on wgpu); content blurs
+                        // composite out to the scissor's edge and keep it.
                         !clip_rounded,
                     )?;
-                }
-                Ok(())
-            })?;
+
+                    for (axis, source, target) in [
+                        (BlurAxis::Horizontal, &ping.source, &pong.target),
+                        (BlurAxis::Vertical, &pong.source, &ping.target),
+                    ] {
+                        self.dx_blur_pass(
+                            &self.pipelines.blur_vertex,
+                            &self.pipelines.blur_fragment,
+                            &self.pipelines.blur_blend_replace,
+                            target,
+                            source,
+                            BlurUniforms::gaussian(axis, blur_size, kernel),
+                            &half_vp,
+                            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                            3,
+                            !clip_rounded,
+                        )?;
+                    }
+                    Ok(())
+                })?;
+            }
 
             (&ping.source, blur_size)
         } else {
@@ -1530,10 +1566,83 @@ impl DirectXRenderer {
                 1.0,
                 Point::default(),
                 BackdropLens::default(),
+                false,
             )?;
         }
 
         Ok(snapshot.source.clone())
+    }
+
+    /// The sharp backdrop snapshot's view, for a lens whose snapshot was restored from the cache.
+    fn dx_snapshot_source(&self) -> Result<Option<ID3D11ShaderResourceView>> {
+        self.resources
+            .as_ref()
+            .and_then(|resources| resources.blur.as_ref())
+            .and_then(|blur| blur.snapshot.as_ref())
+            .map(|snapshot| snapshot.source.clone())
+            .context("backdrop snapshot missing")
+    }
+
+    /// Restores the cached blurred backdrop (and sharp snapshot) for `key`; false on a miss.
+    fn dx_restore_backdrop(&self, key: u64) -> bool {
+        let (Some(devices), Some(blur)) = (
+            self.devices.as_ref(),
+            self.resources
+                .as_ref()
+                .and_then(|resources| resources.blur.as_ref()),
+        ) else {
+            return false;
+        };
+        let ping = blur.scratch.as_ref().map(|[ping, _]| &ping.texture);
+        let snapshot = blur.snapshot.as_ref().map(|snapshot| &snapshot.texture);
+        blur.cache
+            .borrow_mut()
+            .restore(key, &devices.device_context, ping, snapshot)
+    }
+
+    /// Stores the blurred backdrop just produced for `filter` (and its sharp snapshot, for a
+    /// lens) under `key`. `region` is the filter's `backdrop_snapshot_region`.
+    fn dx_store_backdrop(&self, key: u64, filter: &BackdropFilter, region: Bounds<ScaledPixels>) {
+        let (Some(devices), Some(blur)) = (
+            self.devices.as_ref(),
+            self.resources
+                .as_ref()
+                .and_then(|resources| resources.blur.as_ref()),
+        ) else {
+            return;
+        };
+        let radius = filter.max_blur_radius();
+        let blurred = match (BlurKernel::for_radius(radius), blur.scratch.as_ref()) {
+            (Some(_), Some([ping, _])) => Some((
+                &ping.texture,
+                ScissorRectangle::for_blurred_bounds(
+                    filter.bounds,
+                    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * radius,
+                    self.width,
+                    self.height,
+                ),
+            )),
+            _ => None,
+        };
+        let sharp = match (filter.lens.is_active(), blur.snapshot.as_ref()) {
+            (true, Some(snapshot)) => Some((
+                &snapshot.texture,
+                ScissorRectangle {
+                    x: region.origin.x.0 as u32,
+                    y: region.origin.y.0 as u32,
+                    width: region.size.width.0 as u32,
+                    height: region.size.height.0 as u32,
+                },
+            )),
+            _ => None,
+        };
+        blur.cache.borrow_mut().store(
+            &devices.device,
+            &devices.device_context,
+            key,
+            blurred,
+            sharp,
+        );
     }
 
     /// Copy the offscreen scene texture into the swapchain render target.
@@ -1677,6 +1786,7 @@ impl DirectXResources {
                 scratch: None,
                 snapshot: None,
                 groups: Vec::with_capacity(requirements.isolated_target_count),
+                cache: RefCell::default(),
             });
         }
 
@@ -2632,7 +2742,10 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 
 const BUFFER_COUNT: usize = 3;
 
+mod backdrop_cache;
 mod wallpapers;
+
+use backdrop_cache::DxBackdropCache;
 
 pub(crate) mod shader_resources {
     //! D3D11 bytecode generated from the shared Rust shader sources at build time.
