@@ -1210,6 +1210,10 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().sprite_atlas().clone()
     }
 
+    fn supports_compositor_sprites(&self) -> bool {
+        self.state.renderer.borrow().supports_compositor_sprites()
+    }
+
     fn get_raw_handle(&self) -> HWND {
         self.0.hwnd
     }

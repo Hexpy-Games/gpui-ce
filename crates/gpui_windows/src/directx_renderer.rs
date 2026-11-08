@@ -27,7 +27,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HMODULE, HWND},
+        Foundation::{FreeLibrary, HMODULE, HWND, POINT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -75,6 +75,8 @@ pub(crate) struct DirectXRenderer {
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
+    /// Visuals that draw the scene's compositor sprites (DirectComposition only).
+    compositor: compositor::CompositorVisuals,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -329,6 +331,7 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            compositor: Default::default(),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -346,6 +349,10 @@ impl DirectXRenderer {
 
     pub(crate) fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.atlas.clone()
+    }
+
+    pub(crate) fn supports_compositor_sprites(&self) -> bool {
+        self.direct_composition.is_some()
     }
 
     /// Uploads the per-frame global and font constants.
@@ -451,6 +458,7 @@ impl DirectXRenderer {
                     .log_err();
             }
 
+            self.compositor.clear();
             self.direct_composition.take();
             self.devices.take();
         }
@@ -509,7 +517,23 @@ impl DirectXRenderer {
         }
         self.animation_time_ms = gpui::animation_time_ms();
         self.render(scene, background_appearance)?;
-        self.present()
+        self.present()?;
+        if let Some(composition) = &self.direct_composition {
+            let device_context = &self
+                .devices
+                .as_ref()
+                .context("devices missing")?
+                .device_context;
+            if self.compositor.update(
+                composition,
+                device_context,
+                scene.compositor_sprites(),
+                &self.atlas,
+            )? {
+                unsafe { composition.comp_device.Commit()? };
+            }
+        }
+        Ok(())
     }
 
     /// Encodes a complete frame without presenting it. Window drawing and test readback share
@@ -2837,6 +2861,7 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 const BUFFER_COUNT: usize = 3;
 
 mod backdrop_cache;
+mod compositor;
 mod damage;
 mod wallpapers;
 

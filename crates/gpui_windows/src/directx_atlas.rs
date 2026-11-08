@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use collections::FxHashMap;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
@@ -24,6 +26,8 @@ struct DirectXAtlasState {
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    /// The uploaded bytes of flipbook grids, by (texture, tile id), for the platform compositor.
+    frame_grids: FxHashMap<(AtlasTextureId, u32), (Size<DevicePixels>, Arc<[u8]>)>,
     glyph_cache: GlyphAtlasCache,
 }
 
@@ -45,6 +49,7 @@ impl DirectXAtlas {
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
             tiles_by_key: Default::default(),
+            frame_grids: Default::default(),
             glyph_cache: Default::default(),
         }))
     }
@@ -56,6 +61,16 @@ impl DirectXAtlas {
         let lock = self.0.lock();
         let tex = lock.texture(id);
         tex.view.clone()
+    }
+
+    /// The size and bytes of the flipbook grid in `tile`, if it holds one. Cells are row-major with
+    /// a `FRAME_GUTTER` border; monochrome grids are 1 byte per pixel, polychrome grids straight
+    /// BGRA.
+    pub(crate) fn frame_grid(&self, tile: &AtlasTile) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let lock = self.0.lock();
+        lock.frame_grids
+            .get(&(tile.texture_id, tile.tile_id.0))
+            .cloned()
     }
 
     pub(crate) fn handle_device_lost(
@@ -70,6 +85,7 @@ impl DirectXAtlas {
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
+        lock.frame_grids.clear();
         lock.glyph_cache.clear();
     }
 }
@@ -126,6 +142,7 @@ impl PlatformAtlas for DirectXAtlas {
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        lock.frame_grids.remove(&(tile.texture_id, tile.tile_id.0));
         let id = tile.texture_id;
 
         let textures = match id.kind {
@@ -166,6 +183,10 @@ impl DirectXAtlasState {
             .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
         self.texture(tile.texture_id)
             .upload(&self.device_context, tile.bounds, bytes);
+        if matches!(key, AtlasKey::Frames(_)) {
+            self.frame_grids
+                .insert((tile.texture_id, tile.tile_id.0), (size, bytes.into()));
+        }
         self.tiles_by_key.insert(key, tile);
 
         Ok(tile)
