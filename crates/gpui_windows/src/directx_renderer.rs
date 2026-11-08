@@ -1527,6 +1527,8 @@ impl DirectXRenderer {
                 0.0,
                 1.0,
                 false,
+                1.0,
+                Point::default(),
                 BackdropLens::default(),
             )?;
         }
