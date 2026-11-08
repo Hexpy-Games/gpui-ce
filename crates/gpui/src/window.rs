@@ -4281,7 +4281,18 @@ impl Window {
             is_start: true,
             inline: false,
         };
+        // Only a motion that moves pixels needs its children unclipped, so the parent clip can
+        // apply after the move; a fade keeps the clip on the children (small painted bounds).
+        let moves = motion.offset.0 != motion.offset.1
+            || motion.offset.0 != Point::default()
+            || motion.relative_offset.0 != motion.relative_offset.1
+            || motion.relative_offset.0 != Point::default()
+            || motion.scale != (1.0, 1.0)
+            || motion.rotation != (0.0, 0.0);
         self.with_filter_boundary(boundary, |window| {
+            if !moves {
+                return paint(window);
+            }
             window.content_mask_stack.push(ContentMask {
                 bounds: viewport,
                 fade_out: Edges::default(),

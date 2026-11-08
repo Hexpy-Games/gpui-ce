@@ -188,12 +188,16 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
         else {
             continue;
         };
-        let sweep = start.motion.sweep(
-            rect,
-            start.scale_origin,
-            scene.scale_factor,
-            start.motion_bounds,
-        );
+        // What the group can show: its parent clips it after the motion.
+        let sweep = start
+            .motion
+            .sweep(
+                rect,
+                start.scale_origin,
+                scene.scale_factor,
+                start.motion_bounds,
+            )
+            .intersect(&start.content_mask.bounds);
         if !eligible
             || !unfaded(&sweep, &start.content_mask)
             || covered(scene, std::ptr::null(), (start.order, end.order), &sweep)

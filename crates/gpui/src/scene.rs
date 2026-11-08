@@ -511,10 +511,7 @@ impl Scene {
         }
         self.filter_boundaries
             .retain(|boundary| !removed_orders.contains(&boundary.order));
-        self.paint_operations.retain(|operation| {
-            !matches!(operation, PaintOperation::Primitive(Primitive::FilterBoundary(boundary))
-                if removed_orders.contains(&boundary.order))
-        });
+        // Only the render data loses them: cached views replay `paint_operations` by index.
         let commands = std::mem::take(&mut self.render_plan.commands);
         self.render_plan = ScenePlan::build(self, commands);
         // The plan says which filter groups are isolated, so sprites move out only after it.
