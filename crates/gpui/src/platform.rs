@@ -970,6 +970,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
+    /// Whether the window draws [`Scene::compositor_sprites`] itself.
+    fn supports_compositor_sprites(&self) -> bool {
+        false
+    }
 
     // macOS specific methods
     fn get_title(&self) -> String {

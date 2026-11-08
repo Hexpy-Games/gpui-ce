@@ -546,6 +546,11 @@ impl MetalRenderer {
         &self.sprite_atlas
     }
 
+    /// The Metal renderer draws every sprite itself.
+    pub fn supports_compositor_sprites(&self) -> bool {
+        false
+    }
+
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
         self.presents_with_transaction = presents_with_transaction;
         if let Some(layer) = &self.layer {

@@ -2,8 +2,11 @@
 //! feature. Applications can then share the window's device through
 //! `gpui_wgpu::WgpuContextHandle` and composite their own textures.
 
+mod compositor;
+
 use std::sync::Arc;
 
+use compositor::CompositorLayers;
 use foreign_types::ForeignType as _;
 use gpui::{DevicePixels, GpuSpecs, Scene, Size};
 use gpui_apple::metal_renderer::new_window_layer;
@@ -12,6 +15,7 @@ use gpui_wgpu::{
     WgpuSurfaceConfig, wgpu,
 };
 use metal::{CAMetalLayer, MetalLayer, MetalLayerRef};
+use objc2::runtime::AnyObject;
 
 /// The device every window shares, and what the application requires of it.
 #[derive(Clone, Default)]
@@ -39,6 +43,8 @@ pub fn new_renderer(
 pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
     layer: MetalLayer,
+    compositor: CompositorLayers,
+    presents_with_transaction: bool,
 }
 
 impl MacWgpuRenderer {
@@ -55,7 +61,12 @@ impl MacWgpuRenderer {
         };
         let renderer =
             WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;
-        Ok(Self { renderer, layer })
+        Ok(Self {
+            renderer,
+            layer,
+            compositor: CompositorLayers::default(),
+            presents_with_transaction: false,
+        })
     }
 
     pub fn layer(&self) -> Option<&MetalLayerRef> {
@@ -70,7 +81,13 @@ impl MacWgpuRenderer {
         self.renderer.sprite_atlas()
     }
 
+    /// Whether windows draw the scene's compositor sprites with Core Animation.
+    pub fn supports_compositor_sprites(&self) -> bool {
+        true
+    }
+
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
+        self.presents_with_transaction = presents_with_transaction;
         self.layer
             .set_presents_with_transaction(presents_with_transaction);
     }
@@ -98,7 +115,20 @@ impl MacWgpuRenderer {
             }
             return true;
         }
+        // A frame that adds or removes a compositor sprite appears together with its layer.
+        let root = self.layer.as_ptr() as *mut AnyObject;
+        let sprites = scene.compositor_sprites();
+        let sprites_changed = self.compositor.changed(root, sprites);
+        if sprites_changed {
+            self.layer.set_presents_with_transaction(true);
+        }
         self.renderer.draw(scene);
+        if sprites_changed {
+            self.compositor
+                .update(root, sprites, self.renderer.sprite_atlas());
+            self.layer
+                .set_presents_with_transaction(self.presents_with_transaction);
+        }
         self.renderer.needs_redraw()
     }
 

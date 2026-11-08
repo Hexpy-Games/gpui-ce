@@ -2335,6 +2335,10 @@ impl PlatformWindow for MacWindow {
         self.0.lock().renderer.sprite_atlas().clone()
     }
 
+    fn supports_compositor_sprites(&self) -> bool {
+        self.0.lock().renderer.supports_compositor_sprites()
+    }
+
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
         #[cfg(feature = "wgpu")]
         return Some(self.0.lock().renderer.gpu_specs());

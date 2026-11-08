@@ -22,6 +22,8 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 mod bounds;
 pub use bounds::*;
+mod compositor;
+pub use compositor::CompositorSprite;
 mod damage;
 pub use damage::{DamagePlan, DamageRedraw};
 mod frame_loop;
@@ -94,6 +96,10 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     surface_opacities: Vec<f32>,
+    /// Set by the window before painting: whether the platform compositor draws animated sprites
+    /// that nothing covers, so `finish` moves them out of the sprite lists.
+    pub offload_animations: bool,
+    compositor_sprites: Vec<CompositorSprite>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
@@ -119,6 +125,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.surface_opacities.clear();
+        self.compositor_sprites.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
@@ -443,6 +450,11 @@ impl Scene {
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
         let commands = std::mem::take(&mut self.render_plan.commands);
         self.render_plan = ScenePlan::build(self, commands);
+        // The plan says which filter groups are isolated, so sprites move out only after it.
+        if self.offload_animations && compositor::offload(self) {
+            let commands = std::mem::take(&mut self.render_plan.commands);
+            self.render_plan = ScenePlan::build(self, commands);
+        }
         self.has_animations = self
             .monochrome_sprites
             .iter()
@@ -458,6 +470,11 @@ impl Scene {
     /// Whether any primitive carries an animated motion (set by `finish`).
     pub fn has_animations(&self) -> bool {
         self.has_animations
+    }
+
+    /// The animated sprites the platform compositor draws; see [`Self::offload_animations`].
+    pub fn compositor_sprites(&self) -> &[CompositorSprite] {
+        &self.compositor_sprites
     }
 
     /// A process-unique id assigned by every `finish`; equal ids mean identical primitives.

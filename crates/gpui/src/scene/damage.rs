@@ -427,4 +427,33 @@ mod tests {
         assert_eq!(filters, [0, 1]);
         assert_eq!(sprites.len(), 2);
     }
+
+    #[test]
+    fn animated_sprites_go_to_the_compositor_only_when_nothing_covers_them() {
+        let finished = |offload: bool, covered: bool| {
+            let mut scene = Scene::default();
+            scene.offload_animations = offload;
+            scene.insert_primitive(flipbook(rect(10.0, 10.0, 10.0, 10.0), eight_frames()));
+            if covered {
+                scene.insert_primitive(Quad {
+                    bounds: rect(15.0, 15.0, 20.0, 20.0),
+                    content_mask: mask(),
+                    ..Default::default()
+                });
+            }
+            scene.finish();
+            scene
+        };
+
+        let alone = finished(true, false);
+        assert_eq!(alone.compositor_sprites().len(), 1);
+        assert!(alone.monochrome_sprites.is_empty());
+        assert!(!alone.has_animations());
+
+        for scene in [finished(true, true), finished(false, false)] {
+            assert!(scene.compositor_sprites().is_empty());
+            assert_eq!(scene.monochrome_sprites.len(), 1);
+            assert!(scene.has_animations());
+        }
+    }
 }

@@ -49,10 +49,24 @@ impl DxBackdropCache {
         }
         entry.last_used = tick;
         if let (Some(stored), Some(target)) = (&entry.blurred, ping) {
-            copy_region(ctx, target, stored.rect.x, stored.rect.y, &stored.texture, &whole(stored.rect));
+            copy_region(
+                ctx,
+                target,
+                stored.rect.x,
+                stored.rect.y,
+                &stored.texture,
+                &whole(stored.rect),
+            );
         }
         if let (Some(stored), Some(target)) = (&entry.sharp, snapshot) {
-            copy_region(ctx, target, stored.rect.x, stored.rect.y, &stored.texture, &whole(stored.rect));
+            copy_region(
+                ctx,
+                target,
+                stored.rect.x,
+                stored.rect.y,
+                &stored.texture,
+                &whole(stored.rect),
+            );
         }
         true
     }
@@ -98,11 +112,7 @@ impl DxBackdropCache {
 
 /// `rect` moved to the origin: the area of an entry texture that holds the copy.
 fn whole(rect: ScissorRectangle) -> ScissorRectangle {
-    ScissorRectangle {
-        x: 0,
-        y: 0,
-        ..rect
-    }
+    ScissorRectangle { x: 0, y: 0, ..rect }
 }
 
 /// Replaces `slot` with a copy of `source[rect]`, reusing its texture when the size is unchanged.

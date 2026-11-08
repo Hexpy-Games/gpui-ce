@@ -354,8 +354,7 @@ mod source {
         if frames.turn_period_ms == 0u32 {
             return position;
         }
-        let elapsed =
-            (get!(GLOBALS).animation_time_ms - frames.start_ms) % frames.turn_period_ms;
+        let elapsed = (get!(GLOBALS).animation_time_ms - frames.start_ms) % frames.turn_period_ms;
         let angle = 2.0 * PI * (elapsed as f32) / (frames.turn_period_ms as f32);
         let cosine = cos(angle);
         let sine = sin(angle);

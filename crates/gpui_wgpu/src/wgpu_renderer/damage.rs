@@ -71,15 +71,18 @@ fn backdrops_cached(renderer: &WgpuRenderer, scene: &Scene, plan: &DamageRedraw)
 }
 
 /// The damage rectangle clamped to the target; `None` when nothing of it lies on the target.
-fn damage_scissor(
-    renderer: &WgpuRenderer,
-    rect: Bounds<ScaledPixels>,
-) -> Option<ScissorRectangle> {
+fn damage_scissor(renderer: &WgpuRenderer, rect: Bounds<ScaledPixels>) -> Option<ScissorRectangle> {
     let clamp = |value: f32, limit: u32| value.clamp(0.0, limit as f32);
     let x0 = clamp(rect.origin.x.0.floor(), renderer.target.width());
     let y0 = clamp(rect.origin.y.0.floor(), renderer.target.height());
-    let x1 = clamp((rect.origin.x.0 + rect.size.width.0).ceil(), renderer.target.width());
-    let y1 = clamp((rect.origin.y.0 + rect.size.height.0).ceil(), renderer.target.height());
+    let x1 = clamp(
+        (rect.origin.x.0 + rect.size.width.0).ceil(),
+        renderer.target.width(),
+    );
+    let y1 = clamp(
+        (rect.origin.y.0 + rect.size.height.0).ceil(),
+        renderer.target.height(),
+    );
     let scissor = ScissorRectangle {
         x: x0 as u32,
         y: y0 as u32,

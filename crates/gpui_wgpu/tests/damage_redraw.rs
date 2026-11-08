@@ -213,7 +213,10 @@ fn damage_redraw_matches_full_redraw() {
     let [frame0, frame1] = &first_frames[..] else {
         unreachable!("the first pair stores both images");
     };
-    let differs = (16..32)
-        .any(|y| (16..32).any(|x| frame0.get_pixel(x, y) != frame1.get_pixel(x, y)));
-    assert!(differs, "the first sprite must change between frames 0 and 1");
+    let differs =
+        (16..32).any(|y| (16..32).any(|x| frame0.get_pixel(x, y) != frame1.get_pixel(x, y)));
+    assert!(
+        differs,
+        "the first sprite must change between frames 0 and 1"
+    );
 }

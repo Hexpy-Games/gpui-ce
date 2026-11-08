@@ -637,7 +637,10 @@ impl DirectXRenderer {
         } else {
             gpui_render::backdrop_key::backdrop_keys(
                 scene,
-                size(DevicePixels(self.width as i32), DevicePixels(self.height as i32)),
+                size(
+                    DevicePixels(self.width as i32),
+                    DevicePixels(self.height as i32),
+                ),
             )
         };
         if damage.is_none() {
@@ -1458,68 +1461,70 @@ impl DirectXRenderer {
         let resources = self.resources.as_ref().context("resources missing")?;
 
         let full_size = [full_width as f32, full_height as f32];
-        let (composite_source, source_size) = if let Some(kernel) =
-            BlurKernel::for_radius(blur_radius)
-        {
-            let [ping, pong] = resources
-                .blur
-                .as_ref()
-                .and_then(|blur| blur.scratch.as_ref())
-                .context("blur resources were not prepared")?;
-            let scissor = ScissorRectangle::for_blurred_bounds(
-                bounds,
-                GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
-                full_width,
-                full_height,
-            );
-            if scissor.is_empty() {
-                return Ok(());
-            }
-            // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
-            // shading only the blurred bounds.
-            if !blurred_ready {
-                self.dx_scissored(&scissor, || {
-                    self.dx_blur_pass(
-                        &self.pipelines.blur_downsample_vertex,
-                        &self.pipelines.blur_downsample_fragment,
-                        &self.pipelines.blur_blend_replace,
-                        &ping.target,
-                        source_srv,
-                        BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-                        &half_vp,
-                        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                        3,
-                        // Backdrops skip the clear: each pass writes its whole scissor and the
-                        // composite only reads texels the passes wrote (as on wgpu); content blurs
-                        // composite out to the scissor's edge and keep it.
-                        !clip_rounded,
-                    )?;
-
-                    for (axis, source, target) in [
-                        (BlurAxis::Horizontal, &ping.source, &pong.target),
-                        (BlurAxis::Vertical, &pong.source, &ping.target),
-                    ] {
+        let (composite_source, source_size) =
+            if let Some(kernel) = BlurKernel::for_radius(blur_radius) {
+                let [ping, pong] = resources
+                    .blur
+                    .as_ref()
+                    .and_then(|blur| blur.scratch.as_ref())
+                    .context("blur resources were not prepared")?;
+                let scissor = ScissorRectangle::for_blurred_bounds(
+                    bounds,
+                    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
+                    full_width,
+                    full_height,
+                );
+                if scissor.is_empty() {
+                    return Ok(());
+                }
+                // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
+                // shading only the blurred bounds.
+                if !blurred_ready {
+                    self.dx_scissored(&scissor, || {
                         self.dx_blur_pass(
-                            &self.pipelines.blur_vertex,
-                            &self.pipelines.blur_fragment,
+                            &self.pipelines.blur_downsample_vertex,
+                            &self.pipelines.blur_downsample_fragment,
                             &self.pipelines.blur_blend_replace,
-                            target,
-                            source,
-                            BlurUniforms::gaussian(axis, blur_size, kernel),
+                            &ping.target,
+                            source_srv,
+                            BlurUniforms::downsample(
+                                [full_width as f32, full_height as f32],
+                                blur_size,
+                            ),
                             &half_vp,
                             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                             3,
+                            // Backdrops skip the clear: each pass writes its whole scissor and the
+                            // composite only reads texels the passes wrote (as on wgpu); content blurs
+                            // composite out to the scissor's edge and keep it.
                             !clip_rounded,
                         )?;
-                    }
-                    Ok(())
-                })?;
-            }
 
-            (&ping.source, blur_size)
-        } else {
-            (source_srv, full_size)
-        };
+                        for (axis, source, target) in [
+                            (BlurAxis::Horizontal, &ping.source, &pong.target),
+                            (BlurAxis::Vertical, &pong.source, &ping.target),
+                        ] {
+                            self.dx_blur_pass(
+                                &self.pipelines.blur_vertex,
+                                &self.pipelines.blur_fragment,
+                                &self.pipelines.blur_blend_replace,
+                                target,
+                                source,
+                                BlurUniforms::gaussian(axis, blur_size, kernel),
+                                &half_vp,
+                                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                                3,
+                                !clip_rounded,
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                }
+
+                (&ping.source, blur_size)
+            } else {
+                (source_srv, full_size)
+            };
 
         // Content blur bleeds ~3·radius past the box; composite over a dilated rect.
         let composite_bounds = if clip_rounded {

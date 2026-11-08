@@ -12,8 +12,8 @@ use gpui::{
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
-    BlurKernel, FilterCompositeClip, FilterCompositeParameters, GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS,
-    ScissorRectangle,
+    BlurKernel, FilterCompositeClip, FilterCompositeParameters,
+    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
 };
 use gpui_render::shaders::{
     blur::BlurUniforms,
@@ -30,8 +30,7 @@ pub(super) fn render_to_view(
     let mut planned = *scene.render_plan().requirements();
     planned.uses_offscreen_target |= scene.has_animations();
     let commands = scene.render_commands();
-    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, frame_view)
-    else {
+    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, frame_view) else {
         renderer.retained = None;
         return None;
     };
@@ -566,10 +565,7 @@ impl<'a> FrameEncoder<'a> {
                         let radius = filter.max_blur_radius();
                         let snapshot = if hit {
                             if filter.lens.is_active() {
-                                self.renderer
-                                    .resources()
-                                    .backdrop_snapshot_view
-                                    .clone()
+                                self.renderer.resources().backdrop_snapshot_view.clone()
                             } else {
                                 None
                             }
