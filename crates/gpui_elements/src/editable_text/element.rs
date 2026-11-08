@@ -567,6 +567,7 @@ impl Element for EditableTextElement {
             &self.colors,
             self.caret_width,
             self.caret_height,
+            request_layout.caret.read(cx).blink(),
             window,
         );
 
@@ -624,8 +625,8 @@ impl Element for EditableTextElement {
                 );
             }
 
-            if let Some(quad) = prepaint.elements.caret.take() {
-                window.paint_quad(quad);
+            if let Some((quad, blink)) = prepaint.elements.caret.take() {
+                window.with_motion(blink, quad.bounds, |window| window.paint_quad(quad));
             }
         };
 
@@ -899,7 +900,7 @@ impl PrelayoutState {
 struct PrepaintElements {
     document: Option<Arc<ShapedText>>,
     selection: SmallVec<[PaintQuad; 20]>,
-    caret: Option<PaintQuad>,
+    caret: Option<(PaintQuad, gpui::LayerMotion)>,
 }
 
 impl PrepaintElements {
@@ -909,6 +910,7 @@ impl PrepaintElements {
         colors: &EditableTextColors,
         caret_width: Pixels,
         caret_height: DefiniteLength,
+        blink: gpui::LayerMotion,
         window: &mut Window,
     ) -> PrepaintElements {
         let mut elements = PrepaintElements::default();
@@ -958,13 +960,14 @@ impl PrepaintElements {
                     .unwrap_or_default();
             let caret_height = caret_height.to_pixels(line_height.into(), window.rem_size());
             let vertical_offset = (line_height - caret_height) / 2.;
-            elements.caret = Some(
+            elements.caret = Some((
                 PaintQuad::new(Bounds::new(
                     caret_point + point(Pixels::ZERO, vertical_offset),
                     size(caret_width, caret_height),
                 ))
                 .background(colors.caret),
-            );
+                blink,
+            ));
         }
 
         elements
