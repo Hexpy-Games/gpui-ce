@@ -254,6 +254,8 @@ impl MacWgpuRenderer {
                 false
             }
         });
+        // Live surfaces share the window renderer pipelines, so they take its format and alpha.
+        let (format, alpha_mode) = self.renderer.surface_format();
         for layer in scene.live_layers() {
             let size = layer
                 .bounds
@@ -261,12 +263,12 @@ impl MacWgpuRenderer {
                 .map(|value| DevicePixels(value.0.ceil() as i32));
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: wgpu::TextureFormat::Bgra8Unorm,
+                format,
                 width: size.width.0 as u32,
                 height: size.height.0 as u32,
                 present_mode: wgpu::PresentMode::Fifo,
                 desired_maximum_frame_latency: 2,
-                alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+                alpha_mode,
                 view_formats: Vec::new(),
             };
             if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {

@@ -280,6 +280,12 @@ impl WgpuRenderer {
 
     /// Renders a canvas into a separate premultiplied BGRA surface without changing the
     /// window's retained frame, backdrop keys or surface cache.
+    /// The window target format and alpha mode, which separate surfaces the renderer draws into
+    /// (live layers) must use so its pipelines match.
+    pub fn surface_format(&self) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
+        (self.target.config.format, self.target.config.alpha_mode)
+    }
+
     pub fn render_sized(
         &mut self,
         scene: &Scene,
