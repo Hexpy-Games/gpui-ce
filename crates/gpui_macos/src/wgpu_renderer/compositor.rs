@@ -380,13 +380,47 @@ fn make_layers(
         let _: () = unsafe {
             msg_send![&*layer, setPosition: NSPoint::new(x + width * anchor.x, y + height * anchor.y)]
         };
-        for key in ["opacity", "transform"] {
+        let mask = motion.clip.map(|(from, _)| {
+            let mask = new_layer();
+            let space = CGColorSpace::create_device_rgb();
+            let color = unsafe { CGColorCreate(space.as_ptr().cast(), [0.0, 0.0, 0.0, 1.0].as_ptr()) };
+            let _: () = unsafe { msg_send![&*mask, setBackgroundColor: CgColor(color)] };
+            unsafe { CGColorRelease(color) };
+            let _: () = unsafe {
+                msg_send![&*mask, setFrame: rect(f64::from(from.left.0), f64::from(from.bottom.0), width - f64::from(from.left.0 + from.right.0), height - f64::from(from.top.0 + from.bottom.0))]
+            };
+            let _: () = unsafe { msg_send![&*layer, setMask: &*mask] };
+            mask
+        });
+        for (key, target) in [("opacity", &layer), ("transform", &layer)]
+            .into_iter()
+            .chain(
+                mask.as_ref()
+                    .into_iter()
+                    .flat_map(|mask| [("bounds", mask), ("position", mask)]),
+            )
+        {
             let value = |progress: f32| -> Retained<AnyObject> {
                 if key == "opacity" {
                     let opacity = f64::from(
                         motion.opacity.0 + (motion.opacity.1 - motion.opacity.0) * progress,
                     );
                     unsafe { msg_send![class!(NSNumber), numberWithDouble: opacity] }
+                } else if key == "bounds" || key == "position" {
+                    let (from, to) = motion.clip.unwrap();
+                    let left = f64::from((from.left + (to.left - from.left) * progress).0);
+                    let right = f64::from((from.right + (to.right - from.right) * progress).0);
+                    let top = f64::from((from.top + (to.top - from.top) * progress).0);
+                    let bottom = f64::from((from.bottom + (to.bottom - from.bottom) * progress).0);
+                    if key == "bounds" {
+                        unsafe {
+                            msg_send![class!(NSValue), valueWithRect: rect(0.0, 0.0, width - left - right, height - top - bottom)]
+                        }
+                    } else {
+                        unsafe {
+                            msg_send![class!(NSValue), valueWithPoint: NSPoint::new((left + width - right) * 0.5, (bottom + height - top) * 0.5)]
+                        }
+                    }
                 } else {
                     let offset = motion.offset.0 + (motion.offset.1 - motion.offset.0) * progress;
                     let scale =
@@ -421,6 +455,27 @@ fn make_layers(
                     let _: () = unsafe { msg_send![&*animation, setToValue: &*value(1.0)] };
                     let timing = CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2);
                     let _: () = unsafe { msg_send![&*animation, setTimingFunction: &*timing] };
+                    animation
+                }
+                MotionEasing::Linear { points, len } => {
+                    let animation: Retained<AnyObject> = unsafe {
+                        msg_send![class!(CAKeyframeAnimation), animationWithKeyPath: &*NSString::from_str(key)]
+                    };
+                    let values: Retained<AnyObject> =
+                        unsafe { msg_send![class!(NSMutableArray), array] };
+                    let times: Retained<AnyObject> =
+                        unsafe { msg_send![class!(NSMutableArray), array] };
+                    for &(x, y) in &points[..usize::from(len)] {
+                        let _: () = unsafe { msg_send![&*values, addObject: &*value(y)] };
+                        let time: Retained<AnyObject> =
+                            unsafe { msg_send![class!(NSNumber), numberWithDouble: f64::from(x)] };
+                        let _: () = unsafe { msg_send![&*times, addObject: &*time] };
+                    }
+                    let _: () = unsafe { msg_send![&*animation, setValues: &*values] };
+                    let _: () = unsafe { msg_send![&*animation, setKeyTimes: &*times] };
+                    let _: () = unsafe {
+                        msg_send![&*animation, setCalculationMode: &*NSString::from_str("linear")]
+                    };
                     animation
                 }
                 MotionEasing::Steps(n) => {
@@ -458,7 +513,7 @@ fn make_layers(
                 msg_send![&*animation, setAutoreverses: Bool::new(motion.repeat == MotionRepeat::Alternate)]
             };
             let _: () = unsafe { msg_send![&*animation, setRemovedOnCompletion: Bool::NO] };
-            add_animation(&layer, &animation, key);
+            add_animation(target, &animation, key);
         }
     }
 

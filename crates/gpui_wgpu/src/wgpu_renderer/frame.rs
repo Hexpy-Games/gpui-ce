@@ -724,18 +724,21 @@ impl<'a> FrameEncoder<'a> {
                         scissor = self.scissor;
                     }
                     let boundary = &self.scene.filter_boundaries[*boundary_index];
-                    let (opacity, scale, composite_offset) = gpui::motion_composite_parameters(
-                        boundary,
-                        self.renderer.animation_time_ms,
-                        self.scene.scale_factor,
-                    );
+                    let (opacity, scale, composite_offset, clip) =
+                        gpui::motion_composite_parameters(
+                            boundary,
+                            self.renderer.animation_time_ms,
+                            self.scene.scale_factor,
+                        );
                     self.renderer.blur_and_composite(
                         &mut self.encoder,
                         &filtered,
                         parent,
                         FilterCompositeParameters {
                             bounds: boundary.bounds,
-                            content_mask: boundary.content_mask.bounds,
+                            content_mask: clip.map_or(boundary.content_mask.bounds, |clip| {
+                                boundary.content_mask.bounds.intersect(&clip)
+                            }),
                             corner_radii: boundary.corner_radii,
                             corner_smoothing: boundary.corner_smoothing,
                             blur_radius: boundary.max_blur_radius(),

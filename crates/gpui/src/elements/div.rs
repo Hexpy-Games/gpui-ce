@@ -2789,6 +2789,12 @@ pub(crate) struct AriaProperties {
     pub(crate) live_atomic: Option<bool>,
 }
 
+struct LayoutMotionState {
+    rest: Bounds<Pixels>,
+    viewport: Size<Pixels>,
+    active: Option<crate::LayerMotion>,
+}
+
 /// The interactivity struct. Powers all of the general-purpose
 /// interactivity in the `Div` element.
 #[derive(Default)]
@@ -2802,6 +2808,7 @@ pub struct Interactivity {
     pub hovered: Option<bool>,
     pub(crate) tooltip_id: Option<TooltipId>,
     pub(crate) content_size: Size<Pixels>,
+    pub(crate) layout_motion_rest: Bounds<Pixels>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) disabled: bool,
@@ -3088,6 +3095,13 @@ impl Interactivity {
                     }
                 }
 
+                if style.layout_motion.is_some() && global_id.is_some() {
+                    self.layout_motion_rest = Bounds {
+                        origin: bounds.origin - window.element_offset(),
+                        size: bounds.size,
+                    };
+                }
+
                 window.with_text_style(style.text_style().cloned(), |window| {
                     let origin = bounds.origin
                         + point(
@@ -3239,7 +3253,7 @@ impl Interactivity {
                 let mut element_state =
                     element_state.map(|element_state| element_state.unwrap_or_default());
 
-                let style = self.compute_style_internal(
+                let mut style = self.compute_style_internal(
                     hitbox,
                     Some(bounds),
                     element_state.as_mut(),
@@ -3265,6 +3279,74 @@ impl Interactivity {
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
                 }
+
+                let layout_motion =
+                    if let (Some(config), Some(global_id)) = (style.layout_motion, global_id) {
+                        let rest = self.layout_motion_rest;
+                        let viewport = window.viewport_size();
+                        let now = crate::animation_time_ms();
+                        window.with_optional_element_state::<LayoutMotionState, _>(
+                            Some(global_id),
+                            |state, window| {
+                                let previous = state.flatten();
+                                let mut active = previous.as_ref().and_then(|state| state.active);
+                                if let Some(previous) = previous
+                                    && previous.viewport == viewport
+                                    && [
+                                        rest.origin.x - previous.rest.origin.x,
+                                        rest.origin.y - previous.rest.origin.y,
+                                        rest.size.width - previous.rest.size.width,
+                                        rest.size.height - previous.rest.size.height,
+                                    ]
+                                    .into_iter()
+                                    .any(|delta| delta.abs() > px(0.5))
+                                {
+                                    let from = previous.rest.origin
+                                        + previous.active.map_or(Point::default(), |motion| {
+                                            motion
+                                                .sample(
+                                                    now,
+                                                    window.scale_factor(),
+                                                    bounds.scale(window.scale_factor()),
+                                                )
+                                                .offset
+                                                .map(|value| px(value.0 / window.scale_factor()))
+                                        })
+                                        - rest.origin;
+                                    let growth = rest.size - previous.rest.size;
+                                    active = Some(crate::LayerMotion {
+                                        start_ms: now,
+                                        duration_ms: config.duration_ms,
+                                        repeat: crate::MotionRepeat::Once,
+                                        easing: config.easing,
+                                        offset: (from, Point::default()),
+                                        clip: (growth.width > px(0.0) || growth.height > px(0.0))
+                                            .then_some((
+                                                crate::Edges {
+                                                    right: growth.width.max(px(0.0)),
+                                                    bottom: growth.height.max(px(0.0)),
+                                                    ..Default::default()
+                                                },
+                                                crate::Edges::default(),
+                                            )),
+                                        ..crate::LayerMotion::NONE
+                                    });
+                                }
+                                active = active.filter(|motion| motion.is_active(now));
+                                (
+                                    active,
+                                    Some(LayoutMotionState {
+                                        rest,
+                                        viewport,
+                                        active,
+                                    }),
+                                )
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                let motion = style.motion.take().unwrap_or(crate::LayerMotion::NONE);
 
                 let tab_group = self.tab_group.then_some(self.tab_index).flatten();
 
@@ -3360,7 +3442,15 @@ impl Interactivity {
                         bounds.size.height * style.transform_origin.y,
                     );
                 window.with_element_scale(style.scale, origin, |window| {
-                    style.paint(bounds, window, cx, paint_text_style);
+                    window.with_motion(motion, bounds, |window| {
+                        window.with_motion(
+                            layout_motion.unwrap_or(crate::LayerMotion::NONE),
+                            bounds,
+                            |window| {
+                                style.paint(bounds, window, cx, paint_text_style);
+                            },
+                        );
+                    });
                 });
 
                 ((), element_state)
@@ -5249,6 +5339,78 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn layout_motion_animates_layout_changes_but_not_scroll(cx: &mut TestAppContext) {
+        struct LayoutMotionTestView {
+            top_height: Rc<Cell<Pixels>>,
+            scroll: ScrollHandle,
+        }
+
+        impl Render for LayoutMotionTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("scroller")
+                    .size(px(100.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(div().h(self.top_height.get()).flex_shrink_0())
+                    .child(
+                        div()
+                            .id("moving-box")
+                            .h(px(200.0))
+                            .w_full()
+                            .flex_shrink_0()
+                            .bg(crate::red())
+                            .layout_motion(crate::LayoutMotion {
+                                duration_ms: 1000,
+                                easing: crate::MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
+                            }),
+                    )
+            }
+        }
+
+        let top_height = Rc::new(Cell::new(px(20.0)));
+        let scroll = ScrollHandle::new();
+        let view = cx.add_window({
+            let top_height = top_height.clone();
+            let scroll = scroll.clone();
+            move |_, _| LayoutMotionTestView { top_height, scroll }
+        });
+        cx.update_window(view.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            top_height.set(px(50.0));
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let second = window
+                .rendered_frame
+                .scene
+                .filter_boundaries
+                .iter()
+                .find(|boundary| boundary.is_start && boundary.motion.is_animated())
+                .unwrap()
+                .clone();
+            assert_eq!(
+                second.motion.offset,
+                (point(px(0.0), px(-30.0)), Point::default())
+            );
+
+            scroll.set_offset(point(px(0.0), px(-10.0)));
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let third = window
+                .rendered_frame
+                .scene
+                .filter_boundaries
+                .iter()
+                .find(|boundary| boundary.is_start && boundary.motion.is_animated())
+                .unwrap();
+            assert_eq!(third.motion, second.motion);
+        })
+        .unwrap();
+    }
 
     #[gpui::test]
     fn scale_paints_a_scaled_filter_boundary_pair(cx: &mut TestAppContext) {

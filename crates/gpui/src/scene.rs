@@ -1339,6 +1339,8 @@ pub struct FilterBoundary {
     pub scale_origin: Point<ScaledPixels>,
     /// Time-driven composite transform.
     pub motion: LayerMotion,
+    /// Element bounds used by relative offsets and animated clips.
+    pub motion_bounds: Bounds<ScaledPixels>,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
     /// The group holds one primitive that already carries the group's opacity, so it is drawn
@@ -1886,6 +1888,7 @@ mod tests {
             scale: 1.0,
             scale_origin: Point::default(),
             motion: LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start,
             inline: false,
         }

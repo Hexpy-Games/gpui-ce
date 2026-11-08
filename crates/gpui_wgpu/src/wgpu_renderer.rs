@@ -965,6 +965,7 @@ mod tests {
             scale: 1.0,
             scale_origin: gpui::Point::default(),
             motion: gpui::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
             inline: false,
         };

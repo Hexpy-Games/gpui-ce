@@ -4191,6 +4191,7 @@ impl Window {
             scale: 1.0,
             scale_origin: Point::default(),
             motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
             inline: false,
         };
@@ -4215,6 +4216,7 @@ impl Window {
             bounds.origin.y + bounds.size.height * motion.origin.y,
         )
         .scale(self.scale_factor());
+        let motion_bounds = bounds.scale(self.scale_factor());
         let bounds = self.cover_bounds(viewport);
         let boundary = FilterBoundary {
             order: 0,
@@ -4230,6 +4232,7 @@ impl Window {
             scale: 1.0,
             scale_origin,
             motion,
+            motion_bounds,
             is_start: true,
             inline: false,
         };
@@ -4270,6 +4273,7 @@ impl Window {
             scale,
             scale_origin: origin.scale(self.scale_factor()),
             motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
             inline: false,
         };
@@ -4914,6 +4918,7 @@ impl Window {
             scale: 1.0,
             scale_origin: Point::default(),
             motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
             inline: false,
         };

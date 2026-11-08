@@ -1,6 +1,6 @@
 //! Time-driven transforms of retained painted subtrees.
 
-use crate::{Bounds, FilterBoundary, Pixels, Point, ScaledPixels, point};
+use crate::{Bounds, Edges, FilterBoundary, Pixels, Point, ScaledPixels, point};
 use serde::{Deserialize, Serialize};
 
 /// How motion continues after its first duration.
@@ -19,8 +19,38 @@ pub enum MotionRepeat {
 pub enum MotionEasing {
     /// CSS cubic-bezier(x1, y1, x2, y2).
     CubicBezier([f32; 4]),
+    /// CSS linear() with up to eight (time, value) points.
+    Linear {
+        /// The (time, value) points in ascending time order.
+        points: [(f32, f32); 8],
+        /// Number of populated points.
+        len: u8,
+    },
     /// CSS steps(n, jump-end).
     Steps(u32),
+}
+
+impl MotionEasing {
+    /// Creates a CSS linear() timing curve with at most eight points.
+    pub fn linear(points: &[(f32, f32)]) -> Self {
+        debug_assert!(points.len() <= 8);
+        let len = points.len().min(8);
+        let mut stored = [(0.0, 0.0); 8];
+        stored[..len].copy_from_slice(&points[..len]);
+        Self::Linear {
+            points: stored,
+            len: len as u8,
+        }
+    }
+}
+
+/// A layout change animated without running layout on each frame.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct LayoutMotion {
+    /// Duration of the layout motion in milliseconds.
+    pub duration_ms: u32,
+    /// Timing curve of the layout motion.
+    pub easing: MotionEasing,
 }
 
 /// A retained subtree's opacity, translation, and scale over time.
@@ -33,6 +63,9 @@ pub struct LayerMotion {
     pub easing: MotionEasing,
     pub opacity: (f32, f32),
     pub offset: (Point<Pixels>, Point<Pixels>),
+    pub relative_offset: (Point<f32>, Point<f32>),
+    pub clip: Option<(Edges<Pixels>, Edges<Pixels>)>,
+    pub visible: (f32, f32),
     pub scale: (f32, f32),
     pub origin: Point<f32>,
 }
@@ -44,6 +77,7 @@ pub struct LayerMotionSample {
     pub opacity: f32,
     pub offset: Point<ScaledPixels>,
     pub scale: f32,
+    pub clip: Option<Bounds<ScaledPixels>>,
 }
 
 impl LayerMotion {
@@ -58,6 +92,9 @@ impl LayerMotion {
             point(Pixels::ZERO, Pixels::ZERO),
             point(Pixels::ZERO, Pixels::ZERO),
         ),
+        relative_offset: (point(0.0, 0.0), point(0.0, 0.0)),
+        clip: None,
+        visible: (0.0, 1.0),
         scale: (1.0, 1.0),
         origin: point(0.5, 0.5),
     };
@@ -67,8 +104,7 @@ impl LayerMotion {
         self.duration_ms > 0
     }
 
-    /// Eased progress at the wrapping animation clock value.
-    pub fn progress(&self, now_ms: u32) -> f32 {
+    fn linear_progress(&self, now_ms: u32) -> f32 {
         if !self.is_animated() {
             return 0.0;
         }
@@ -78,12 +114,29 @@ impl LayerMotion {
         } else {
             elapsed as f32 / self.duration_ms as f32
         };
-        let x = match self.repeat {
+        match self.repeat {
             MotionRepeat::Once => x.clamp(0.0, 1.0),
             MotionRepeat::Loop => x.fract(),
             MotionRepeat::Alternate => 1.0 - (x % 2.0 - 1.0).abs(),
-        };
+        }
+    }
+
+    fn visible_at(&self, now_ms: u32) -> bool {
+        let x = self.linear_progress(now_ms);
+        self.visible.0 <= x
+            && (x < self.visible.1 || (x <= self.visible.1 && self.visible.1 >= 1.0))
+    }
+
+    /// Eased progress at the wrapping animation clock value.
+    pub fn progress(&self, now_ms: u32) -> f32 {
+        let x = self.linear_progress(now_ms);
         match self.easing {
+            MotionEasing::Linear { points, len } => {
+                let points = &points[..usize::from(len)];
+                let segment = points.windows(2).find(|pair| x <= pair[1].0).unwrap();
+                let [(x0, y0), (x1, y1)] = [segment[0], segment[1]];
+                y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+            }
             MotionEasing::Steps(n) => (x * n as f32).floor() / n as f32,
             MotionEasing::CubicBezier([x1, y1, x2, y2]) => {
                 let mut t = x;
@@ -127,12 +180,42 @@ impl LayerMotion {
     }
 
     /// Samples the composite transform without rebuilding the subtree.
-    pub fn sample(&self, now_ms: u32, scale_factor: f32) -> LayerMotionSample {
+    pub fn sample(
+        &self,
+        now_ms: u32,
+        scale_factor: f32,
+        motion_bounds: Bounds<ScaledPixels>,
+    ) -> LayerMotionSample {
         let p = self.progress(now_ms);
         LayerMotionSample {
-            opacity: self.opacity.0 + (self.opacity.1 - self.opacity.0) * p,
-            offset: (self.offset.0 + (self.offset.1 - self.offset.0) * p).scale(scale_factor),
+            opacity: if self.visible_at(now_ms) {
+                self.opacity.0 + (self.opacity.1 - self.opacity.0) * p
+            } else {
+                0.0
+            },
+            offset: (self.offset.0 + (self.offset.1 - self.offset.0) * p).scale(scale_factor)
+                + point(
+                    motion_bounds.size.width
+                        * (self.relative_offset.0.x
+                            + (self.relative_offset.1.x - self.relative_offset.0.x) * p),
+                    motion_bounds.size.height
+                        * (self.relative_offset.0.y
+                            + (self.relative_offset.1.y - self.relative_offset.0.y) * p),
+                ),
             scale: self.scale.0 + (self.scale.1 - self.scale.0) * p,
+            clip: self.clip.map(|(from, to)| {
+                let edges = Edges {
+                    top: from.top + (to.top - from.top) * p,
+                    right: from.right + (to.right - from.right) * p,
+                    bottom: from.bottom + (to.bottom - from.bottom) * p,
+                    left: from.left + (to.left - from.left) * p,
+                }
+                .scale(scale_factor);
+                Bounds::from_corners(
+                    motion_bounds.origin + point(edges.left, edges.top),
+                    motion_bounds.bottom_right() - point(edges.right, edges.bottom),
+                )
+            }),
         }
     }
 
@@ -141,11 +224,21 @@ impl LayerMotion {
         if !self.is_animated() || a_ms == b_ms {
             return false;
         }
+        if self.opacity.0 == self.opacity.1
+            && self.offset.0 == self.offset.1
+            && self.relative_offset.0 == self.relative_offset.1
+            && self.scale.0 == self.scale.1
+            && self.clip.is_none_or(|(from, to)| from == to)
+        {
+            return self.visible_at(a_ms) != self.visible_at(b_ms);
+        }
         match self.easing {
             MotionEasing::Steps(n) => {
                 (self.progress(a_ms) * n as f32).round() != (self.progress(b_ms) * n as f32).round()
             }
-            MotionEasing::CubicBezier(_) => self.is_active(a_ms) || self.is_active(b_ms),
+            MotionEasing::CubicBezier(_) | MotionEasing::Linear { .. } => {
+                self.is_active(a_ms) || self.is_active(b_ms)
+            }
         }
     }
 
@@ -155,18 +248,32 @@ impl LayerMotion {
         bounds: Bounds<ScaledPixels>,
         origin: Point<ScaledPixels>,
         scale_factor: f32,
+        motion_bounds: Bounds<ScaledPixels>,
     ) -> Bounds<ScaledPixels> {
         let (low, high) = match self.easing {
             MotionEasing::CubicBezier([_, y1, _, y2]) => {
                 (0.0f32.min(y1).min(y2), 1.0f32.max(y1).max(y2))
             }
             MotionEasing::Steps(_) => (0.0, 1.0),
+            MotionEasing::Linear { points, len } => points[..usize::from(len)]
+                .iter()
+                .fold((0.0f32, 1.0f32), |(low, high), &(_, y)| {
+                    (low.min(y), high.max(y))
+                }),
         };
         [0.0, 1.0, low, high]
             .into_iter()
             .map(|p| {
-                let offset =
-                    (self.offset.0 + (self.offset.1 - self.offset.0) * p).scale(scale_factor);
+                let offset = (self.offset.0 + (self.offset.1 - self.offset.0) * p)
+                    .scale(scale_factor)
+                    + point(
+                        motion_bounds.size.width
+                            * (self.relative_offset.0.x
+                                + (self.relative_offset.1.x - self.relative_offset.0.x) * p),
+                        motion_bounds.size.height
+                            * (self.relative_offset.0.y
+                                + (self.relative_offset.1.y - self.relative_offset.0.y) * p),
+                    );
                 let scale = self.scale.0 + (self.scale.1 - self.scale.0) * p;
                 let a = origin + (bounds.origin - origin) * scale + offset;
                 let b = origin + (bounds.bottom_right() - origin) * scale + offset;
@@ -185,15 +292,18 @@ pub fn motion_composite_parameters(
     boundary: &FilterBoundary,
     now_ms: u32,
     scale_factor: f32,
-) -> (f32, f32, Point<ScaledPixels>) {
+) -> (f32, f32, Point<ScaledPixels>, Option<Bounds<ScaledPixels>>) {
     if boundary.motion.is_animated() {
-        let sample = boundary.motion.sample(now_ms, scale_factor);
+        let sample = boundary
+            .motion
+            .sample(now_ms, scale_factor, boundary.motion_bounds);
         (
             boundary.opacity * sample.opacity,
             sample.scale,
             sample.offset,
+            sample.clip,
         )
     } else {
-        (boundary.opacity, boundary.scale, Point::default())
+        (boundary.opacity, boundary.scale, Point::default(), None)
     }
 }

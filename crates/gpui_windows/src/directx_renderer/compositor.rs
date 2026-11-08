@@ -261,6 +261,32 @@ fn make_visuals(
         }
         let motion = &sprite.motion;
         if motion.is_animated() {
+            if let Some((from, to)) = motion.clip {
+                let left = motion_animation(device, motion, (from.left.0, to.left.0), now_ms)?;
+                let top = motion_animation(device, motion, (from.top.0, to.top.0), now_ms)?;
+                let right = motion_animation(
+                    device,
+                    motion,
+                    (
+                        bounds.size.width.0 - from.right.0,
+                        bounds.size.width.0 - to.right.0,
+                    ),
+                    now_ms,
+                )?;
+                let bottom = motion_animation(
+                    device,
+                    motion,
+                    (
+                        bounds.size.height.0 - from.bottom.0,
+                        bounds.size.height.0 - to.bottom.0,
+                    ),
+                    now_ms,
+                )?;
+                window_rect.SetLeft(&left)?;
+                window_rect.SetTop(&top)?;
+                window_rect.SetRight(&right)?;
+                window_rect.SetBottom(&bottom)?;
+            }
             let opacity = motion_animation(device, motion, motion.opacity, now_ms)?;
             let effect = device.CreateEffectGroup()?;
             effect.SetOpacity(&opacity)?;
@@ -359,6 +385,22 @@ fn motion_animation(
     let delta = to - from;
     let mut segments = Vec::new();
     match motion.easing {
+        MotionEasing::Linear { points, len } => {
+            for pair in points[..usize::from(len)].windows(2) {
+                let [(x0, y0), (x1, y1)] = [pair[0], pair[1]];
+                let length = f64::from(x1 - x0) * duration;
+                segments.push((
+                    f64::from(x0) * duration,
+                    length,
+                    [
+                        from + delta * y0,
+                        delta * (y1 - y0) / length as f32,
+                        0.0,
+                        0.0,
+                    ],
+                ));
+            }
+        }
         MotionEasing::Steps(n) => {
             for i in 0..n {
                 segments.push((

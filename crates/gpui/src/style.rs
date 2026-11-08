@@ -395,6 +395,9 @@ pub struct Style {
     /// Time-driven composite transform of this element and its children.
     pub motion: Option<crate::LayerMotion>,
 
+    /// Animates changes to this element's layout position and size.
+    pub layout_motion: Option<crate::LayoutMotion>,
+
     /// Uniform scale applied to this element and its children after compositing them as a group.
     pub scale: Option<f32>,
 
@@ -1177,6 +1180,7 @@ impl Default for Style {
             mouse_cursor: None,
             opacity: None,
             motion: None,
+            layout_motion: None,
             scale: None,
             transform_origin: point(0.5, 0.5),
             grid_rows: None,

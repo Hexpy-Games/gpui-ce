@@ -145,6 +145,40 @@ impl MacWgpuRenderer {
                 (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
                 (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
             );
+            let offset = |offset: gpui::Point<gpui::Pixels>, relative: gpui::Point<f32>| {
+                offset
+                    + point(
+                        gpui::px(
+                            group.motion_bounds.size.width.0 * relative.x / scene.scale_factor,
+                        ),
+                        gpui::px(
+                            group.motion_bounds.size.height.0 * relative.y / scene.scale_factor,
+                        ),
+                    )
+            };
+            motion.offset = (
+                offset(motion.offset.0, motion.relative_offset.0),
+                offset(motion.offset.1, motion.relative_offset.1),
+            );
+            motion.relative_offset = (point(0.0, 0.0), point(0.0, 0.0));
+            motion.clip = motion.clip.map(|(from, to)| {
+                let insets = |edges: gpui::Edges<gpui::Pixels>| gpui::Edges {
+                    left: gpui::px(
+                        (group.motion_bounds.left().0 - group.rect.left().0) / scene.scale_factor,
+                    ) + edges.left,
+                    top: gpui::px(
+                        (group.motion_bounds.top().0 - group.rect.top().0) / scene.scale_factor,
+                    ) + edges.top,
+                    right: gpui::px(
+                        (group.rect.right().0 - group.motion_bounds.right().0) / scene.scale_factor,
+                    ) + edges.right,
+                    bottom: gpui::px(
+                        (group.rect.bottom().0 - group.motion_bounds.bottom().0)
+                            / scene.scale_factor,
+                    ) + edges.bottom,
+                };
+                (insets(from), insets(to))
+            });
             sprites.push(CompositorSprite {
                 contents: SpriteContents::Pixels {
                     size: pixels.0,

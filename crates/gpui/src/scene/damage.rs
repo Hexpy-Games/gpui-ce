@@ -88,7 +88,12 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
             changed.push((
                 boundary
                     .motion
-                    .sweep(boundary.bounds, boundary.scale_origin, scene.scale_factor)
+                    .sweep(
+                        boundary.bounds,
+                        boundary.scale_origin,
+                        scene.scale_factor,
+                        boundary.motion_bounds,
+                    )
                     .intersect(&boundary.content_mask.bounds),
                 boundary.order,
             ));
@@ -252,6 +257,7 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
                         boundary.bounds,
                         boundary.scale_origin,
                         scene.scale_factor,
+                        boundary.motion_bounds,
                     )
                 } else {
                     boundary.bounds
@@ -511,6 +517,7 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
+            motion_bounds: Bounds::default(),
             motion: LayerMotion {
                 duration_ms: 1000,
                 repeat: MotionRepeat::Loop,
@@ -579,6 +586,7 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
+            motion_bounds: Bounds::default(),
             motion: LayerMotion {
                 duration_ms: 1000,
                 repeat: MotionRepeat::Loop,
@@ -629,6 +637,33 @@ mod tests {
     }
 
     #[test]
+    fn linear_motion_samples_clip_and_visibility() {
+        let motion_bounds = rect(10.0, 20.0, 100.0, 80.0);
+        let motion = LayerMotion {
+            duration_ms: 1000,
+            easing: MotionEasing::linear(&[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]),
+            clip: Some((
+                crate::Edges {
+                    right: px(20.0),
+                    ..Default::default()
+                },
+                crate::Edges::default(),
+            )),
+            visible: (0.25, 0.5),
+            ..LayerMotion::NONE
+        };
+        let sample = motion.sample(300, 1.0, motion_bounds);
+        assert_eq!(sample.opacity, 1.0);
+        assert!((sample.clip.unwrap().right().0 - (motion_bounds.right().0 - 8.0)).abs() < 1e-3);
+        assert_eq!(motion.sample(600, 1.0, motion_bounds).opacity, 0.0);
+        let still = LayerMotion {
+            clip: None,
+            ..motion
+        };
+        assert!(still.changes_between(499, 500));
+    }
+
+    #[test]
     fn motion_steps_and_once_determine_frame_changes_and_activity() {
         let mut scene = Scene::default();
         scene.filter_boundaries.push(FilterBoundary {
@@ -641,10 +676,12 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: Default::default(),
+            motion_bounds: Bounds::default(),
             motion: LayerMotion {
                 duration_ms: 1000,
                 repeat: MotionRepeat::Loop,
                 easing: MotionEasing::Steps(2),
+                opacity: (0.0, 1.0),
                 ..LayerMotion::NONE
             },
             is_start: true,

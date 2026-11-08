@@ -53,6 +53,7 @@ pub struct CompositorGroup {
     pub scene: Scene,
     pub rect: Bounds<ScaledPixels>,
     pub motion: LayerMotion,
+    pub motion_bounds: Bounds<ScaledPixels>,
     pub origin: Point<ScaledPixels>,
     pub key: u64,
     pub content_mask: ContentMask<ScaledPixels>,
@@ -131,6 +132,7 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
             || end.is_start
             || !start.motion.is_animated()
             || start.motion.repeat == MotionRepeat::Once
+            || start.motion.visible != (0.0, 1.0)
             || isolated
                 .iter()
                 .any(|&(a, b)| a < start.order && end.order < b)
@@ -186,9 +188,12 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
         else {
             continue;
         };
-        let sweep = start
-            .motion
-            .sweep(rect, start.scale_origin, scene.scale_factor);
+        let sweep = start.motion.sweep(
+            rect,
+            start.scale_origin,
+            scene.scale_factor,
+            start.motion_bounds,
+        );
         if !eligible
             || !unfaded(&sweep, &start.content_mask)
             || covered(scene, std::ptr::null(), (start.order, end.order), &sweep)
@@ -225,6 +230,7 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
                 scene: content,
                 rect,
                 motion: start.motion,
+                motion_bounds: start.motion_bounds,
                 origin: start.scale_origin,
                 key: hash.finish(),
                 content_mask: start.content_mask,

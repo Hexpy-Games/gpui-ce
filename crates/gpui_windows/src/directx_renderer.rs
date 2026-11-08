@@ -542,10 +542,31 @@ impl DirectXRenderer {
                 (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
                 (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
             );
+            let offset = |offset: gpui::Point<gpui::Pixels>, relative: gpui::Point<f32>| {
+                offset * scene.scale_factor
+                    + point(
+                        gpui::px(group.motion_bounds.size.width.0 * relative.x),
+                        gpui::px(group.motion_bounds.size.height.0 * relative.y),
+                    )
+            };
             motion.offset = (
-                motion.offset.0 * scene.scale_factor,
-                motion.offset.1 * scene.scale_factor,
+                offset(motion.offset.0, motion.relative_offset.0),
+                offset(motion.offset.1, motion.relative_offset.1),
             );
+            motion.relative_offset = (point(0.0, 0.0), point(0.0, 0.0));
+            motion.clip = motion.clip.map(|(from, to)| {
+                let insets = |edges: gpui::Edges<gpui::Pixels>| gpui::Edges {
+                    left: gpui::px(group.motion_bounds.left().0 - group.rect.left().0)
+                        + edges.left * scene.scale_factor,
+                    top: gpui::px(group.motion_bounds.top().0 - group.rect.top().0)
+                        + edges.top * scene.scale_factor,
+                    right: gpui::px(group.rect.right().0 - group.motion_bounds.right().0)
+                        + edges.right * scene.scale_factor,
+                    bottom: gpui::px(group.rect.bottom().0 - group.motion_bounds.bottom().0)
+                        + edges.bottom * scene.scale_factor,
+                };
+                (insets(from), insets(to))
+            });
             sprites.push(CompositorSprite {
                 contents: SpriteContents::Pixels {
                     size: pixels.0,
@@ -880,14 +901,14 @@ impl DirectXRenderer {
                         self.damage_scissor = damage_scissor;
                         self.restore_rasterizer();
                     }
-                    let (opacity, scale, composite_offset) = gpui::motion_composite_parameters(
+                    let (opacity, scale, composite_offset, clip) = gpui::motion_composite_parameters(
                         boundary, self.animation_time_ms, scene.scale_factor,
                     );
                     let result = self.dx_blur_and_composite(
                         &source,
                         parent_rtv,
                         boundary.bounds,
-                        boundary.content_mask.bounds,
+                        clip.map_or(boundary.content_mask.bounds, |clip| boundary.content_mask.bounds.intersect(&clip)),
                         boundary.corner_radii,
                         boundary.corner_smoothing,
                         boundary.max_blur_radius(),
@@ -3480,6 +3501,8 @@ mod tests {
             opacity,
             scale: 1.0,
             scale_origin: Point::default(),
+            motion: gpui::LayerMotion::NONE,
+            motion_bounds: Bounds::default(),
             is_start: true,
             inline: false,
         };

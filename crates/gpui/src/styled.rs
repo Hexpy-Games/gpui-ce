@@ -992,6 +992,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Animates changes to this element's layout position and size.
+    fn layout_motion(mut self, motion: gpui::LayoutMotion) -> Self {
+        self.style().layout_motion = Some(motion);
+        self
+    }
+
     /// Sets the uniform scale of this element and its children.
     fn scale(mut self, s: f32) -> Self {
         self.style().scale = Some(s);
