@@ -1331,7 +1331,7 @@ pub struct FilterBoundary {
     /// Origin of the group scale in scene (device-pixel) space.
     pub scale_origin: Point<ScaledPixels>,
     /// Time-driven composite transform.
-    pub motion: Motion,
+    pub motion: LayerMotion,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
     /// The group holds one primitive that already carries the group's opacity, so it is drawn
@@ -1878,7 +1878,7 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: Point::default(),
-            motion: Motion::NONE,
+            motion: LayerMotion::NONE,
             is_start,
             inline: false,
         }

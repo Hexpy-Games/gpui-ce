@@ -304,7 +304,7 @@ mod tests {
     use super::*;
     use crate::{
         AtlasTextureId, AtlasTextureKind, AtlasTile, ContentMask, DevicePixels, FilterBoundary,
-        FrameLoop, MonochromeSprite, Motion, MotionEasing, MotionRepeat, Quad, ScaledFilter,
+        FrameLoop, LayerMotion, MonochromeSprite, MotionEasing, MotionRepeat, Quad, ScaledFilter,
         TileId, bounds, px, size,
     };
 
@@ -515,12 +515,12 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
-            motion: Motion {
+            motion: LayerMotion {
                 duration_ms: 1000,
                 repeat: MotionRepeat::Loop,
                 easing: MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
                 offset: (point(px(0.0), px(0.0)), point(px(40.0), px(0.0))),
-                ..Motion::NONE
+                ..LayerMotion::NONE
             },
             is_start: true,
             inline: false,
@@ -577,20 +577,20 @@ mod tests {
             opacity: 1.0,
             scale: 1.0,
             scale_origin: Default::default(),
-            motion: Motion {
+            motion: LayerMotion {
                 duration_ms: 1000,
                 repeat: MotionRepeat::Loop,
                 easing: MotionEasing::Steps(2),
-                ..Motion::NONE
+                ..LayerMotion::NONE
             },
             is_start: true,
             inline: false,
         });
         assert!(!scene.changes_between(100, 400));
         assert!(scene.changes_between(400, 600));
-        scene.filter_boundaries[0].motion = Motion {
+        scene.filter_boundaries[0].motion = LayerMotion {
             duration_ms: 200,
-            ..Motion::NONE
+            ..LayerMotion::NONE
         };
         assert!(scene.animating_at(100));
         assert!(!scene.animating_at(250));

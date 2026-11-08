@@ -9,9 +9,8 @@ use std::time::{Duration, Instant};
 mod example_prelude;
 
 use gpui::{
-    App, AppContext, Bounds, Context, FontWeight, MotionPass, TransitionMotion as Motion,
-    TransitionMotionSample as MotionSample, Window, WindowBounds, WindowOptions, div, ease_in_out,
-    millis, prelude::*, px, relative, rgb, size,
+    App, AppContext, Bounds, Context, FontWeight, Motion, MotionPass, MotionSample, Window,
+    WindowBounds, WindowOptions, div, ease_in_out, millis, prelude::*, px, relative, rgb, size,
 };
 
 const BACKGROUND: u32 = 0x141a26;

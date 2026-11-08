@@ -183,7 +183,7 @@ where
 mod tests {
     use super::*;
 
-    use crate::{Direction, SpringConfig, TransitionMotion as Motion};
+    use crate::{Direction, Motion, SpringConfig};
 
     fn assert_sample(sample: AnimatedSample<f32>, value: f32, progress: Progress, is_active: bool) {
         assert_eq!(

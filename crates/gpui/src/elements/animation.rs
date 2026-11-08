@@ -3,8 +3,8 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use crate::{
     AnyElement, App, AppContext, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, ParentElement, SpringAnimation, SpringConfig, SpringDescription, SpringPlayback,
-    SpringState, SpringTarget, TransitionMotion as Motion, Window,
+    IntoElement, Motion, ParentElement, SpringAnimation, SpringConfig, SpringDescription,
+    SpringPlayback, SpringState, SpringTarget, Window,
 };
 
 pub use easing::*;

@@ -538,9 +538,9 @@ mod tests {
     use super::*;
     use crate::{
         AbsoluteLength, AnyWindowHandle, Bounds, Corners, DefiniteLength, Edges, FocusHandle,
-        InputEvent as _, Length, MotionDurationExt, MouseButton, MouseDownEvent, MouseUpEvent,
-        Pixels, SpringConfig, Style, TestAppContext, TransitionMotion as Motion, Window, blue,
-        canvas, div, ease_in_out, point, prelude::*, px, red, relative, rems, size,
+        InputEvent as _, Length, Motion, MotionDurationExt, MouseButton, MouseDownEvent,
+        MouseUpEvent, Pixels, SpringConfig, Style, TestAppContext, Window, blue, canvas, div,
+        ease_in_out, point, prelude::*, px, red, relative, rems, size,
     };
 
     #[derive(Clone, Debug, Default, PartialEq)]

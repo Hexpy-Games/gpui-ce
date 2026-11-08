@@ -26,7 +26,7 @@ pub enum MotionEasing {
 /// A retained subtree's opacity, translation, and scale over time.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[expect(missing_docs)]
-pub struct Motion {
+pub struct LayerMotion {
     pub start_ms: u32,
     pub duration_ms: u32,
     pub repeat: MotionRepeat,
@@ -40,13 +40,13 @@ pub struct Motion {
 /// Composite parameters sampled in device pixels.
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[expect(missing_docs)]
-pub struct MotionSample {
+pub struct LayerMotionSample {
     pub opacity: f32,
     pub offset: Point<ScaledPixels>,
     pub scale: f32,
 }
 
-impl Motion {
+impl LayerMotion {
     /// No motion, with identity composite parameters.
     pub const NONE: Self = Self {
         start_ms: 0,
@@ -127,9 +127,9 @@ impl Motion {
     }
 
     /// Samples the composite transform without rebuilding the subtree.
-    pub fn sample(&self, now_ms: u32, scale_factor: f32) -> MotionSample {
+    pub fn sample(&self, now_ms: u32, scale_factor: f32) -> LayerMotionSample {
         let p = self.progress(now_ms);
-        MotionSample {
+        LayerMotionSample {
             opacity: self.opacity.0 + (self.opacity.1 - self.opacity.0) * p,
             offset: (self.offset.0 + (self.offset.1 - self.offset.0) * p).scale(scale_factor),
             scale: self.scale.0 + (self.scale.1 - self.scale.0) * p,

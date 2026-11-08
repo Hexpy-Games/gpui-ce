@@ -987,7 +987,7 @@ pub trait Styled: Sized {
     }
 
     /// Sets the time-driven composite transform of this element and its children.
-    fn motion(mut self, motion: gpui::Motion) -> Self {
+    fn motion(mut self, motion: gpui::LayerMotion) -> Self {
         self.style().motion = Some(motion);
         self
     }
