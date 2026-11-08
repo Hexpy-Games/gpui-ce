@@ -50,7 +50,7 @@ unsafe impl Encode for CgColor {
 }
 
 /// Core Animation objects are only touched on the main thread, where windows draw.
-struct MainThread<T>(T);
+pub(super) struct MainThread<T>(pub(super) T);
 
 // SAFETY: see above; the renderer is only used from the main thread.
 unsafe impl<T> Send for MainThread<T> {}
@@ -177,7 +177,7 @@ impl CompositorLayers {
             return None;
         };
         let key = (tile.texture_id, tile.tile_id.0);
-        if !self.cells.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.cells.entry(key) {
             let (size, bytes) = atlas.frame_grid(tile)?;
             let (width, height) = (size.width.0 as usize, size.height.0 as usize);
             let cells = crop_cells(
@@ -186,7 +186,7 @@ impl CompositorLayers {
                 &sprite.frames,
                 sprite.color.is_some(),
             )?;
-            self.cells.insert(key, MainThread(cells));
+            entry.insert(MainThread(cells));
         }
         self.cells.get(&key).map(|cells| cells.0.as_slice())
     }
@@ -387,7 +387,7 @@ fn make_layers(
             let _: () = unsafe { msg_send![&*mask, setBackgroundColor: CgColor(color)] };
             unsafe { CGColorRelease(color) };
             let _: () = unsafe {
-                msg_send![&*mask, setFrame: rect(f64::from(from.left.0), f64::from(from.bottom.0), width - f64::from(from.left.0 + from.right.0), height - f64::from(from.top.0 + from.bottom.0))]
+                msg_send![&*mask, setFrame: rect(f64::from(f32::from(from.left)), f64::from(f32::from(from.bottom)), width - f64::from(f32::from(from.left + from.right)), height - f64::from(f32::from(from.top + from.bottom)))]
             };
             let _: () = unsafe { msg_send![&*layer, setMask: &*mask] };
             mask
@@ -408,10 +408,13 @@ fn make_layers(
                     unsafe { msg_send![class!(NSNumber), numberWithDouble: opacity] }
                 } else if key == "bounds" || key == "position" {
                     let (from, to) = motion.clip.unwrap();
-                    let left = f64::from((from.left + (to.left - from.left) * progress).0);
-                    let right = f64::from((from.right + (to.right - from.right) * progress).0);
-                    let top = f64::from((from.top + (to.top - from.top) * progress).0);
-                    let bottom = f64::from((from.bottom + (to.bottom - from.bottom) * progress).0);
+                    let left = f64::from(f32::from(from.left + (to.left - from.left) * progress));
+                    let right =
+                        f64::from(f32::from(from.right + (to.right - from.right) * progress));
+                    let top = f64::from(f32::from(from.top + (to.top - from.top) * progress));
+                    let bottom = f64::from(f32::from(
+                        from.bottom + (to.bottom - from.bottom) * progress,
+                    ));
                     if key == "bounds" {
                         unsafe {
                             msg_send![class!(NSValue), valueWithRect: rect(0.0, 0.0, width - left - right, height - top - bottom)]
@@ -438,8 +441,8 @@ fn make_layers(
                         m32: 0.0,
                         m33: 1.0,
                         m34: 0.0,
-                        m41: f64::from(offset.x.0),
-                        m42: -f64::from(offset.y.0),
+                        m41: f64::from(f32::from(offset.x)),
+                        m42: -f64::from(f32::from(offset.y)),
                         m43: 0.0,
                         m44: 1.0,
                     };

@@ -967,6 +967,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn draw_animation_frame(&self, scene: &Scene) {
         self.draw(scene)
     }
+    /// Paints the live layers without presenting the window surface.
+    fn draw_live_layers(&self, _scene: &Scene) {}
     /// Rasterises a scene region as premultiplied, top-down BGRA pixels.
     fn rasterize_offscreen(
         &self,

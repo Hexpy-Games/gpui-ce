@@ -291,7 +291,7 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
 }
 
 /// Whether the visible part of `painted` lies outside the mask's edge fades.
-fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> bool {
+pub(super) fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> bool {
     let visible = painted.intersect(&mask.bounds);
     let fade = &mask.fade_out;
     visible.left() >= mask.bounds.left() + fade.left
@@ -303,7 +303,7 @@ fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> 
 /// Whether a primitive other than `sprite` at or after `order` paints inside `painted`, or a
 /// backdrop filter there samples from it. Primitives in one paint layer share an order, so an equal
 /// order may still draw above.
-fn covered(
+pub(super) fn covered(
     scene: &Scene,
     sprite: *const (),
     (start_order, end_order): (DrawOrder, DrawOrder),

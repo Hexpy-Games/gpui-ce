@@ -265,13 +265,20 @@ impl WgpuResources {
 }
 
 impl WgpuRenderer {
-    pub(super) fn ensure_path_textures(&mut self) {
-        if self.resources().path_intermediate_texture.is_some() {
+    pub(super) fn ensure_path_textures(&mut self, size: gpui::Size<gpui::DevicePixels>) {
+        if self
+            .resources()
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| {
+                texture.width() == size.width.0 as u32 && texture.height() == size.height.0 as u32
+            })
+        {
             return;
         }
         let format = self.target.format();
-        let width = self.target.width();
-        let height = self.target.height();
+        let width = size.width.0 as u32;
+        let height = size.height.0 as u32;
         let sample_count = self.rendering_params.path_sample_count;
         let resources = self.resources_mut();
         let (texture, view) = sampled_render_texture(&resources.device, format, width, height);

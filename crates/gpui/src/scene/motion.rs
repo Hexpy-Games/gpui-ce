@@ -1,7 +1,11 @@
 //! Time-driven transforms of retained painted subtrees.
 
-use crate::{Bounds, Edges, FilterBoundary, Pixels, Point, ScaledPixels, point};
+use crate::{
+    Background, Bounds, ContentMask, Edges, FilterBoundary, PaintQuad, Path, Pixels, Point, Quad,
+    ScaledPixels, Scene, Size, point,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// How motion continues after its first duration.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -309,4 +313,66 @@ pub fn motion_composite_parameters(
     } else {
         (boundary.opacity, boundary.scale, Point::default(), None)
     }
+}
+
+/// A canvas-local scene painted independently of the window's views.
+pub struct LiveCanvas {
+    /// The scene being built.
+    pub scene: Scene,
+    /// Device pixels per logical pixel.
+    pub scale_factor: f32,
+    /// Logical canvas dimensions.
+    pub size: Size<Pixels>,
+}
+
+impl LiveCanvas {
+    /// The canvas dimensions in logical pixels.
+    pub fn size(&self) -> Size<Pixels> {
+        self.size
+    }
+
+    /// Paints a quad in canvas-local coordinates.
+    pub fn paint_quad(&mut self, quad: PaintQuad) {
+        self.scene.insert_primitive(Quad {
+            bounds: quad.bounds.scale(self.scale_factor),
+            content_mask: ContentMask {
+                bounds: Bounds::new(Point::default(), self.size).scale(self.scale_factor),
+                ..Default::default()
+            },
+            background: quad.background,
+            border_color: quad.border_color,
+            corner_radii: quad.corner_radii.scale(self.scale_factor),
+            border_widths: quad.border_widths.scale(self.scale_factor),
+            border_style: quad.border_style,
+            border_dashed_length: quad.border_dashed_length,
+            border_dashed_gap: quad.border_dashed_gap,
+            corner_smoothing: quad.corner_smoothing,
+            ..Default::default()
+        });
+    }
+
+    /// Paints a path in canvas-local coordinates.
+    pub fn paint_path(&mut self, mut path: Path<Pixels>, color: impl Into<Background>) {
+        path.content_mask = ContentMask {
+            bounds: Bounds::new(Point::default(), self.size),
+            ..Default::default()
+        };
+        path.color = color.into();
+        self.scene.insert_primitive(path.scale(self.scale_factor));
+    }
+}
+
+/// Paints a live canvas at seconds since its layer's start time.
+pub type LivePaint = Arc<dyn Fn(f32, &mut LiveCanvas) + Send + Sync>;
+
+/// A procedural scene presented on its own platform surface.
+#[derive(Clone)]
+#[expect(missing_docs)]
+pub struct LiveLayer {
+    pub key: u64,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub order: super::DrawOrder,
+    pub start_ms: u32,
+    pub paint: LivePaint,
 }

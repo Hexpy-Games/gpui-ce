@@ -278,6 +278,22 @@ impl WgpuRenderer {
         self.animation_time_ms = ms;
     }
 
+    /// Renders a canvas into a separate premultiplied BGRA surface without changing the
+    /// window's retained frame, backdrop keys or surface cache.
+    pub fn render_sized(
+        &mut self,
+        scene: &Scene,
+        view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
+    ) -> bool {
+        let clear = self.target.clear_color;
+        self.target.clear_color = wgpu::Color::TRANSPARENT;
+        let rendered = frame::render_offscreen(self, scene, view, size);
+        self.target.clear_color = clear;
+        frame::write_shader_globals(self, self.target.viewport_size());
+        rendered
+    }
+
     /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
     pub fn rasterize(
         &mut self,
@@ -327,7 +343,7 @@ impl WgpuRenderer {
         if rebuild {
             self.rebuild_pipelines();
         }
-        let rendered = frame::render_offscreen(self, scene, &view);
+        let rendered = frame::render_offscreen(self, scene, &view, self.target.viewport_size());
         self.target.config.format = format;
         self.target.config.alpha_mode = alpha;
         self.target.clear_color = clear;

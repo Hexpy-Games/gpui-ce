@@ -32,7 +32,14 @@ pub(super) fn render_damage_to_view(
     let mut planned = plan.requirements;
     planned.uses_offscreen_target = true;
     planned.uses_blur_target = true;
-    let targets = PreparedTargets::prepare(renderer, &plan.commands, planned, 1, frame_view)?;
+    let targets = PreparedTargets::prepare(
+        renderer,
+        &plan.commands,
+        planned,
+        1,
+        frame_view,
+        renderer.target.viewport_size(),
+    )?;
     let encoder = FrameEncoder::new(
         renderer,
         scene,

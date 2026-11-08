@@ -7,19 +7,19 @@ use crate::{
     Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
     Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
-    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    PopupMenuItem, Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
-    SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
-    TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
-    WindowParams, WindowTextSystem,
+    LineLayoutIndex, LiveLayer, LivePaint, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    Motion, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, PopupMenuItem, Priority, PromptButton, PromptLevel, Quad,
+    RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels, Scene, Shadow,
+    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
+    Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
     point, px, rems, size, transparent_black,
@@ -1350,6 +1350,8 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     last_frame_ms: Cell<u32>,
+    last_live_frame_ms: Cell<u32>,
+    covered_live_keys: FxHashSet<u64>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
@@ -1901,12 +1903,20 @@ impl Window {
                                 && window
                                     .rendered_frame
                                     .scene
-                                    .changes_between(window.last_frame_ms.get(), now)
+                                    .retained_changes_between(window.last_frame_ms.get(), now)
                             {
                                 window
                                     .platform_window
                                     .draw_animation_frame(&window.rendered_frame.scene);
                                 window.last_frame_ms.set(now);
+                            }
+                            if !window.rendered_frame.scene.live_layers().is_empty()
+                                && now.wrapping_sub(window.last_live_frame_ms.get()) >= 16
+                            {
+                                window
+                                    .platform_window
+                                    .draw_live_layers(&window.rendered_frame.scene);
+                                window.last_live_frame_ms.set(now);
                             }
                         })
                         .log_err();
@@ -2131,6 +2141,8 @@ impl Window {
             last_text_input_configuration: None,
             focused_text_input: None,
             last_frame_ms: Cell::new(0),
+            last_live_frame_ms: Cell::new(0),
+            covered_live_keys: FxHashSet::default(),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
@@ -3424,8 +3436,20 @@ impl Window {
         if self.focus != focus_before_listeners {
             self.refresh();
         }
+        let newly_covered = self
+            .rendered_frame
+            .scene
+            .covered_live_keys()
+            .difference(&self.covered_live_keys)
+            .next()
+            .is_some();
+        self.covered_live_keys = self.rendered_frame.scene.covered_live_keys().clone();
+        if newly_covered {
+            self.refresh();
+        }
         self.needs_present.set(true);
         self.last_frame_ms.set(crate::animation_time_ms());
+        self.last_live_frame_ms.set(self.last_frame_ms.get());
 
         #[cfg(feature = "profiler")]
         {
@@ -5046,6 +5070,27 @@ impl Window {
                 });
             }
         }
+    }
+
+    /// Registers a procedural canvas during painting. Returns false when the previous scene
+    /// covered this key; paint the content into the window and request an animation frame then.
+    pub fn paint_live(
+        &mut self,
+        key: u64,
+        bounds: Bounds<Pixels>,
+        start_ms: u32,
+        paint: LivePaint,
+    ) -> bool {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.scene.insert_live_layer(LiveLayer {
+            key,
+            bounds: bounds.scale(self.scale_factor()),
+            content_mask: self.snapped_content_mask(),
+            order: 0,
+            start_ms,
+            paint,
+        });
+        !self.covered_live_keys.contains(&key)
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.

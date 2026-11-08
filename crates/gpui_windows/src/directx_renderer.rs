@@ -78,6 +78,8 @@ pub(crate) struct DirectXRenderer {
     /// Visuals that draw the scene's compositor sprites (DirectComposition only).
     compositor: compositor::CompositorVisuals,
     group_pixels: FxHashMap<u64, (Size<DevicePixels>, Arc<[u8]>)>,
+    live: FxHashMap<u64, LiveSurface>,
+    last_live_frame_ms: u32,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -257,6 +259,17 @@ impl Drop for Annotation<'_> {
     }
 }
 
+struct LiveSurface {
+    swap_chain: IDXGISwapChain1,
+    clip: IDCompositionVisual,
+    visual: IDCompositionVisual,
+    size: Size<DevicePixels>,
+    quad_buffer: ID3D11Buffer,
+    quad_view: Option<ID3D11ShaderResourceView>,
+    quad_capacity: usize,
+    path: Option<PathResources>,
+}
+
 struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
@@ -334,6 +347,8 @@ impl DirectXRenderer {
             direct_composition,
             compositor: Default::default(),
             group_pixels: FxHashMap::default(),
+            live: FxHashMap::default(),
+            last_live_frame_ms: gpui::animation_time_ms().wrapping_sub(16),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -462,6 +477,7 @@ impl DirectXRenderer {
 
             self.compositor.clear();
             self.group_pixels.clear();
+            self.live.clear();
             self.direct_composition.take();
             self.devices.take();
         }
@@ -583,6 +599,8 @@ impl DirectXRenderer {
         self.animation_time_ms = gpui::animation_time_ms();
         self.render(scene, background_appearance)?;
         self.present()?;
+        let live_changed = self.sync_live_layers(scene)?;
+        self.draw_live_layers(scene)?;
         if let Some(composition) = &self.direct_composition {
             let device_context = &self
                 .devices
@@ -592,8 +610,180 @@ impl DirectXRenderer {
             if self
                 .compositor
                 .update(composition, device_context, &sprites, &keys, &self.atlas)?
+                || live_changed
             {
                 unsafe { composition.comp_device.Commit()? };
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_live_layers(&mut self, scene: &Scene) -> Result<bool> {
+        let Some(composition) = &self.direct_composition else {
+            return Ok(false);
+        };
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let mut changed = false;
+        let stale: Vec<_> = self
+            .live
+            .keys()
+            .copied()
+            .filter(|key| !scene.live_layers().iter().any(|layer| layer.key == *key))
+            .collect();
+        for key in stale {
+            let live = self.live.remove(&key).unwrap();
+            unsafe {
+                composition.comp_visual.RemoveVisual(&live.clip)?;
+            }
+            changed = true;
+        }
+        for layer in scene.live_layers() {
+            let size = layer
+                .bounds
+                .size
+                .map(|value| DevicePixels(value.0.ceil() as i32));
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {
+                let swap_chain = create_swap_chain_for_composition(
+                    &devices.dxgi_factory,
+                    &devices.device,
+                    size.width.0 as u32,
+                    size.height.0 as u32,
+                    2,
+                )?;
+                unsafe {
+                    let clip = composition.comp_device.CreateVisual()?;
+                    let visual = composition.comp_device.CreateVisual()?;
+                    visual.SetContent(&swap_chain)?;
+                    clip.AddVisual(&visual, true, None)?;
+                    composition.comp_visual.AddVisual(&clip, true, None)?;
+                    let quad_buffer =
+                        create_buffer(&devices.device, std::mem::size_of::<Quad>(), 1)?;
+                    let quad_view = create_buffer_view(&devices.device, &quad_buffer)?;
+                    entry.insert(LiveSurface {
+                        swap_chain,
+                        clip,
+                        visual,
+                        size,
+                        quad_buffer,
+                        quad_view,
+                        quad_capacity: 1,
+                        path: None,
+                    });
+                }
+                changed = true;
+            }
+            let live = self.live.get_mut(&layer.key).unwrap();
+            if live.size != size {
+                unsafe {
+                    live.swap_chain.ResizeBuffers(
+                        2,
+                        size.width.0 as u32,
+                        size.height.0 as u32,
+                        RENDER_TARGET_FORMAT,
+                        DXGI_SWAP_CHAIN_FLAG(0),
+                    )?;
+                }
+                live.size = size;
+                live.path = None;
+            }
+            let clip = layer.content_mask.bounds;
+            unsafe {
+                live.clip.SetOffsetX2(clip.origin.x.0)?;
+                live.clip.SetOffsetY2(clip.origin.y.0)?;
+                let rect = composition.comp_device.CreateRectangleClip()?;
+                rect.SetLeft2(0.0)?;
+                rect.SetTop2(0.0)?;
+                rect.SetRight2(clip.size.width.0)?;
+                rect.SetBottom2(clip.size.height.0)?;
+                live.clip.SetClip(&rect)?;
+                live.visual
+                    .SetOffsetX2(layer.bounds.origin.x.0 - clip.origin.x.0)?;
+                live.visual
+                    .SetOffsetY2(layer.bounds.origin.y.0 - clip.origin.y.0)?;
+            }
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn draw_live_layers(&mut self, scene: &Scene) -> Result<()> {
+        let now = gpui::animation_time_ms();
+        if now.wrapping_sub(self.last_live_frame_ms) < 16 {
+            return Ok(());
+        }
+        self.last_live_frame_ms = now;
+        for layer in scene.live_layers() {
+            let live = self
+                .live
+                .get_mut(&layer.key)
+                .context("live surface missing")?;
+            let swap_chain = live.swap_chain.clone();
+            let size = live.size;
+            let mut canvas = LiveCanvas {
+                scene: Scene::default(),
+                scale_factor: scene.scale_factor,
+                size: layer
+                    .bounds
+                    .size
+                    .map(|value| px(value.0 / scene.scale_factor)),
+            };
+            canvas.scene.scale_factor = scene.scale_factor;
+            (layer.paint)(
+                now.wrapping_sub(layer.start_ms) as f32 / 1000.0,
+                &mut canvas,
+            );
+            canvas.scene.finish();
+            let devices = self.devices.as_ref().context("devices missing")?;
+            let context = devices.device_context.clone();
+            let (texture, view) = create_render_target_and_its_view(&swap_chain, &devices.device)?;
+            let resources = self.resources.as_mut().context("resources missing")?;
+            let previous_texture = resources.render_target.replace(texture);
+            let previous_view = std::mem::replace(&mut resources.render_target_view, view);
+            let previous_viewport = std::mem::replace(
+                &mut resources.viewport,
+                set_viewport(&context, size.width.0 as f32, size.height.0 as f32),
+            );
+            std::mem::swap(&mut resources.path, &mut live.path);
+            std::mem::swap(
+                &mut self.pipelines.quad_pipeline.buffer,
+                &mut live.quad_buffer,
+            );
+            std::mem::swap(&mut self.pipelines.quad_pipeline.view, &mut live.quad_view);
+            std::mem::swap(
+                &mut self.pipelines.quad_pipeline.buffer_size,
+                &mut live.quad_capacity,
+            );
+            let previous_surfaces = std::mem::take(&mut resources.surface_views);
+            let (retained, frame_keys) = (self.retained, self.frame_keys.clone());
+            let rendered = self.render(&canvas.scene, WindowBackgroundAppearance::Transparent);
+            (self.retained, self.frame_keys) = (retained, frame_keys);
+            let resources = self.resources.as_mut().context("resources missing")?;
+            resources.render_target = previous_texture;
+            resources.render_target_view = previous_view;
+            resources.viewport = previous_viewport;
+            let live = self
+                .live
+                .get_mut(&layer.key)
+                .context("live surface missing")?;
+            std::mem::swap(&mut resources.path, &mut live.path);
+            std::mem::swap(
+                &mut self.pipelines.quad_pipeline.buffer,
+                &mut live.quad_buffer,
+            );
+            std::mem::swap(&mut self.pipelines.quad_pipeline.view, &mut live.quad_view);
+            std::mem::swap(
+                &mut self.pipelines.quad_pipeline.buffer_size,
+                &mut live.quad_capacity,
+            );
+            resources.surface_views = previous_surfaces;
+            unsafe {
+                context.RSSetViewports(Some(slice::from_ref(&previous_viewport)));
+                context
+                    .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+            }
+            self.upload_globals()?;
+            rendered?;
+            unsafe {
+                swap_chain.Present(0, DXGI_PRESENT_NONE).ok()?;
             }
         }
         Ok(())
@@ -2040,6 +2230,7 @@ impl DirectXResources {
                 &devices.device,
                 width,
                 height,
+                BUFFER_COUNT as u32,
             )?
         };
 
@@ -2618,6 +2809,7 @@ fn create_swap_chain_for_composition(
     device: &ID3D11Device,
     width: u32,
     height: u32,
+    buffer_count: u32,
 ) -> Result<IDXGISwapChain1> {
     let desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
@@ -2629,7 +2821,7 @@ fn create_swap_chain_for_composition(
             Quality: 0,
         },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: BUFFER_COUNT as u32,
+        BufferCount: buffer_count,
         // Composition SwapChains only support the DXGI_SCALING_STRETCH Scaling.
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,

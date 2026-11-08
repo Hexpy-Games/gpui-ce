@@ -2,6 +2,7 @@
 // todo("windows"): remove
 #![cfg_attr(windows, allow(dead_code))]
 
+use collections::FxHashSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +105,8 @@ pub struct Scene {
     pub scale_factor: f32,
     compositor_sprites: Vec<CompositorSprite>,
     compositor_groups: Vec<CompositorGroup>,
+    live_layers: Vec<LiveLayer>,
+    covered_live_keys: FxHashSet<u64>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
@@ -131,6 +134,8 @@ impl Scene {
         self.surface_opacities.clear();
         self.compositor_sprites.clear();
         self.compositor_groups.clear();
+        self.live_layers.clear();
+        self.covered_live_keys.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
@@ -425,17 +430,42 @@ impl Scene {
         true
     }
 
+    pub(crate) fn insert_live_layer(&mut self, mut layer: LiveLayer) {
+        self.is_finished = false;
+        layer.order = self.primitive_bounds.insert(layer.bounds);
+        self.paint_operations
+            .push(PaintOperation::LiveLayer(layer.clone()));
+        self.live_layers.push(layer);
+    }
+
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::LiveLayer(layer) => self.insert_live_layer(layer.clone()),
             }
         }
     }
 
     pub fn finish(&mut self) {
+        let layers = std::mem::take(&mut self.live_layers);
+        for layer in layers {
+            if !self.offload_animations
+                || compositor::covered(
+                    self,
+                    std::ptr::null(),
+                    (layer.order, layer.order),
+                    &layer.bounds,
+                )
+                || !compositor::unfaded(&layer.bounds, &layer.content_mask)
+            {
+                self.covered_live_keys.insert(layer.key);
+            } else {
+                self.live_layers.push(layer);
+            }
+        }
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
@@ -462,10 +492,11 @@ impl Scene {
             let commands = std::mem::take(&mut self.render_plan.commands);
             self.render_plan = ScenePlan::build(self, commands);
         }
-        self.has_animations = self
-            .monochrome_sprites
-            .iter()
-            .any(|sprite| sprite.frames.is_animated())
+        self.has_animations = !self.live_layers.is_empty()
+            || self
+                .monochrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
             || self
                 .polychrome_sprites
                 .iter()
@@ -485,9 +516,11 @@ impl Scene {
 
     /// Whether any retained animation is still playing at this clock value.
     pub fn animating_at(&self, now_ms: u32) -> bool {
-        self.monochrome_sprites
-            .iter()
-            .any(|sprite| sprite.frames.is_animated())
+        !self.live_layers.is_empty()
+            || self
+                .monochrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
             || self
                 .polychrome_sprites
                 .iter()
@@ -500,6 +533,11 @@ impl Scene {
 
     /// Whether retained animation parameters differ between these clock values.
     pub fn changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
+        (!self.live_layers.is_empty() && b_ms.wrapping_sub(a_ms) >= 16)
+            || self.retained_changes_between(a_ms, b_ms)
+    }
+
+    pub(crate) fn retained_changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
         self.monochrome_sprites
             .iter()
             .map(|sprite| &sprite.frames)
@@ -518,6 +556,16 @@ impl Scene {
                 .filter_boundaries
                 .iter()
                 .any(|boundary| boundary.motion.changes_between(a_ms, b_ms))
+    }
+
+    /// Procedural layers drawn on separate platform surfaces.
+    pub fn live_layers(&self) -> &[LiveLayer] {
+        &self.live_layers
+    }
+
+    /// Live layer keys that require window painting on the next frame.
+    pub fn covered_live_keys(&self) -> &FxHashSet<u64> {
+        &self.covered_live_keys
     }
 
     /// The animated sprites the platform compositor draws; see [`Self::offload_animations`].
@@ -648,6 +696,7 @@ pub(crate) enum PrimitiveKind {
 }
 
 pub(crate) enum PaintOperation {
+    LiveLayer(LiveLayer),
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,

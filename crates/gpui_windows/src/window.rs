@@ -1190,6 +1190,14 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    fn draw_live_layers(&self, scene: &Scene) {
+        self.state
+            .renderer
+            .borrow_mut()
+            .draw_live_layers(scene)
+            .log_err();
+    }
+
     fn draw_animation_frame(&self, scene: &Scene) {
         self.state
             .renderer

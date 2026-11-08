@@ -2332,6 +2332,11 @@ impl PlatformWindow for MacWindow {
     }
 
     #[cfg(feature = "wgpu")]
+    fn draw_live_layers(&self, scene: &gpui::Scene) {
+        self.0.lock().renderer.draw_live_layers(scene);
+    }
+
+    #[cfg(feature = "wgpu")]
     fn rasterize_offscreen(
         &self,
         scene: &gpui::Scene,

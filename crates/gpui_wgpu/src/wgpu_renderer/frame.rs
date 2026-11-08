@@ -6,9 +6,9 @@ use super::{
     path_types,
 };
 use gpui::{
-    BackdropFilter, DamageRedraw, FilterRenderTarget, MonochromeSprite, Point, PolychromeSprite,
-    PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite,
-    Underline,
+    BackdropFilter, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow,
+    Size, SubpixelSprite, Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
@@ -30,7 +30,14 @@ pub(super) fn render_to_view(
     let mut planned = *scene.render_plan().requirements();
     planned.uses_offscreen_target |= scene.has_animations();
     let commands = scene.render_commands();
-    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, frame_view) else {
+    let Some(targets) = PreparedTargets::prepare(
+        renderer,
+        commands,
+        planned,
+        0,
+        frame_view,
+        renderer.target.viewport_size(),
+    ) else {
         renderer.retained = None;
         return None;
     };
@@ -53,10 +60,11 @@ pub(super) fn render_offscreen(
     renderer: &mut WgpuRenderer,
     scene: &Scene,
     view: &wgpu::TextureView,
+    size: Size<DevicePixels>,
 ) -> bool {
     let planned = *scene.render_plan().requirements();
     let commands = scene.render_commands();
-    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view) else {
+    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view, size) else {
         return false;
     };
     let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
@@ -108,6 +116,7 @@ impl PreparedTargets {
         planned: ScenePlanRequirements,
         extra_filter_uniforms: u64,
         frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
     ) -> Option<Self> {
         if !begin_frame(renderer) {
             return None;
@@ -140,12 +149,12 @@ impl PreparedTargets {
         }
 
         if requirements.planned.uses_path_target {
-            renderer.ensure_path_textures();
+            renderer.ensure_path_textures(size);
         }
         if requirements.planned.uses_offscreen_target {
             renderer.ensure_filter_textures(&requirements.planned);
         }
-        write_shader_globals(renderer);
+        write_shader_globals(renderer, size);
 
         if requirements.planned.uses_offscreen_target {
             let resources = renderer.resources();
@@ -208,7 +217,7 @@ pub(super) struct GlobalUniformState {
     font_rasterization: FontRasterizationUniforms,
 }
 
-fn write_shader_globals(renderer: &mut WgpuRenderer) {
+pub(super) fn write_shader_globals(renderer: &mut WgpuRenderer, size: Size<DevicePixels>) {
     let font = renderer.rendering_params.font_rasterization;
     let font_rasterization = FontRasterizationUniforms {
         gamma_ratios: wgsl_rs::std::vec4f(
@@ -225,10 +234,7 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         padding: 0,
     };
     let globals = GlobalUniforms {
-        viewport_size: wgsl_rs::std::vec2f(
-            renderer.target.width() as f32,
-            renderer.target.height() as f32,
-        ),
+        viewport_size: wgsl_rs::std::vec2f(size.width.0 as f32, size.height.0 as f32),
         premultiplied_alpha: ShaderBool::from(
             renderer.target.alpha_mode() == wgpu::CompositeAlphaMode::PreMultiplied,
         ),

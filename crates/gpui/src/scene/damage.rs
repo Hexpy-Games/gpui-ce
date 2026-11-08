@@ -383,6 +383,38 @@ mod tests {
     }
 
     #[test]
+    fn live_layers_offload_unless_covered() {
+        let mut scene = Scene {
+            offload_animations: true,
+            ..Scene::default()
+        };
+        for (key, bounds) in [
+            (1, rect(0.0, 0.0, 20.0, 20.0)),
+            (2, rect(40.0, 0.0, 20.0, 20.0)),
+        ] {
+            scene.insert_live_layer(crate::LiveLayer {
+                key,
+                bounds,
+                content_mask: mask(),
+                order: 0,
+                start_ms: 0,
+                paint: std::sync::Arc::new(|_, _| {}),
+            });
+        }
+        scene.insert_primitive(Quad {
+            bounds: rect(40.0, 0.0, 20.0, 20.0),
+            content_mask: mask(),
+            background: crate::red().into(),
+            ..Default::default()
+        });
+        scene.finish();
+        assert_eq!(scene.live_layers().len(), 1);
+        assert_eq!(scene.live_layers()[0].key, 1);
+        assert!(scene.covered_live_keys().contains(&2));
+        assert!(scene.has_animations());
+    }
+
+    #[test]
     fn frame_loop_sprites_mark_the_scene_animated() {
         let clipped = rect(90.0, 90.0, 20.0, 20.0);
         let mut small_mask = mask();
