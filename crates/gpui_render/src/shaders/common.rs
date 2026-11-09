@@ -101,6 +101,7 @@ mod source {
     pub enum BlurCompositeClip {
         None = 0,
         RoundedBounds = 1,
+        MotionRounded = 2,
     }
 
     #[repr(u32)]

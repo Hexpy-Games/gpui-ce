@@ -20,7 +20,7 @@ pub(super) struct FrameUniformRequirements {
     pub(super) surface_count: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 480);
+const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 496);
 
 impl WgpuRenderer {
     pub(super) fn draw_filter_pass(
@@ -103,7 +103,9 @@ impl WgpuRenderer {
         }
         let load = match parameters.clip {
             FilterCompositeClip::RoundedBounds => wgpu::LoadOp::Load,
-            FilterCompositeClip::ContentShape => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            FilterCompositeClip::ContentShape | FilterCompositeClip::MotionRounded => {
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+            }
         };
 
         let (horizontal_target, vertical_target) = {
@@ -242,6 +244,7 @@ impl WgpuRenderer {
             parameters.composite_offset.y.0,
         );
         uniforms.composite_rotation = parameters.composite_rotation;
+        uniforms.motion_clip = parameters.motion_clip.into();
         let resources = self.resources();
         let pipeline = if uniforms.corner_smoothing > 0.0 {
             &resources.pipelines.smoothed_blur_composite
@@ -320,6 +323,7 @@ impl WgpuRenderer {
                     composite_offset: Point::default(),
                     composite_rotation: 0.0,
                     clip: FilterCompositeClip::ContentShape,
+                    motion_clip: Bounds::default(),
                     lens: Default::default(),
                 },
                 full_size,

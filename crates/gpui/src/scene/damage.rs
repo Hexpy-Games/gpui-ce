@@ -163,6 +163,11 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                 bytes!(from);
                 bytes!(to);
             }
+            motion.clip_radii.is_some().hash(&mut hash);
+            if let Some((from, to)) = motion.clip_radii {
+                bytes!(from);
+                bytes!(to);
+            }
             bytes!(motion.visible);
             bytes!(motion.scale);
             bytes!(motion.rotation);
@@ -1077,7 +1082,7 @@ mod tests {
         };
         let sample = motion.sample(300, 1.0, motion_bounds);
         assert_eq!(sample.opacity, 1.0);
-        assert!((sample.clip.unwrap().right().0 - (motion_bounds.right().0 - 8.0)).abs() < 1e-3);
+        assert!((sample.clip.unwrap().0.right().0 - (motion_bounds.right().0 - 8.0)).abs() < 1e-3);
         assert_eq!(motion.sample(600, 1.0, motion_bounds).opacity, 0.0);
         let still = LayerMotion {
             clip: None,
@@ -1104,6 +1109,49 @@ mod tests {
                 && swept.right() >= rotated.right()
                 && swept.bottom() >= rotated.bottom()
         );
+    }
+
+    #[test]
+    fn clip_radii_interpolate_and_pending_starts_hold() {
+        let motion_bounds = rect(-100.0, 0.0, 100.0, 80.0);
+        let motion = LayerMotion {
+            duration_ms: 1000,
+            easing: MotionEasing::linear(&[(0.0, 0.0), (1.0, 1.0)]),
+            clip: Some((
+                crate::Edges {
+                    right: px(20.0),
+                    ..Default::default()
+                },
+                crate::Edges::default(),
+            )),
+            clip_radii: Some((crate::Corners::default(), crate::Corners::all(px(16.0)))),
+            ..LayerMotion::NONE
+        };
+        let (clip, radii) = motion.sample(500, 1.0, motion_bounds).clip.unwrap();
+        assert_eq!(radii, crate::Corners::all(ScaledPixels(8.0)));
+        assert_eq!(clip.right(), ScaledPixels(-10.0));
+
+        let radius_only = LayerMotion {
+            clip: None,
+            clip_radii: Some((crate::Corners::default(), crate::Corners::all(px(40.0)))),
+            ..motion
+        };
+        let short_bounds = rect(0.0, 0.0, 100.0, 30.0);
+        assert_eq!(
+            radius_only.sample(1000, 1.0, short_bounds).clip.unwrap(),
+            (short_bounds, crate::Corners::all(ScaledPixels(15.0)))
+        );
+        assert!(radius_only.changes_between(0, 500));
+
+        let pending = LayerMotion {
+            start_ms: 1000,
+            ..motion
+        };
+        assert_eq!(
+            pending.sample(500, 1.0, motion_bounds),
+            motion.sample(0, 1.0, motion_bounds)
+        );
+        assert!(pending.is_active(500));
     }
 
     #[test]

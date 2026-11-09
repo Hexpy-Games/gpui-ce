@@ -29,6 +29,7 @@ pub enum BlurAxis {
 pub enum FilterCompositeClip {
     RoundedBounds,
     ContentShape,
+    MotionRounded,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,7 @@ pub struct FilterCompositeParameters {
     pub composite_offset: gpui::Point<ScaledPixels>,
     pub composite_rotation: f32,
     pub clip: FilterCompositeClip,
+    pub motion_clip: Bounds<ScaledPixels>,
     pub lens: BackdropLens,
 }
 
@@ -225,6 +227,7 @@ impl BlurUniforms {
             composite_clip: match clip {
                 FilterCompositeClip::RoundedBounds => ShaderBlurCompositeClip::RoundedBounds,
                 FilterCompositeClip::ContentShape => ShaderBlurCompositeClip::None,
+                FilterCompositeClip::MotionRounded => ShaderBlurCompositeClip::MotionRounded,
             },
             ..with_texture_sizes(
                 empty_uniforms(DownsampleMode::Copy),
@@ -406,6 +409,7 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         composite_rotation_padding0: 0.0,
         composite_rotation_padding1: 0.0,
         composite_rotation_padding2: 0.0,
+        motion_clip: bounds,
     }
 }
 

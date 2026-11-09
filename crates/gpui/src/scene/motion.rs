@@ -72,6 +72,7 @@ pub struct LayerMotion {
     pub offset: (Point<Pixels>, Point<Pixels>),
     pub relative_offset: (Point<f32>, Point<f32>),
     pub clip: Option<(Edges<Pixels>, Edges<Pixels>)>,
+    pub clip_radii: Option<(Corners<Pixels>, Corners<Pixels>)>,
     pub visible: (f32, f32),
     pub scale: (f32, f32),
     /// Clockwise rotation in screen-space radians about `origin`.
@@ -87,7 +88,7 @@ pub struct LayerMotionSample {
     pub offset: Point<ScaledPixels>,
     pub scale: f32,
     pub rotation: f32,
-    pub clip: Option<Bounds<ScaledPixels>>,
+    pub clip: Option<(Bounds<ScaledPixels>, Corners<ScaledPixels>)>,
 }
 
 impl LayerMotion {
@@ -104,6 +105,7 @@ impl LayerMotion {
         ),
         relative_offset: (point(0.0, 0.0), point(0.0, 0.0)),
         clip: None,
+        clip_radii: None,
         visible: (0.0, 1.0),
         scale: (1.0, 1.0),
         rotation: (0.0, 0.0),
@@ -123,6 +125,7 @@ impl LayerMotion {
             && self.scale.1 == 1.0
             && self.rotation.1 == 0.0
             && self.clip.is_none()
+            && self.clip_radii.is_none()
             && self.visible.0 <= 1.0
             && self.visible.1 >= 1.0
     }
@@ -199,6 +202,7 @@ impl LayerMotion {
     pub fn is_active(&self, now_ms: u32) -> bool {
         self.is_animated()
             && (self.repeat != MotionRepeat::Once
+                || now_ms.wrapping_sub(self.start_ms) >= 1 << 31
                 || now_ms.wrapping_sub(self.start_ms) < self.duration_ms)
     }
 
@@ -227,19 +231,34 @@ impl LayerMotion {
                 ),
             scale: self.scale.0 + (self.scale.1 - self.scale.0) * p,
             rotation: self.rotation.0 + (self.rotation.1 - self.rotation.0) * p,
-            clip: self.clip.map(|(from, to)| {
-                let edges = Edges {
-                    top: from.top + (to.top - from.top) * p,
-                    right: from.right + (to.right - from.right) * p,
-                    bottom: from.bottom + (to.bottom - from.bottom) * p,
-                    left: from.left + (to.left - from.left) * p,
-                }
-                .scale(scale_factor);
-                Bounds::from_corners(
-                    motion_bounds.origin + point(edges.left, edges.top),
-                    motion_bounds.bottom_right() - point(edges.right, edges.bottom),
-                )
-            }),
+            clip: self
+                .clip
+                .or(self
+                    .clip_radii
+                    .map(|_| (Edges::default(), Edges::default())))
+                .map(|(from, to)| {
+                    let edges = Edges {
+                        top: from.top + (to.top - from.top) * p,
+                        right: from.right + (to.right - from.right) * p,
+                        bottom: from.bottom + (to.bottom - from.bottom) * p,
+                        left: from.left + (to.left - from.left) * p,
+                    }
+                    .scale(scale_factor);
+                    let rect = Bounds::from_corners(
+                        motion_bounds.origin + point(edges.left, edges.top),
+                        motion_bounds.bottom_right() - point(edges.right, edges.bottom),
+                    );
+                    let (from, to) = self.clip_radii.unwrap_or_default();
+                    let radii = Corners {
+                        top_left: from.top_left + (to.top_left - from.top_left) * p,
+                        top_right: from.top_right + (to.top_right - from.top_right) * p,
+                        bottom_right: from.bottom_right + (to.bottom_right - from.bottom_right) * p,
+                        bottom_left: from.bottom_left + (to.bottom_left - from.bottom_left) * p,
+                    }
+                    .scale(scale_factor)
+                    .clamp_radii_for_quad_size(rect.size);
+                    (rect, radii)
+                }),
         }
     }
 
@@ -254,6 +273,7 @@ impl LayerMotion {
             && self.scale.0 == self.scale.1
             && self.rotation.0 == self.rotation.1
             && self.clip.is_none_or(|(from, to)| from == to)
+            && self.clip_radii.is_none_or(|(from, to)| from == to)
         {
             return self.visible_at(a_ms) != self.visible_at(b_ms);
         }
@@ -349,7 +369,7 @@ pub fn motion_composite_parameters(
     f32,
     Point<ScaledPixels>,
     f32,
-    Option<Bounds<ScaledPixels>>,
+    Option<(Bounds<ScaledPixels>, Corners<ScaledPixels>)>,
 ) {
     if boundary.motion.is_animated() {
         let sample = boundary

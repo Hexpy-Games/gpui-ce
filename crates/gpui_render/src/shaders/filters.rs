@@ -154,6 +154,7 @@ pub mod blur {
         pub composite_rotation_padding0: f32,
         pub composite_rotation_padding1: f32,
         pub composite_rotation_padding2: f32,
+        pub motion_clip: Bounds,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
 
@@ -752,7 +753,7 @@ pub mod blur {
         if is_clipped(input.clip_distances) {
             return transparent();
         }
-        let coverage = select(
+        let mut coverage = select(
             1.0,
             antialiased_coverage(rounded_rectangle_signed_distance(
                 input.position.xy(),
@@ -761,6 +762,14 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
+        if get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::MotionRounded {
+            coverage = coverage
+                * antialiased_coverage(rounded_rectangle_signed_distance(
+                    blur_composite_source_position(input.position.xy()),
+                    get!(BLUR_LOCALS).motion_clip,
+                    get!(BLUR_LOCALS).corner_radii,
+                ));
+        }
         blur_composite_color(
             blur_composite_source_position(input.position.xy()),
             coverage,
@@ -2109,7 +2118,7 @@ pub mod blur {
         if is_clipped(input.clip_distances) {
             return transparent();
         }
-        let coverage = select(
+        let mut coverage = select(
             1.0,
             antialiased_coverage(prepared_corner_signed_distance(
                 input.position.xy(),
@@ -2125,6 +2134,14 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
+        if get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::MotionRounded {
+            coverage = coverage
+                * antialiased_coverage(rounded_rectangle_signed_distance(
+                    blur_composite_source_position(input.position.xy()),
+                    get!(BLUR_LOCALS).motion_clip,
+                    get!(BLUR_LOCALS).corner_radii,
+                ));
+        }
         blur_composite_color(
             blur_composite_source_position(input.position.xy()),
             coverage,
