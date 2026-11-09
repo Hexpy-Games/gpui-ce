@@ -710,7 +710,7 @@ impl DirectXRenderer {
                 size: layer
                     .bounds
                     .size
-                    .map(|value| px(f32::from(value) / scene.scale_factor)),
+                    .map(|value| px(value.0 / scene.scale_factor)),
             };
             (layer.paint)(
                 now.wrapping_sub(layer.start_ms) as f32 / 1000.0,
