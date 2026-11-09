@@ -3838,6 +3838,8 @@ mod tests {
         opacity_group(&mut nested, bounds, 0.5, |scene| {
             opacity_group(scene, bounds, 0.5, |scene| {
                 opacity_group(scene, bounds, 0.5, |scene| {
+                    // Two primitives: a single one inside an opacity group is drawn inline.
+                    scene.insert_primitive(ordinary.quads[0]);
                     scene.insert_primitive(ordinary.quads[0]);
                 });
             });
