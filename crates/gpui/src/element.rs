@@ -441,8 +441,12 @@ impl<E: Element> Drawable<E> {
                             if hidden {
                                 node.set_hidden();
                             }
-                            window.a11y.node_bounds.insert(node_id, bounds);
-                            pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                            window.a11y.record.bounds.push((node_id, bounds));
+                            pushed_a11y_node =
+                                window
+                                    .a11y
+                                    .nodes
+                                    .push(node_id, node, &mut window.a11y.record);
                             #[cfg(debug_assertions)]
                             if pushed_a11y_node {
                                 let view = window
@@ -526,6 +530,7 @@ impl<E: Element> Drawable<E> {
                         let mut builder = A11ySubtreeBuilder::new(
                             global_id.accesskit_node_id(),
                             &mut window.a11y.nodes,
+                            &mut window.a11y.record,
                         );
                         #[cfg(debug_assertions)]
                         {
@@ -534,7 +539,7 @@ impl<E: Element> Drawable<E> {
                         self.element
                             .a11y_synthetic_children(&mut prepaint, &mut builder);
                     }
-                    window.a11y.nodes.pop();
+                    window.a11y.nodes.pop(&mut window.a11y.record);
                 }
 
                 if global_id.is_some() {

@@ -63,9 +63,6 @@ pub(crate) struct A11yDebug {
     frame_number: u64,
     /// Metadata about the most recently captured frame.
     last_frame: Option<CapturedFrame>,
-    /// Window-space bounds of every node in the last update, retained here
-    /// because the live map is cleared at the start of each frame.
-    last_node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     #[cfg(debug_assertions)]
     last_node_info: FxHashMap<NodeId, NodeDebugInfo>,
 }
@@ -78,10 +75,8 @@ impl A11yDebug {
         active_descendant: Option<NodeId>,
         window_title: Option<&SharedString>,
         frame: FrameDebugInfo,
-        node_bounds: &FxHashMap<NodeId, Bounds<Pixels>>,
     ) {
         self.last_tree_update = Some(update.clone());
-        self.last_node_bounds = node_bounds.clone();
         self.last_gpui_focus = gpui_focus;
         self.last_active_descendant = active_descendant;
         self.frame_number += 1;
@@ -101,11 +96,6 @@ impl A11yDebug {
         self.last_tree_update.as_ref()
     }
 
-    /// Window-space bounds recorded for `id` in the last captured frame.
-    pub(crate) fn node_bounds(&self, id: NodeId) -> Option<Bounds<Pixels>> {
-        self.last_node_bounds.get(&id).copied()
-    }
-
     /// Monotonic count of captured frames; zero before the first.
     pub(crate) fn frame_number(&self) -> u64 {
         self.frame_number
@@ -118,7 +108,7 @@ impl A11yDebug {
 
     /// Serialize the last tree update to a readable JSON string. Node ids are
     /// replaced with short ephemeral ids (`a`, `b`, ..., `z`, `aa`, ...).
-    pub(crate) fn to_json(&self) -> Option<String> {
+    pub(crate) fn to_json(&self, bounds: &[(NodeId, Bounds<Pixels>)]) -> Option<String> {
         let update = self.last_tree_update.as_ref()?;
 
         let mut ephemeral: FxHashMap<NodeId, String> = FxHashMap::default();
@@ -152,7 +142,10 @@ impl A11yDebug {
                 node,
                 &ephemeral,
                 &provenance,
-                self.last_node_bounds.get(id).copied(),
+                bounds
+                    .iter()
+                    .rev()
+                    .find_map(|(node_id, bounds)| (node_id == id).then_some(*bounds)),
             );
             nodes.insert(key, value);
         }
