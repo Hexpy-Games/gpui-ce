@@ -598,3 +598,60 @@ fn content_mask_fades_quad_edges() {
     // The unfaded right edge still clips hard at the mask boundary.
     assert_eq!(pixel(101, 50)[0], 0);
 }
+
+// test-category: pure-logic
+#[test]
+fn scale_group_matches_prescaled_quad_about_external_origin() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let target = gpui::size(DevicePixels(256), DevicePixels(256));
+    let content_mask = mask(256.0, 256.0);
+    let quad = Quad {
+        bounds: bounds(100.0, 100.0, 100.0, 100.0),
+        content_mask,
+        background: solid_background(gpui::white()),
+        ..Default::default()
+    };
+    let scale_origin = Point::default();
+    let scale = 0.97;
+    let mut reference = Scene::default();
+    reference.insert_primitive(Quad {
+        bounds: Bounds::new(
+            scale_origin + (quad.bounds.origin - scale_origin) * scale,
+            quad.bounds.size.map(|dimension| dimension * scale),
+        ),
+        ..quad
+    });
+    reference.finish();
+
+    let mut grouped = Scene::default();
+    let boundary = gpui::FilterBoundary {
+        order: 0,
+        bounds: content_mask.bounds,
+        content_mask,
+        corner_radii: Corners::default(),
+        corner_smoothing: 0.0,
+        filters: smallvec![],
+        opacity: 1.0,
+        scale,
+        scale_origin,
+        motion: gpui::LayerMotion::NONE,
+        motion_bounds: Default::default(),
+        is_start: true,
+        inline: false,
+    };
+    grouped.insert_primitive(boundary.clone());
+    grouped.insert_primitive(quad);
+    grouped.insert_primitive(gpui::FilterBoundary {
+        is_start: false,
+        ..boundary
+    });
+    grouped.finish();
+
+    let reference = renderer
+        .render_scene_to_image(&reference, target)
+        .expect("render reference");
+    let grouped = renderer
+        .render_scene_to_image(&grouped, target)
+        .expect("render scale group");
+    assert_eq!(grouped, reference);
+}

@@ -598,7 +598,7 @@ impl DirectXRenderer {
         }
         self.animation_time_ms = gpui::animation_time_ms();
         if !self.render_damage(scene)? {
-            self.render(scene, background_appearance)?;
+            self.render(scene, background_appearance, true)?;
         }
         self.present()?;
         let live_changed = self.sync_live_layers(scene)?;
@@ -755,6 +755,7 @@ impl DirectXRenderer {
         &mut self,
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
+        release_unused: bool,
     ) -> Result<()> {
         self.retained = None;
         self.pre_draw(&match background_appearance {
@@ -765,7 +766,9 @@ impl DirectXRenderer {
         self.upload_scene_buffers(scene)?;
 
         let use_offscreen = scene.requires_offscreen_rendering() || scene.has_animations();
-        let requirements = scene.render_plan().requirements();
+        let mut planned = *scene.render_plan().requirements();
+        planned.uses_offscreen_target = use_offscreen;
+        let requirements = &planned;
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
         resources.retain_surface_views(&scene.surfaces);
@@ -837,6 +840,16 @@ impl DirectXRenderer {
         self.active_render_target = None;
         self.retained = use_offscreen.then(|| scene.generation());
         self.retained_atlas_epoch = self.atlas.removal_epoch();
+        if release_unused {
+            unsafe {
+                ctx.OMSetRenderTargets(None, None);
+                ctx.PSSetShaderResources(PRIMARY_TEXTURE_REGISTER, Some(&[None]));
+            }
+            self.resources
+                .as_mut()
+                .context("resources missing")?
+                .release_unused(requirements);
+        }
         Ok(())
     }
 
@@ -1157,7 +1170,7 @@ impl DirectXRenderer {
         let previous_texture = resources.render_target.replace(texture.clone());
         let previous_view = std::mem::replace(&mut resources.render_target_view, view);
         // Rasterizing reuses the retained scene target and scene buffers.
-        let rendered = self.render(scene, WindowBackgroundAppearance::Transparent);
+        let rendered = self.render(scene, WindowBackgroundAppearance::Transparent, false);
         self.retained = None;
         let resources = self.resources.as_mut()?;
         resources.render_target = previous_texture;
@@ -1236,7 +1249,7 @@ impl DirectXRenderer {
             !self.skip_draws,
             "render_to_image unavailable while recovering from a lost device"
         );
-        self.render(scene, background_appearance)?;
+        self.render(scene, background_appearance, true)?;
 
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
@@ -2184,6 +2197,12 @@ impl DirectXRenderer {
     }
 }
 
+/// Glass inside an isolated group, or any lens, samples a snapshot of the scene below it.
+fn needs_snapshot(requirements: &ScenePlanRequirements) -> bool {
+    (requirements.backdrop_filter_count > 0 && requirements.isolated_target_count > 0)
+        || requirements.backdrop_lens_count > 0
+}
+
 impl DirectXResources {
     pub fn new(
         devices: &DirectXRendererDevices,
@@ -2269,10 +2288,7 @@ impl DirectXResources {
             ]);
         }
 
-        let needs_snapshot = (requirements.backdrop_filter_count > 0
-            && requirements.isolated_target_count > 0)
-            || requirements.backdrop_lens_count > 0;
-        if needs_snapshot && blur.snapshot.is_none() {
+        if needs_snapshot(requirements) && blur.snapshot.is_none() {
             blur.snapshot = Some(create_color_target(device, width, height)?);
         }
 
@@ -2282,6 +2298,25 @@ impl DirectXResources {
         }
 
         Ok(())
+    }
+
+    fn release_unused(&mut self, planned: &ScenePlanRequirements) {
+        if !planned.uses_offscreen_target {
+            self.blur = None;
+            return;
+        }
+        if let Some(blur) = self.blur.as_mut() {
+            blur.groups.truncate(planned.isolated_target_count);
+            if !planned.uses_blur_target {
+                blur.scratch = None;
+            }
+            if !needs_snapshot(planned) {
+                blur.snapshot = None;
+            }
+            if planned.backdrop_filter_count == 0 {
+                *blur.cache.get_mut() = DxBackdropCache::default();
+            }
+        }
     }
 
     fn ensure_path_resources(&mut self, device: &ID3D11Device) -> Result<()> {
@@ -3840,7 +3875,7 @@ mod tests {
             ..Default::default()
         });
         ordinary.finish();
-        renderer.render(&ordinary, WindowBackgroundAppearance::Opaque)?;
+        renderer.render(&ordinary, WindowBackgroundAppearance::Opaque, true)?;
         assert_eq!(allocations(&renderer), None);
 
         let mut nested = Scene::default();
@@ -3854,7 +3889,7 @@ mod tests {
             });
         });
         nested.finish();
-        renderer.render(&nested, WindowBackgroundAppearance::Opaque)?;
+        renderer.render(&nested, WindowBackgroundAppearance::Opaque, true)?;
         assert_eq!(allocations(&renderer), Some((3, false, false)));
 
         let mut filtered = Scene::default();
@@ -3873,8 +3908,13 @@ mod tests {
             scene.insert_primitive(ordinary.quads[0]);
         });
         filtered.finish();
-        renderer.render(&filtered, WindowBackgroundAppearance::Opaque)?;
-        assert_eq!(allocations(&renderer), Some((3, true, true)));
+        renderer.render(&filtered, WindowBackgroundAppearance::Opaque, true)?;
+        assert_eq!(allocations(&renderer), Some((1, true, true)));
+
+        renderer.render(&ordinary, WindowBackgroundAppearance::Opaque, true)?;
+        assert_eq!(allocations(&renderer), None);
+
+        renderer.render(&filtered, WindowBackgroundAppearance::Opaque, true)?;
 
         renderer.resize(Size {
             width: DevicePixels(20),
@@ -3882,7 +3922,7 @@ mod tests {
         })?;
         assert_eq!(allocations(&renderer), None);
 
-        renderer.render(&ordinary, WindowBackgroundAppearance::Opaque)?;
+        renderer.render(&ordinary, WindowBackgroundAppearance::Opaque, true)?;
         assert_eq!(allocations(&renderer), None);
 
         Ok(())

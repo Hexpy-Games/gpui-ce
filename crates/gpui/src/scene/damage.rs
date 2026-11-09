@@ -67,19 +67,20 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
                         let widened = boundary.motion.is_animated()
                             || boundary.max_blur_radius() > 0.0
                             || boundary.scale != 1.0;
-                        let bounds = if boundary.motion.is_animated() {
-                            boundary.motion.sweep(
-                                boundary.bounds,
-                                boundary.scale_origin,
-                                scene.scale_factor,
-                                boundary.motion_bounds,
-                            )
+                        let group_reach = if boundary.motion.is_animated() {
+                            boundary
+                                .motion
+                                .sweep(
+                                    boundary.bounds,
+                                    boundary.scale_origin,
+                                    scene.scale_factor,
+                                    boundary.motion_bounds,
+                                )
+                                .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
+                                .intersect(&boundary.content_mask.bounds)
                         } else {
-                            boundary.bounds
+                            boundary.composite_reach()
                         };
-                        let group_reach = bounds
-                            .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
-                            .intersect(&boundary.content_mask.bounds);
                         groups.push((group_reach, widened));
                         reach = Some(group_reach);
                     } else {
@@ -539,19 +540,20 @@ fn select_commands(
                     commands.push(command.clone());
                     continue;
                 }
-                let bounds = if boundary.motion.is_animated() {
-                    boundary.motion.sweep(
-                        boundary.bounds,
-                        boundary.scale_origin,
-                        scene.scale_factor,
-                        boundary.motion_bounds,
-                    )
+                let reach = if boundary.motion.is_animated() {
+                    boundary
+                        .motion
+                        .sweep(
+                            boundary.bounds,
+                            boundary.scale_origin,
+                            scene.scale_factor,
+                            boundary.motion_bounds,
+                        )
+                        .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
+                        .intersect(&boundary.content_mask.bounds)
                 } else {
-                    boundary.bounds
+                    boundary.composite_reach()
                 };
-                let reach = bounds
-                    .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
-                    .intersect(&boundary.content_mask.bounds);
                 if !hits(reach, &rect) {
                     skip = 1;
                 } else {
