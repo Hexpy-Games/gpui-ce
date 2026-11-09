@@ -2196,6 +2196,12 @@ impl DirectXRenderer {
     }
 }
 
+/// Glass inside an isolated group, or any lens, samples a snapshot of the scene below it.
+fn needs_snapshot(requirements: &ScenePlanRequirements) -> bool {
+    (requirements.backdrop_filter_count > 0 && requirements.isolated_target_count > 0)
+        || requirements.backdrop_lens_count > 0
+}
+
 impl DirectXResources {
     pub fn new(
         devices: &DirectXRendererDevices,
@@ -2281,10 +2287,7 @@ impl DirectXResources {
             ]);
         }
 
-        let needs_snapshot = (requirements.backdrop_filter_count > 0
-            && requirements.isolated_target_count > 0)
-            || requirements.backdrop_lens_count > 0;
-        if needs_snapshot && blur.snapshot.is_none() {
+        if needs_snapshot(requirements) && blur.snapshot.is_none() {
             blur.snapshot = Some(create_color_target(device, width, height)?);
         }
 
@@ -2306,7 +2309,7 @@ impl DirectXResources {
             if !planned.uses_blur_target {
                 blur.scratch = None;
             }
-            if planned.backdrop_lens_count == 0 {
+            if !needs_snapshot(planned) {
                 blur.snapshot = None;
             }
             if planned.backdrop_filter_count == 0 {
@@ -3905,7 +3908,7 @@ mod tests {
         });
         filtered.finish();
         renderer.render(&filtered, WindowBackgroundAppearance::Opaque, true)?;
-        assert_eq!(allocations(&renderer), Some((1, true, false)));
+        assert_eq!(allocations(&renderer), Some((1, true, true)));
 
         renderer.render(&ordinary, WindowBackgroundAppearance::Opaque, true)?;
         assert_eq!(allocations(&renderer), None);
