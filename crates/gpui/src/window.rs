@@ -1161,6 +1161,12 @@ pub(crate) struct Frame {
 
 #[derive(Clone, Default)]
 pub(crate) struct PrepaintStateIndex {
+    a11y_nodes: usize,
+    a11y_attach: usize,
+    a11y_bounds: usize,
+    a11y_focusables: usize,
+    a11y_focus_ops: usize,
+    a11y_depth: usize,
     hitboxes_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
@@ -1171,6 +1177,7 @@ pub(crate) struct PrepaintStateIndex {
 
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
+    a11y_actions: usize,
     scene_index: usize,
     window_control_hitboxes_index: usize,
     mouse_listeners_index: usize,
@@ -3568,7 +3575,7 @@ impl Window {
 
         self.a11y.sync_active_flag();
         let a11y_active = self.a11y.is_active();
-        if a11y_active != self.a11y_was_active {
+        if a11y_active && !self.a11y_was_active {
             self.refreshing = true;
         }
         self.a11y_was_active = a11y_active;
@@ -3892,7 +3899,18 @@ impl Window {
     }
 
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
+        let a11y = self.a11y.is_active().then_some(&self.a11y.record);
         PrepaintStateIndex {
+            a11y_nodes: a11y.map_or(0, |record| record.nodes.len()),
+            a11y_attach: a11y.map_or(0, |record| record.attach.len()),
+            a11y_bounds: a11y.map_or(0, |record| record.bounds.len()),
+            a11y_focusables: a11y.map_or(0, |record| record.focusables.len()),
+            a11y_focus_ops: a11y.map_or(0, |record| record.focus_ops.len()),
+            a11y_depth: if self.a11y.is_active() {
+                self.a11y.depth()
+            } else {
+                0
+            },
             hitboxes_index: self.next_frame.hitboxes.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
@@ -3918,6 +3936,9 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        if self.a11y.is_active() {
+            self.a11y.reuse_prepaint(&range);
+        }
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -3971,6 +3992,11 @@ impl Window {
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
+            a11y_actions: if self.a11y.is_active() {
+                self.a11y.record.actions.len()
+            } else {
+                0
+            },
             scene_index: self.next_frame.scene.len(),
             window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
@@ -3986,6 +4012,10 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        if self.a11y.is_active() {
+            self.a11y
+                .reuse_paint(range.start.a11y_actions..range.end.a11y_actions);
+        }
         self.next_frame.window_control_hitboxes.extend(
             self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
                 ..range.end.window_control_hitboxes_index]
@@ -7841,10 +7871,9 @@ impl Window {
         listener: impl FnMut(Option<&accesskit::ActionData>, &mut Window, &mut App) + 'static,
     ) {
         self.a11y
-            .action_listeners
-            .entry(node_id)
-            .or_default()
-            .push((action, Box::new(listener)));
+            .record
+            .actions
+            .push((node_id, action, Some(Box::new(listener))));
     }
 
     /// Perform an accessibility action on a node as assistive technology
@@ -7872,29 +7901,26 @@ impl Window {
 
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn handle_a11y_action(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
-        // Take listeners out temporarily so the closures can borrow Window
-        // mutably, then restore them afterward.
-        if let Some(mut listeners) = self.a11y.action_listeners.remove(&request.target_node) {
-            let extra_data = request.data.as_ref();
-            let mut matched = false;
-            for (action, listener) in &mut listeners {
-                if *action == request.action {
-                    listener(extra_data, self, cx);
-                    matched = true;
-                }
+        let mut matched = false;
+        for index in 0..self.a11y.record.actions.len() {
+            let (node, action, listener) = &mut self.a11y.record.actions[index];
+            if *node == request.target_node
+                && *action == request.action
+                && let Some(mut listener) = listener.take()
+            {
+                listener(request.data.as_ref(), self, cx);
+                self.a11y.record.actions[index].2 = Some(listener);
+                matched = true;
             }
-            self.a11y
-                .action_listeners
-                .insert(request.target_node, listeners);
-            if matched {
-                return;
-            }
+        }
+        if matched {
+            return;
         }
 
         // Fall back to built-in action handling.
         match request.action {
             accesskit::Action::Click => {
-                if let Some(bounds) = self.a11y.node_bounds.get(&request.target_node).copied() {
+                if let Some(bounds) = self.a11y.last_node_bounds(request.target_node) {
                     let center = bounds.center();
                     let mouse_down = PlatformInput::MouseDown(crate::MouseDownEvent {
                         button: MouseButton::Left,
@@ -7914,7 +7940,13 @@ impl Window {
                 }
             }
             accesskit::Action::Focus => {
-                if let Some(focus_id) = self.a11y.focus_ids.get(&request.target_node).copied()
+                if let Some(focus_id) = self
+                    .a11y
+                    .record
+                    .focusables
+                    .iter()
+                    .rev()
+                    .find_map(|(id, focus_id)| (*id == request.target_node).then_some(*focus_id))
                     && let Some(handle) = FocusHandle::for_id(focus_id, &cx.focus_handles)
                 {
                     self.focus(&handle, cx);
@@ -7952,10 +7984,6 @@ impl Window {
             }
         }
         false
-    }
-
-    pub(crate) fn view_caching_disabled(&self, cx: &App) -> bool {
-        self.is_inspector_picking(cx) || self.a11y.is_active()
     }
 
     /// Executes the provided function with mutable access to an inspector state.
@@ -10366,15 +10394,24 @@ mod tests {
 
     #[gpui::test]
     fn cached_replay_preserves_a11y_nodes(cx: &mut TestAppContext) {
-        struct AccessibleChild;
+        struct AccessibleChild {
+            focus: FocusHandle,
+            actions: usize,
+        }
 
         impl Render for AccessibleChild {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let child = cx.weak_entity();
                 div()
                     .id("accessible-child")
                     .size(px(20.))
                     .role(accesskit::Role::Button)
                     .aria_label("Cached child")
+                    .track_focus(&self.focus)
+                    .on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
+                        child.update(cx, |child, _| child.actions += 1).unwrap();
+                    })
+                    .child(div().id("nested").role(accesskit::Role::Group))
             }
         }
 
@@ -10394,23 +10431,41 @@ mod tests {
 
         let window = cx.add_window(|window, cx| {
             window.a11y.set_forced(true);
-            AccessibleRoot {
-                child: cx.new(|_| AccessibleChild),
-            }
+            let child = cx.new(|cx| AccessibleChild {
+                focus: cx.focus_handle(),
+                actions: 0,
+            });
+            let focus = child.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            AccessibleRoot { child }
         });
+        let (mut fresh, child) = window
+            .update(cx, |root, window, _| {
+                (
+                    window.a11y.last_tree_update().unwrap().clone(),
+                    root.child.clone(),
+                )
+            })
+            .unwrap();
+        fresh.nodes.sort_by_key(|(id, _)| *id);
+        let node_id = fresh
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == accesskit::Role::Button && node.label() == Some("Cached child")
+            })
+            .unwrap()
+            .0;
+
         window.update(cx, |_, _, cx| cx.notify()).unwrap();
         cx.update_window(window.into(), |_, window, cx| {
             window.draw(cx).clear(cx);
-            assert!(
-                window
-                    .a11y
-                    .last_tree_update()
-                    .unwrap()
-                    .nodes
-                    .iter()
-                    .any(|(_, node)| node.role() == accesskit::Role::Button
-                        && node.label() == Some("Cached child"))
-            );
+            let mut replayed = window.a11y.last_tree_update().unwrap().clone();
+            replayed.nodes.sort_by_key(|(id, _)| *id);
+            assert_eq!(fresh.nodes, replayed.nodes);
+            assert_eq!(fresh.focus, replayed.focus);
+            window.perform_a11y_action(node_id, accesskit::Action::Click, None, cx);
+            assert_eq!(child.read(cx).actions, 1);
         })
         .unwrap();
     }
