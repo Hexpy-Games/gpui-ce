@@ -212,7 +212,7 @@ impl Scene {
                             .push(PaintOperation::Primitive(primitive));
                         return;
                     }
-                    self.close_opacity_group(&group);
+                    self.close_isolated_group(&group);
                 }
             }
             Primitive::FilterBoundary(_) => {}
@@ -350,17 +350,13 @@ impl Scene {
         }
     }
 
-    /// An opacity-only group draws no more than its content. A group of one primitive draws it
-    /// with its alpha multiplied ([`FilterBoundary::inline`]); any other group composites only the
-    /// union of its contents instead of the whole window. Only the drawn copies change: the
-    /// recorded operations stay as painted, so `replay` derives both again from the group as it
-    /// is then.
-    fn close_opacity_group(&mut self, group: &FilterGroup) {
+    /// Unfiltered groups composite only the union of their content. Scale and motion groups
+    /// keep their composite mask so transformed content can land outside that union. Empty
+    /// groups and opacity-only groups of one primitive draw inline. Only the drawn copies
+    /// change: recorded operations stay as painted, so `replay` derives them again.
+    fn close_isolated_group(&mut self, group: &FilterGroup) {
         let start = &self.filter_boundaries[group.start_index];
-        if !start.motion.is_animated() && (!start.filters.is_empty() || start.scale != 1.0) {
-            return;
-        }
-        if !start.motion.is_animated() && self.inline_single_primitive_group(group) {
+        if !start.motion.is_animated() && !start.filters.is_empty() {
             return;
         }
         let content = self.paint_operations[group.start_len..]
@@ -369,12 +365,17 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => primitive.painted_bounds(),
                 _ => None,
             })
+            .filter(|bounds| !bounds.is_empty())
             .reduce(|a, b| a.union(&b))
             .unwrap_or_default();
         let start = &mut self.filter_boundaries[group.start_index];
         start.bounds = start.bounds.intersect(&content);
-        if !start.motion.is_animated() {
+        if content.is_empty() {
+            start.inline = true;
+        }
+        if !start.motion.is_animated() && start.scale == 1.0 {
             start.content_mask.bounds = start.content_mask.bounds.intersect(&content);
+            self.inline_single_primitive_group(group);
         }
     }
 
@@ -843,15 +844,15 @@ impl Primitive {
     }
 
     /// The device-pixel area this primitive can change, clipped to its content mask. A group
-    /// that filters or scales its content can draw anywhere in its bounds, so its start marker
-    /// claims them; any other boundary is `None`, since an opacity-only group draws no more than
+    /// that filters or scales its content claims its composite reach at its start marker;
+    /// any other boundary is `None`, since an opacity-only group draws no more than
     /// its content.
     fn painted_bounds(&self) -> Option<Bounds<ScaledPixels>> {
         Some(match self {
             Primitive::FilterBoundary(boundary)
                 if boundary.is_start && (!boundary.filters.is_empty() || boundary.scale != 1.0) =>
             {
-                boundary.bounds.intersect(&boundary.content_mask.bounds)
+                boundary.composite_reach()
             }
             Primitive::FilterBoundary(_) => return None,
             Primitive::Shadow(shadow) => shadow.painted_bounds(),
@@ -1546,12 +1547,24 @@ pub struct FilterBoundary {
     pub motion_bounds: Bounds<ScaledPixels>,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
-    /// The group holds one primitive that already carries the group's opacity, so it is drawn
-    /// directly into the parent without an offscreen target. Set by [`Scene::insert_primitive`].
+    /// The group is empty or holds one primitive that already carries the group's opacity,
+    /// so it needs no offscreen target. Set by [`Scene::insert_primitive`].
     pub inline: bool,
 }
 
 impl FilterBoundary {
+    /// The untransformed and scaled composite area, expanded for blur and clipped to the mask.
+    pub fn composite_reach(&self) -> Bounds<ScaledPixels> {
+        let scaled = Bounds::new(
+            self.scale_origin + (self.bounds.origin - self.scale_origin) * self.scale,
+            self.bounds.size.map(|dimension| dimension * self.scale),
+        );
+        self.bounds
+            .union(&scaled)
+            .dilate(ScaledPixels(3.0 * self.max_blur_radius()))
+            .intersect(&self.content_mask.bounds)
+    }
+
     /// Largest gaussian blur radius in this filter chain, in device pixels.
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
@@ -2373,5 +2386,106 @@ mod tests {
         // The group composites its content's area, not the window.
         let content = quad().bounds.intersect(&quad().content_mask.bounds);
         assert_eq!(scene.filter_boundaries[0].bounds, content);
+    }
+
+    #[test]
+    fn isolated_groups_shrink_to_content_and_empty_groups_draw_inline() {
+        let viewport = Bounds::new(Point::default(), Size::new(scaled(1000.0), scaled(800.0)));
+        let opacity_bounds = Bounds::new(
+            point(scaled(100.0), scaled(100.0)),
+            Size::new(scaled(64.0), scaled(32.0)),
+        );
+        let scale_bounds = Bounds::new(point(scaled(400.0), scaled(300.0)), opacity_bounds.size);
+        let origin = point(scaled(800.0), scaled(600.0));
+        let mut scene = Scene {
+            viewport_size: viewport.size,
+            ..Default::default()
+        };
+        for (bounds, scale, clipped) in [
+            (opacity_bounds, 1.0, false),
+            (scale_bounds, 0.97, false),
+            (opacity_bounds, 1.0, true),
+        ] {
+            let start = FilterBoundary {
+                bounds: viewport,
+                content_mask: ContentMask {
+                    bounds: viewport,
+                    ..Default::default()
+                },
+                filters: SmallVec::new(),
+                opacity: 0.5,
+                scale,
+                scale_origin: origin,
+                ..boundary(true)
+            };
+            scene.insert_primitive(start.clone());
+            scene.insert_primitive(Quad {
+                bounds,
+                content_mask: ContentMask {
+                    bounds: if clipped { scale_bounds } else { viewport },
+                    ..Default::default()
+                },
+                ..quad()
+            });
+            scene.insert_primitive(FilterBoundary {
+                is_start: false,
+                ..start
+            });
+        }
+        scene.finish();
+
+        assert_eq!(
+            scene.filter_boundaries[0].bounds.map(|v| v.round()),
+            opacity_bounds
+        );
+        let scale = &scene.filter_boundaries[2];
+        assert_eq!(scale.bounds.map(|v| v.round()), scale_bounds);
+        assert_eq!(scale.content_mask.bounds, viewport);
+        assert!(!scale.inline);
+        let reach = Primitive::FilterBoundary(scale.clone())
+            .painted_bounds()
+            .unwrap();
+        let transformed = Bounds::new(
+            origin + (scale_bounds.origin - origin) * 0.97,
+            scale_bounds.size.map(|dimension| dimension * 0.97),
+        );
+        for bounds in [scale_bounds, transformed] {
+            assert!(reach.left() <= bounds.left());
+            assert!(reach.top() <= bounds.top());
+            assert!(reach.right() >= bounds.right());
+            assert!(reach.bottom() >= bounds.bottom());
+        }
+
+        let empty = &scene.filter_boundaries[4];
+        assert!(empty.inline);
+        assert!(empty.bounds.is_empty());
+        assert_eq!(scene.quads.len(), 2);
+        let empty_commands = scene
+            .render_commands()
+            .iter()
+            .skip_while(|command| {
+                !matches!(
+                    command,
+                    RenderCommand::BeginFilter {
+                        boundary_index: 4,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            empty_commands.as_slice(),
+            [
+                RenderCommand::BeginFilter {
+                    target: FilterRenderTarget::Inline,
+                    ..
+                },
+                RenderCommand::EndFilter {
+                    target: FilterRenderTarget::Inline,
+                    ..
+                },
+            ]
+        ));
+        assert_eq!(scene.render_plan().requirements().isolated_target_count, 1);
     }
 }
