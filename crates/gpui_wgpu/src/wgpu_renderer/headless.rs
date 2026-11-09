@@ -191,7 +191,7 @@ impl WgpuHeadlessRenderer {
         self.ensure_target(size)?;
         let target = self.target.as_ref().expect("target was just ensured");
         let submission =
-            super::frame::render_to_view(&mut self.renderer, scene, &target.view, None)
+            super::frame::render_to_view(&mut self.renderer, scene, &target.view, None, true)
                 .ok_or_else(|| anyhow::anyhow!("failed to render headless scene"))?;
         self.renderer
             .resources()

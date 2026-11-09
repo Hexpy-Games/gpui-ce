@@ -233,6 +233,43 @@ impl WgpuResources {
         self.filter_group_views.clear();
     }
 
+    pub(super) fn release_unused(&mut self, planned: &ScenePlanRequirements) {
+        let mut released = false;
+        if !planned.uses_path_target {
+            released |= self.path_intermediate_texture.take().is_some();
+            released |= self.path_intermediate_view.take().is_some();
+            released |= self.path_msaa_texture.take().is_some();
+            released |= self.path_msaa_view.take().is_some();
+        }
+        if !planned.uses_offscreen_target {
+            released |= self.scene_color_texture.take().is_some();
+            released |= self.scene_color_view.take().is_some();
+        }
+        if !planned.uses_blur_target {
+            released |= self.blur_ping_texture.take().is_some();
+            released |= self.blur_ping_view.take().is_some();
+            released |= self.blur_pong_texture.take().is_some();
+            released |= self.blur_pong_view.take().is_some();
+        }
+        if planned.backdrop_lens_count == 0 {
+            released |= self.backdrop_snapshot_texture.take().is_some();
+            released |= self.backdrop_snapshot_view.take().is_some();
+        }
+        released |= self.filter_group_textures.len() > planned.isolated_target_count
+            || self.filter_group_views.len() > planned.isolated_target_count;
+        self.filter_group_textures
+            .truncate(planned.isolated_target_count);
+        self.filter_group_views
+            .truncate(planned.isolated_target_count);
+        if planned.backdrop_filter_count == 0 {
+            self.backdrop_cache.get_mut().clear();
+        }
+        if released {
+            self.instances.invalidate_texture_bindings();
+            self.blur_bind_groups.get_mut().groups.clear();
+        }
+    }
+
     pub(super) fn finish_frame_uploads(&self) {
         self.filter_uniforms.finish_upload();
         self.surface_uniforms.finish_upload();

@@ -10,7 +10,7 @@ use crate::{WgpuAtlas, WgpuContext};
 
 #[cfg(not(target_family = "wasm"))]
 use super::GpuContext;
-use super::{WgpuRenderer, WgpuSurfaceConfig, damage};
+use super::{WgpuRenderer, WgpuSurfaceConfig, damage, frame};
 
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -134,7 +134,7 @@ impl WgpuRenderer {
         self.animation_time_ms = gpui::animation_time_ms();
         self.present_frame(|renderer, view| {
             damage::render_damage_to_view(renderer, scene, view, None).is_some()
-                || renderer.render_to_view(scene, view)
+                || frame::render_to_view(renderer, scene, view, None, false).is_some()
         })
     }
 

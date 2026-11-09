@@ -21,11 +21,13 @@ use gpui_render::shaders::{
     interface as shader_interface,
 };
 
+/// Submits a complete scene. Animation fallbacks leave `release_unused` disabled.
 pub(super) fn render_to_view(
     renderer: &mut WgpuRenderer,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
+    release_unused: bool,
 ) -> Option<wgpu::SubmissionIndex> {
     let mut planned = *scene.render_plan().requirements();
     planned.uses_offscreen_target |= scene.has_animations();
@@ -51,6 +53,9 @@ pub(super) fn render_to_view(
     let submission = submit(renderer, encoder, readback);
     renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
     renderer.frame_keys = (scene.generation(), keys);
+    if submission.is_some() && release_unused {
+        renderer.resources_mut().release_unused(&planned);
+    }
     submission
 }
 

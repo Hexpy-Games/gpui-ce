@@ -379,7 +379,7 @@ impl WgpuRenderer {
     /// Swapchain drawing, window capture, and headless rendering all use this path so
     /// platform integrations can't diverge in batching, filters, or pipeline state.
     fn render_to_view(&mut self, scene: &Scene, frame_view: &wgpu::TextureView) -> bool {
-        frame::render_to_view(self, scene, frame_view, None).is_some()
+        frame::render_to_view(self, scene, frame_view, None, true).is_some()
     }
 
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
@@ -389,7 +389,7 @@ impl WgpuRenderer {
         frame_view: &wgpu::TextureView,
         readback: frame::ReadbackCopy<'_>,
     ) -> Option<wgpu::SubmissionIndex> {
-        frame::render_to_view(self, scene, frame_view, Some(readback))
+        frame::render_to_view(self, scene, frame_view, Some(readback), true)
     }
 }
 
