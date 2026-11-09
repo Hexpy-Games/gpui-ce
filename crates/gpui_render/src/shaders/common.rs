@@ -108,6 +108,7 @@ mod source {
     pub enum DownsampleMode {
         Copy = 0,
         HalfResolution = 1,
+        Fill = 2,
     }
 
     #[repr(C)]
@@ -115,7 +116,7 @@ mod source {
     pub struct GlobalUniforms {
         pub viewport_size: Vec2f,
         pub premultiplied_alpha: ShaderBool,
-        pub padding: u32,
+        pub animation_time_ms: u32,
     }
 
     #[repr(C)]
@@ -252,6 +253,15 @@ mod source {
         pub bounds: AtlasBounds,
     }
     #[derive(Clone, Copy, Wgsl)]
+    pub struct FrameLoop {
+        pub frame_count: u32,
+        pub columns: u32,
+        pub period_ms: u32,
+        pub start_ms: u32,
+        pub turn_period_ms: u32,
+        pub padding: u32,
+    }
+    #[derive(Clone, Copy, Wgsl)]
     pub struct TransformationMatrix {
         pub rotation_scale: Mat2x2f,
         pub translation: Vec2f,
@@ -302,6 +312,58 @@ mod source {
         let tile_size = vec2f(tile.bounds.size.x as f32, tile.bounds.size.y as f32);
         let texture_size = vec2f(atlas_size.x as f32, atlas_size.y as f32);
         (tile_origin + unit_position * tile_size) / texture_size
+    }
+
+    /// The cell of `tile` showing now; the whole tile when `frame_count == 0`.
+    pub fn frame_tile_bounds(tile: AtlasTile, frames: FrameLoop) -> AtlasBounds {
+        if frames.frame_count == 0u32 {
+            return tile.bounds;
+        }
+        let elapsed = (get!(GLOBALS).animation_time_ms - frames.start_ms) % frames.period_ms;
+        let frame = elapsed * frames.frame_count / frames.period_ms;
+        let column = (frame % frames.columns) as i32;
+        let row = (frame / frames.columns) as i32;
+        #[expect(
+            clippy::manual_div_ceil,
+            reason = "translated to WGSL, which has no div_ceil"
+        )]
+        let rows = ((frames.frame_count + frames.columns - 1u32) / frames.columns) as i32;
+        let cell_width = tile.bounds.size.x / (frames.columns as i32);
+        let cell_height = tile.bounds.size.y / rows;
+        AtlasBounds {
+            origin: vec2i(
+                tile.bounds.origin.x + column * cell_width + 1i32,
+                tile.bounds.origin.y + row * cell_height + 1i32,
+            ),
+            size: vec2i(cell_width - 2i32, cell_height - 2i32),
+        }
+    }
+
+    /// `tile` narrowed to the cell of `frames` showing now.
+    pub fn framed_tile(tile: AtlasTile, frames: FrameLoop) -> AtlasTile {
+        AtlasTile {
+            texture_id: tile.texture_id,
+            tile_id: tile.tile_id,
+            padding: tile.padding,
+            bounds: frame_tile_bounds(tile, frames),
+        }
+    }
+
+    /// `position` turned about `center` by the loop's turn angle now; identity when `turn_period_ms == 0`.
+    pub fn turn_about(position: Vec2f, center: Vec2f, frames: FrameLoop) -> Vec2f {
+        if frames.turn_period_ms == 0u32 {
+            return position;
+        }
+        let elapsed = (get!(GLOBALS).animation_time_ms - frames.start_ms) % frames.turn_period_ms;
+        let angle = 2.0 * PI * (elapsed as f32) / (frames.turn_period_ms as f32);
+        let cosine = cos(angle);
+        let sine = sin(angle);
+        let offset = position - center;
+        center
+            + vec2f(
+                cosine * offset.x - sine * offset.y,
+                sine * offset.x + cosine * offset.y,
+            )
     }
 
     pub fn color_brightness(color: Vec3f) -> f32 {
@@ -392,6 +454,28 @@ mod source {
         let viewport_position = TransformationMatrix::transform_position(
             transform,
             Bounds::position(bounds, unit_position),
+        );
+        RectangleVertex {
+            unit_position,
+            viewport_position,
+            clip_position: viewport_to_clip_position(viewport_position),
+        }
+    }
+
+    pub fn framed_rectangle_vertex(
+        vertex_id: u32,
+        bounds: Bounds,
+        transform: TransformationMatrix,
+        frames: FrameLoop,
+    ) -> RectangleVertex {
+        let unit_position = rectangle_corner(vertex_id);
+        let viewport_position = TransformationMatrix::transform_position(
+            transform,
+            turn_about(
+                Bounds::position(bounds, unit_position),
+                Bounds::center(bounds),
+                frames,
+            ),
         );
         RectangleVertex {
             unit_position,

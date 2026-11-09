@@ -1,9 +1,10 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     AbsoluteLength, App, Background, BorderStyle, Bounds, ColorExt, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length, PaintQuad,
-    Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size, SizeRefinement, Styled,
-    TextRun, Window, black, phi, point, px, rems, size,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length,
+    OverflowWrap, PaintQuad, Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size,
+    SizeRefinement, Styled, TextRun, Window, WordBreak, black, phi, point, px, rems, size,
 };
 use collections::HashSet;
 use palette::{Hsla, IntoColor, rgb::Rgba};
@@ -391,6 +392,19 @@ pub struct Style {
     /// Opacity applied to this element and its children after compositing them as a group.
     pub opacity: Option<f32>,
 
+    /// Time-driven composite transform of this element and its children.
+    pub motion: Option<crate::LayerMotion>,
+
+    /// Animates changes to this element's layout position and size.
+    pub layout_motion: Option<crate::LayoutMotion>,
+
+    /// Uniform scale applied to this element and its children after compositing them as a group.
+    pub scale: Option<f32>,
+
+    /// Transform origin as fractions of this element's bounds.
+    #[refineable]
+    pub transform_origin: Point<f32>,
+
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
@@ -689,6 +703,12 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How words may break across lines.
+    pub word_break: WordBreak,
+
+    /// Whether long words may break to avoid overflowing a line.
+    pub overflow_wrap: OverflowWrap,
+
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
 
@@ -724,6 +744,8 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
@@ -963,19 +985,25 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
-        window.with_element_opacity(self.opacity, |window| {
-            if let Some(fragments) = window.current_inline_fragments.clone() {
-                for fragment in fragments.iter() {
-                    self.paint_box(*fragment, window, cx, |_, _| {});
-                }
+        window.with_motion(
+            self.motion.unwrap_or(crate::LayerMotion::NONE),
+            bounds,
+            |window| {
+                window.with_element_opacity(self.opacity, |window| {
+                    if let Some(fragments) = window.current_inline_fragments.clone() {
+                        for fragment in fragments.iter() {
+                            self.paint_box(*fragment, window, cx, |_, _| {});
+                        }
 
-                continuation(window, cx);
+                        continuation(window, cx);
 
-                return;
-            }
+                        return;
+                    }
 
-            self.paint_box(bounds, window, cx, continuation);
-        });
+                    self.paint_box(bounds, window, cx, continuation);
+                });
+            },
+        );
     }
 
     fn paint_box(
@@ -1151,6 +1179,10 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            motion: None,
+            layout_motion: None,
+            scale: None,
+            transform_origin: point(0.5, 0.5),
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

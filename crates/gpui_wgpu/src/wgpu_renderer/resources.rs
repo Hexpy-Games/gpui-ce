@@ -53,6 +53,7 @@ pub(super) struct WgpuResources {
     pub(super) filter_uniforms: DynamicUniformBuffer<BlurUniforms>,
     blur_bind_groups: RefCell<BlurBindGroups>,
     pub(super) wallpapers: super::wallpapers::WallpaperCacheCell,
+    pub(super) backdrop_cache: super::backdrop_cache::BackdropCacheCell,
     pub(super) globals_buffer: wgpu::Buffer,
     pub(super) globals_bind_group: wgpu::BindGroup,
     pub(super) path_globals_bind_group: wgpu::BindGroup,
@@ -190,6 +191,7 @@ impl WgpuResources {
             filter_uniforms,
             blur_bind_groups: RefCell::default(),
             wallpapers: RefCell::default(),
+            backdrop_cache: RefCell::default(),
             globals_buffer,
             globals_bind_group,
             path_globals_bind_group,
@@ -214,6 +216,7 @@ impl WgpuResources {
     pub(super) fn invalidate_intermediate_textures(&mut self) {
         self.instances.invalidate_texture_bindings();
         self.blur_bind_groups.get_mut().groups.clear();
+        self.backdrop_cache.get_mut().clear();
         self.path_intermediate_texture = None;
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
@@ -228,6 +231,43 @@ impl WgpuResources {
         self.blur_pong_view = None;
         self.filter_group_textures.clear();
         self.filter_group_views.clear();
+    }
+
+    pub(super) fn release_unused(&mut self, planned: &ScenePlanRequirements) {
+        let mut released = false;
+        if !planned.uses_path_target {
+            released |= self.path_intermediate_texture.take().is_some();
+            released |= self.path_intermediate_view.take().is_some();
+            released |= self.path_msaa_texture.take().is_some();
+            released |= self.path_msaa_view.take().is_some();
+        }
+        if !planned.uses_offscreen_target {
+            released |= self.scene_color_texture.take().is_some();
+            released |= self.scene_color_view.take().is_some();
+        }
+        if !planned.uses_blur_target {
+            released |= self.blur_ping_texture.take().is_some();
+            released |= self.blur_ping_view.take().is_some();
+            released |= self.blur_pong_texture.take().is_some();
+            released |= self.blur_pong_view.take().is_some();
+        }
+        if planned.backdrop_lens_count == 0 {
+            released |= self.backdrop_snapshot_texture.take().is_some();
+            released |= self.backdrop_snapshot_view.take().is_some();
+        }
+        released |= self.filter_group_textures.len() > planned.isolated_target_count
+            || self.filter_group_views.len() > planned.isolated_target_count;
+        self.filter_group_textures
+            .truncate(planned.isolated_target_count);
+        self.filter_group_views
+            .truncate(planned.isolated_target_count);
+        if planned.backdrop_filter_count == 0 {
+            self.backdrop_cache.get_mut().clear();
+        }
+        if released {
+            self.instances.invalidate_texture_bindings();
+            self.blur_bind_groups.get_mut().groups.clear();
+        }
     }
 
     pub(super) fn finish_frame_uploads(&self) {
@@ -262,13 +302,20 @@ impl WgpuResources {
 }
 
 impl WgpuRenderer {
-    pub(super) fn ensure_path_textures(&mut self) {
-        if self.resources().path_intermediate_texture.is_some() {
+    pub(super) fn ensure_path_textures(&mut self, size: gpui::Size<gpui::DevicePixels>) {
+        if self
+            .resources()
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| {
+                texture.width() == size.width.0 as u32 && texture.height() == size.height.0 as u32
+            })
+        {
             return;
         }
         let format = self.target.format();
-        let width = self.target.width();
-        let height = self.target.height();
+        let width = size.width.0 as u32;
+        let height = size.height.0 as u32;
         let sample_count = self.rendering_params.path_sample_count;
         let resources = self.resources_mut();
         let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
@@ -389,7 +436,10 @@ fn sampled_render_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -127,7 +127,7 @@ pub mod blur {
         pub lens_fold_band: f32,
         pub lens_fold_depth: f32,
         pub lens_curve: f32,
-        pub padding0: u32,
+        pub lens_saturation: f32,
         pub padding1: u32,
         pub padding2: u32,
         pub wp_mode: Vec4f,
@@ -145,6 +145,15 @@ pub mod blur {
         pub wp_p3: Vec4f,
         pub wp_p4: Vec4f,
         pub wp_p5: Vec4f,
+        pub composite_scale: f32,
+        pub composite_scale_padding: f32,
+        pub composite_scale_origin: Vec2f,
+        pub composite_offset: Vec2f,
+        pub composite_offset_padding: Vec2f,
+        pub composite_rotation: f32,
+        pub composite_rotation_padding0: f32,
+        pub composite_rotation_padding1: f32,
+        pub composite_rotation_padding2: f32,
     }
     uniform!(group(1), binding(0), BLUR_LOCALS: BlurUniforms);
 
@@ -172,12 +181,28 @@ pub mod blur {
         let b = get!(BLUR_LOCALS).bounds;
         let grow = select(0.0, 2.0, get!(BLUR_LOCALS).lens_bezel > 0.0);
         let unit_position = rectangle_corner(vertex_id);
-        let viewport_position =
+        let source_position =
             b.origin - vec2f(grow, grow) + unit_position * (b.size + vec2f(2.0 * grow, 2.0 * grow));
+        let scale = get!(BLUR_LOCALS).composite_scale;
+        let origin = get!(BLUR_LOCALS).composite_scale_origin;
+        let offset = get!(BLUR_LOCALS).composite_offset;
+        let rotation = get!(BLUR_LOCALS).composite_rotation;
+        let scaled_position = (source_position - origin) * scale;
+        let viewport_position = origin
+            + vec2f(
+                cos(rotation) * scaled_position.x - sin(rotation) * scaled_position.y,
+                sin(rotation) * scaled_position.x + cos(rotation) * scaled_position.y,
+            )
+            + offset;
+        let mut content_mask = get!(BLUR_LOCALS).content_mask;
+        if get!(BLUR_LOCALS).composite_scale != 1.0 {
+            content_mask.origin = origin + (content_mask.origin - origin) * scale;
+            content_mask.size = content_mask.size * scale;
+        }
         BlurCompositeVertexData {
             position: viewport_to_clip_position(viewport_position),
             texture_coordinates: unit_position,
-            clip_distances: clip_distances(viewport_position, get!(BLUR_LOCALS).content_mask),
+            clip_distances: clip_distances(viewport_position, content_mask),
         }
     }
 
@@ -185,9 +210,21 @@ pub mod blur {
         texture_sample_level(
             BLUR_TEXTURE,
             BLUR_SAMPLER,
-            position / get!(BLUR_LOCALS).target_size,
+            position / get!(BLUR_LOCALS).source_size,
             0.0,
         )
+    }
+
+    pub fn blur_composite_source_position(destination_position: Vec2f) -> Vec2f {
+        let locals = get!(BLUR_LOCALS);
+        let position =
+            destination_position - locals.composite_offset - locals.composite_scale_origin;
+        let rotation = locals.composite_rotation;
+        locals.composite_scale_origin
+            + vec2f(
+                cos(rotation) * position.x + sin(rotation) * position.y,
+                -sin(rotation) * position.x + cos(rotation) * position.y,
+            ) / locals.composite_scale
     }
 
     /// Slope of a circular bevel of radius `bezel` at depth `d` inside the edge, from the height
@@ -365,9 +402,15 @@ pub mod blur {
         // Native fill (padding2 tone flag, see BlurUniforms::with_lens): a tone curve on the
         // sample instead of the lift.
         let toned = lens_tone_on();
-        let r = select(r0, lens_tone(red.x, red.w), toned);
-        let g = select(g0, lens_tone(green.y, green.w), toned);
-        let b = select(b0, lens_tone(blue.z, blue.w), toned);
+        let mut r = select(r0, lens_tone(red.x, red.w), toned);
+        let mut g = select(g0, lens_tone(green.y, green.w), toned);
+        let mut b = select(b0, lens_tone(blue.z, blue.w), toned);
+        if locals.lens_saturation != 1.0 {
+            let saturated = lens_saturate(r, g, b, locals.lens_saturation);
+            r = saturated.x;
+            g = saturated.y;
+            b = saturated.z;
+        }
 
         // Edge light (Liquid Glass Studio's two-sided glare, MIT, iyinchao; ybouane's Fresnel):
         // the 2D edge normal against the light direction gives a key lobe on the lit side and
@@ -468,6 +511,19 @@ pub mod blur {
         saturate(out) * alpha
     }
 
+    /// CSS Filter Effects saturation matrix, clamped to the normalized color range.
+    pub fn lens_saturate(r: f32, g: f32, b: f32, s: f32) -> Vec3f {
+        clamp(
+            vec3f(
+                (0.213 + 0.787 * s) * r + (0.715 - 0.715 * s) * g + (0.072 - 0.072 * s) * b,
+                (0.213 - 0.213 * s) * r + (0.715 + 0.285 * s) * g + (0.072 - 0.072 * s) * b,
+                (0.213 - 0.213 * s) * r + (0.715 - 0.715 * s) * g + (0.072 + 0.928 * s) * b,
+            ),
+            vec3f(0.0, 0.0, 0.0),
+            vec3f(1.0, 1.0, 1.0),
+        )
+    }
+
     /// erf(x), Abramowitz-Stegun style approximation through tanh (|error| < 0.002).
     pub fn lens_erf(x: f32) -> f32 {
         let y = x * (1.128379 + 0.1009 * x * x);
@@ -511,23 +567,28 @@ pub mod blur {
             + 4.0;
         if locals.lens_frost <= 0.0 && lens_field(position).x > reach {
             let c = sample_composite_source(position);
+            let mut r = 0.0;
+            let mut g = 0.0;
+            let mut b = 0.0;
             if lens_tone_on() {
-                return vec4f(
-                    lens_tone(c.x, c.w),
-                    lens_tone(c.y, c.w),
-                    lens_tone(c.z, c.w),
-                    c.w,
-                );
+                r = lens_tone(c.x, c.w);
+                g = lens_tone(c.y, c.w);
+                b = lens_tone(c.z, c.w);
+            } else {
+                let lift = clamp(locals.lens_lift, -1.0, 1.0);
+                let lift_to = select(0.0, c.w, lift > 0.0) * abs(lift);
+                let keep = 1.0 - abs(lift);
+                r = c.x * keep + lift_to;
+                g = c.y * keep + lift_to;
+                b = c.z * keep + lift_to;
             }
-            let lift = clamp(locals.lens_lift, -1.0, 1.0);
-            let lift_to = select(0.0, c.w, lift > 0.0) * abs(lift);
-            let keep = 1.0 - abs(lift);
-            return vec4f(
-                c.x * keep + lift_to,
-                c.y * keep + lift_to,
-                c.z * keep + lift_to,
-                c.w,
-            );
+            if locals.lens_saturation != 1.0 {
+                let saturated = lens_saturate(r, g, b, locals.lens_saturation);
+                r = saturated.x;
+                g = saturated.y;
+                b = saturated.z;
+            }
+            return vec4f(r, g, b, c.w);
         }
         let a = lens_weighted_tap(position + vec2f(0.125, 0.375));
         let b = lens_weighted_tap(position + vec2f(-0.375, 0.125));
@@ -571,7 +632,7 @@ pub mod blur {
         if get!(BLUR_LOCALS).wp_mode.x > 1.5 {
             return wallpaper_composite_color(position, factor);
         }
-        if get!(BLUR_LOCALS).lens_bezel > 0.0 {
+        if get!(BLUR_LOCALS).lens_bezel > 0.0 || get!(BLUR_LOCALS).lens_saturation != 1.0 {
             // Sharp-rim pass (padding1 = weight in percent): the lens again, from the sharp
             // snapshot, only in the fold band, fading out toward the band's inner end, over the
             // blurred glass the first pass composited.
@@ -628,6 +689,9 @@ pub mod blur {
 
     #[fragment]
     pub fn fragment_blur_downsample(input: BlurVarying) -> Vec4f {
+        if get!(BLUR_LOCALS).downsample_mode == DownsampleMode::Fill {
+            return get!(BLUR_LOCALS).wp_mode;
+        }
         if get!(BLUR_LOCALS).downsample_mode == DownsampleMode::HalfResolution {
             let destination = floor(input.position.xy());
             let source_coordinates = min(
@@ -636,7 +700,12 @@ pub mod blur {
             );
             return texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, source_coordinates, 0.0);
         }
-        texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, input.texture_coordinates, 0.0)
+        texture_sample_level(
+            BLUR_TEXTURE,
+            BLUR_SAMPLER,
+            input.position.xy() / get!(BLUR_LOCALS).source_size,
+            0.0,
+        )
     }
 
     pub fn sample_blur_texture(texture_coordinates: Vec2f) -> Vec4f {
@@ -692,7 +761,10 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
-        blur_composite_color(input.position.xy(), coverage)
+        blur_composite_color(
+            blur_composite_source_position(input.position.xy()),
+            coverage,
+        )
     }
 
     #[derive(Wgsl)]
@@ -2053,6 +2125,9 @@ pub mod blur {
             )),
             get!(BLUR_LOCALS).composite_clip == BlurCompositeClip::RoundedBounds,
         );
-        blur_composite_color(input.position.xy(), coverage)
+        blur_composite_color(
+            blur_composite_source_position(input.position.xy()),
+            coverage,
+        )
     }
 }

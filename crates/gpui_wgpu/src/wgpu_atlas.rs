@@ -41,6 +41,8 @@ struct WgpuAtlasState {
     color_texture_format: wgpu::TextureFormat,
     storage: WgpuAtlasStorage,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    /// The uploaded bytes of flipbook grids, by (texture, tile id), for the platform compositor.
+    frame_grids: FxHashMap<(AtlasTextureId, u32), (Size<DevicePixels>, Arc<[u8]>)>,
     glyph_cache: GlyphAtlasCache,
     pending_uploads: Vec<PendingUpload>,
     next_texture_identity: u64,
@@ -66,6 +68,7 @@ impl WgpuAtlas {
             color_texture_format,
             storage: WgpuAtlasStorage::default(),
             tiles_by_key: Default::default(),
+            frame_grids: Default::default(),
             glyph_cache: Default::default(),
             pending_uploads: Vec::new(),
             next_texture_identity: 0,
@@ -94,12 +97,23 @@ impl WgpuAtlas {
         }
     }
 
+    /// The size and bytes of the flipbook grid in `tile`, if it holds one. Cells are row-major with
+    /// a `FRAME_GUTTER` border; monochrome grids are 1 byte per pixel, polychrome grids straight
+    /// BGRA.
+    pub fn frame_grid(&self, tile: &AtlasTile) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let lock = self.0.lock();
+        lock.frame_grids
+            .get(&(tile.texture_id, tile.tile_id.0))
+            .cloned()
+    }
+
     /// Clears all cached textures and tiles, forcing them to be recreated.
     /// Use this for incremental recovery when the device is still valid.
     pub fn clear(&self) {
         let mut lock = self.0.lock();
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
+        lock.frame_grids.clear();
         lock.glyph_cache.clear();
         lock.pending_uploads.clear();
     }
@@ -113,6 +127,7 @@ impl WgpuAtlas {
         lock.color_texture_format = context.color_texture_format();
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
+        lock.frame_grids.clear();
         lock.glyph_cache.clear();
         lock.pending_uploads.clear();
     }
@@ -167,6 +182,7 @@ impl PlatformAtlas for WgpuAtlas {
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        lock.frame_grids.remove(&(tile.texture_id, tile.tile_id.0));
         let id = tile.texture_id;
 
         let Some(texture_slot) = lock.storage[id.kind].textures.get_mut(id.index as usize) else {
@@ -206,6 +222,10 @@ impl WgpuAtlasState {
             .allocate(size, key.texture_kind())
             .context("failed to allocate")?;
         self.upload_texture(tile.texture_id, tile.bounds, bytes);
+        if matches!(key, AtlasKey::Frames(_)) {
+            self.frame_grids
+                .insert((tile.texture_id, tile.tile_id.0), (size, bytes.into()));
+        }
         self.tiles_by_key.insert(key, tile);
 
         Ok(tile)

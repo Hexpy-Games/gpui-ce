@@ -49,7 +49,7 @@ use crate::{
     InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures, PlatformInput,
     Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
     RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
+    ScaledPixels, Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
     ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -963,9 +963,27 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Presents an animation tick of the scene last passed to `draw` (unchanged since).
+    fn draw_animation_frame(&self, scene: &Scene) {
+        self.draw(scene)
+    }
+    /// Paints the live layers without presenting the window surface.
+    fn draw_live_layers(&self, _scene: &Scene) {}
+    /// Rasterises a scene region as premultiplied, top-down BGRA pixels.
+    fn rasterize_offscreen(
+        &self,
+        _scene: &Scene,
+        _rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        None
+    }
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
+    /// Whether the window draws [`Scene::compositor_sprites`] itself.
+    fn supports_compositor_sprites(&self) -> bool {
+        false
+    }
 
     // macOS specific methods
     fn get_title(&self) -> String {
@@ -1012,6 +1030,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn request_decorations(&self, _decorations: WindowDecorations) {}
     fn show_window_menu(&self, _position: Point<Pixels>) {}
+    fn popup_menu(
+        &self,
+        _items: &[PopupMenuItem],
+        _selected: Option<usize>,
+        _anchor: Bounds<Pixels>,
+    ) -> Option<oneshot::Receiver<Option<usize>>> {
+        None
+    }
     fn start_window_move(&self) {}
     fn can_start_external_drag(&self) -> bool {
         false
@@ -1162,6 +1188,19 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// Sets the animation clock the next renders read.
+    fn set_animation_time_ms(&mut self, _time_ms: u32) {}
+
+    /// Redraws an animation tick over the frame the previous render of the same scene retained,
+    /// and reads it back; errors when the tick needs a full encode.
+    fn render_animation_frame_to_image(
+        &mut self,
+        _scene: &Scene,
+        _size: Size<DevicePixels>,
+    ) -> Result<RgbaImage> {
+        anyhow::bail!("animation frames are not supported")
+    }
 }
 
 /// Type alias for runnables with metadata.
@@ -1885,6 +1924,20 @@ pub enum AtlasKey {
     },
     Svg(RenderSvgParams),
     Image(RenderImageParams),
+    Frames(RenderFramesParams),
+}
+
+/// Identity of a flipbook grid in the sprite atlas.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RenderFramesParams {
+    /// Caller-chosen identity of the animation.
+    pub key: SharedString,
+    /// Size of one frame, in device pixels, without its gutter.
+    pub size: Size<DevicePixels>,
+    /// Number of frames in the grid.
+    pub frame_count: usize,
+    /// Whether the grid keeps the frames' colours (polychrome) or is an alpha mask (monochrome).
+    pub polychrome: bool,
 }
 
 impl AtlasKey {
@@ -1905,6 +1958,8 @@ impl AtlasKey {
             },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
             AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
+            AtlasKey::Frames(params) if params.polychrome => AtlasTextureKind::Polychrome,
+            AtlasKey::Frames(_) => AtlasTextureKind::Monochrome,
         }
     }
 }
@@ -1918,6 +1973,12 @@ impl From<(RenderGlyphParams, RasterizedGlyphFormat)> for AtlasKey {
 impl From<RenderSvgParams> for AtlasKey {
     fn from(params: RenderSvgParams) -> Self {
         Self::Svg(params)
+    }
+}
+
+impl From<RenderFramesParams> for AtlasKey {
+    fn from(params: RenderFramesParams) -> Self {
+        Self::Frames(params)
     }
 }
 
@@ -3272,6 +3333,25 @@ pub enum PromptButton {
     Cancel(SharedString),
     /// Other button
     Other(SharedString),
+}
+
+/// An item in a native popup menu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PopupMenuItem {
+    /// A selectable option.
+    Option {
+        /// Label shown for the option.
+        label: SharedString,
+        /// Whether the option can be selected.
+        enabled: bool,
+    },
+    /// A disabled group heading.
+    Group {
+        /// Label shown for the group.
+        label: SharedString,
+    },
+    /// A separator between menu items.
+    Separator,
 }
 
 impl PromptButton {

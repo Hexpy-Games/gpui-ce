@@ -50,6 +50,16 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
     layout!(AtlasTextureId, "AtlasTextureId", index, kind),
     layout!(AtlasTile, "AtlasTile", texture_id, tile_id, padding, bounds),
     layout!(
+        FrameLoop,
+        "FrameLoop",
+        frame_count,
+        columns,
+        period_ms,
+        start_ms,
+        turn_period_ms,
+        padding
+    ),
+    layout!(
         TransformationMatrix,
         "TransformationMatrix",
         rotation_scale,
@@ -107,7 +117,8 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         content_mask,
         color,
         tile,
-        transformation
+        transformation,
+        frames
     ),
     layout!(
         SubpixelSprite,
@@ -130,7 +141,8 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         bounds,
         content_mask,
         corner_radii,
-        tile
+        tile,
+        frames
     ),
 ];
 

@@ -13,9 +13,9 @@ use gpui::{
     ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowKind, WindowParams, point, px, size,
+    PopupMenuItem, PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size,
+    SystemWindowTab, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowKind, WindowParams, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -29,22 +29,24 @@ use foreign_types::ForeignTypeRef;
 use futures::channel::oneshot;
 use gpui_util::ResultExt;
 use objc2::{
-    MainThreadMarker, class, msg_send,
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject as Objc2Object, AnyProtocol, Bool, ClassBuilder, Sel},
     sel,
 };
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
-    NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
+    NSControlStateValueOn, NSCursorFrameResizeDirections, NSCursorFrameResizePosition,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem as Objc2NSMenuItem,
     NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior,
     NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
-    NSRangePointer, NSRect as Objc2NSRect, NSSize, NSString, NSUInteger,
+    NSInteger, NSNotFound, NSObject, NSObjectProtocol, NSOperatingSystemVersion,
+    NSPoint as Objc2NSPoint, NSRange, NSRangePointer, NSRect as Objc2NSRect, NSSize, NSString,
+    NSUInteger,
 };
 use parking_lot::Mutex;
 use raw_window_handle as rwh;
@@ -66,6 +68,36 @@ use std::{
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+
+#[derive(Default)]
+struct PopupMenuTargetIvars {
+    chosen: Cell<Option<isize>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "GPUIPopupMenuTarget"]
+    #[ivars = PopupMenuTargetIvars]
+    struct GPUIPopupMenuTarget;
+
+    impl GPUIPopupMenuTarget {
+        #[unsafe(method(popupMenuItemSelected:))]
+        fn popup_menu_item_selected(&self, sender: &Objc2NSMenuItem) {
+            self.ivars().chosen.set(Some(sender.tag()));
+        }
+    }
+
+    unsafe impl NSObjectProtocol for GPUIPopupMenuTarget {}
+);
+
+impl GPUIPopupMenuTarget {
+    fn new(marker: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(marker).set_ivars(PopupMenuTargetIvars::default());
+        // SAFETY: NSObject's `init` is its designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 unsafe fn set_window_state_ivar(object: ObjcId, state: *mut c_void) {
     let object = unsafe { &mut *object };
@@ -1838,6 +1870,106 @@ impl PlatformWindow for MacWindow {
         Some(done_rx)
     }
 
+    fn popup_menu(
+        &self,
+        items: &[PopupMenuItem],
+        selected: Option<usize>,
+        anchor: Bounds<Pixels>,
+    ) -> Option<oneshot::Receiver<Option<usize>>> {
+        let items = items.to_vec();
+        let (executor, closed, native_view, view_height) = {
+            let lock = self.0.lock();
+            (
+                lock.foreground_executor.clone(),
+                lock.closed.clone(),
+                lock.native_view.as_ptr(),
+                lock.content_size().height,
+            )
+        };
+        let (chosen_tx, chosen_rx) = oneshot::channel();
+        executor
+            .spawn(async move {
+                if closed.load(Ordering::Acquire) {
+                    return;
+                }
+
+                let marker = MainThreadMarker::new().expect("popup menu runs on the main thread");
+                let menu = NSMenu::new(marker);
+                menu.setAutoenablesItems(false);
+                let target = GPUIPopupMenuTarget::new(marker);
+                let empty_key_equivalent = NSString::from_str("");
+
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        PopupMenuItem::Option { label, enabled } => {
+                            let title = NSString::from_str(label.as_ref());
+                            // SAFETY: The selector is implemented by GPUIPopupMenuTarget.
+                            let menu_item = unsafe {
+                                Objc2NSMenuItem::initWithTitle_action_keyEquivalent(
+                                    Objc2NSMenuItem::alloc(marker),
+                                    &title,
+                                    Some(sel!(popupMenuItemSelected:)),
+                                    &empty_key_equivalent,
+                                )
+                            };
+                            menu_item.setTag(index as NSInteger);
+                            // SAFETY: `target` is retained through the synchronous menu loop,
+                            // and implements the action selector assigned above.
+                            let target_ref: &GPUIPopupMenuTarget = target.as_ref();
+                            let target_object: &Objc2Object = target_ref.as_super().as_super();
+                            unsafe { menu_item.setTarget(Some(target_object)) };
+                            if selected == Some(index) {
+                                menu_item.setState(NSControlStateValueOn);
+                            }
+                            menu_item.setEnabled(*enabled);
+                            menu.addItem(&menu_item);
+                        }
+                        PopupMenuItem::Group { label } => {
+                            let title = NSString::from_str(label.as_ref());
+                            // SAFETY: `None` is a valid action for a disabled menu heading.
+                            let menu_item = unsafe {
+                                Objc2NSMenuItem::initWithTitle_action_keyEquivalent(
+                                    Objc2NSMenuItem::alloc(marker),
+                                    &title,
+                                    None,
+                                    &empty_key_equivalent,
+                                )
+                            };
+                            menu_item.setEnabled(false);
+                            menu.addItem(&menu_item);
+                        }
+                        PopupMenuItem::Separator => {
+                            menu.addItem(&Objc2NSMenuItem::separatorItem(marker));
+                        }
+                    }
+                }
+
+                // SAFETY: `native_view` is the retained AppKit view owned by this window and
+                // remains alive while the platform window is open.
+                let view: &Objc2NSView = unsafe { &*(native_view as *const Objc2NSView) };
+                let selected_item = selected.and_then(|index| menu.itemAtIndex(index as NSInteger));
+                let location = Objc2NSPoint::new(
+                    f64::from(anchor.origin.x.as_f32()),
+                    f64::from((view_height - anchor.origin.y).as_f32()),
+                );
+                menu.popUpMenuPositioningItem_atLocation_inView(
+                    selected_item.as_deref(),
+                    location,
+                    Some(view),
+                );
+
+                let chosen = target
+                    .ivars()
+                    .chosen
+                    .get()
+                    .and_then(|index| usize::try_from(index).ok());
+                let _ = chosen_tx.send(chosen);
+            })
+            .detach();
+
+        Some(chosen_rx)
+    }
+
     fn activate(&self, token: Option<&str>) -> bool {
         if token.is_some() {
             return false;
@@ -2189,8 +2321,36 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn draw_animation_frame(&self, scene: &gpui::Scene) {
+        let mut this = self.0.lock();
+        #[cfg(feature = "wgpu")]
+        if this.renderer.draw_animation_frame(scene) {
+            this.force_render_pending = true;
+        }
+        #[cfg(not(feature = "wgpu"))]
+        this.renderer.draw(scene);
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn draw_live_layers(&self, scene: &gpui::Scene) {
+        self.0.lock().renderer.draw_live_layers(scene);
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn rasterize_offscreen(
+        &self,
+        scene: &gpui::Scene,
+        rect: Bounds<gpui::ScaledPixels>,
+    ) -> Option<(Size<gpui::DevicePixels>, Arc<[u8]>)> {
+        self.0.lock().renderer.rasterize(scene, rect)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
+    }
+
+    fn supports_compositor_sprites(&self) -> bool {
+        self.0.lock().renderer.supports_compositor_sprites()
     }
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {

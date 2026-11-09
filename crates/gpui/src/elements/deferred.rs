@@ -235,6 +235,17 @@ mod tests {
         // themselves recorded during a reused frame.
         window.update(cx, |_, _, cx| cx.notify()).unwrap();
         cx.run_until_parked();
+        window
+            .update(cx, |_, window, _| {
+                assert!(
+                    window
+                        .rendered_frame
+                        .debug_bounds
+                        .contains_key("NESTED_MENU"),
+                    "a reused subtree keeps its debug selectors"
+                );
+            })
+            .unwrap();
 
         // Re-render the panel itself again to prove the popovers still draw.
         window

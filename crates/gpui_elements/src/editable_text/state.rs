@@ -1,7 +1,10 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::editable_text::{
-    StringStorage, TextBoundary, UnicodeTextStorage, actions::EditableTextActionHandler,
-    caret::CaretNotify, history::EditableTextHistory, layout::EditableTextLayoutResult,
+    StringStorage, TextBoundary, UnicodeTextStorage,
+    actions::EditableTextActionHandler,
+    caret::CaretNotify,
+    history::EditableTextHistory,
+    layout::{EditableTextLayoutResult, StorageDocument},
 };
 use gpui::{
     App, Bounds, CaretAffinity, CaretPosition, CaretSelection, CaretSelectionMovement,
@@ -250,17 +253,38 @@ impl EditableTextState {
         self.marked_range.clone()
     }
 
+    #[cfg(test)]
     pub(super) fn accessibility_text_metrics(&self) -> &AccessibilityTextMetrics {
         &self.accessibility_text_metrics
     }
 
-    /// Runs for the current layout, or `None` when the layout does not show the value
+    /// The text accessibility reads and its metrics: the mask when the text is masked.
+    pub(super) fn accessibility_text(&self) -> (&str, Cow<'_, AccessibilityTextMetrics>) {
+        match self.layout_data.display_map.masked_text() {
+            Some(text) => (text, Cow::Owned(AccessibilityTextMetrics::new(text))),
+            None => (
+                self.as_str(),
+                Cow::Borrowed(&self.accessibility_text_metrics),
+            ),
+        }
+    }
+
+    /// Runs of `text` for the current layout, or `None` when the layout does not show it
     /// (stale, placeholder or truncated).
-    pub(super) fn accessibility_runs(&self) -> Option<Vec<AccessibilityRun>> {
-        let document = self.current_document().ok()?;
-        (document.text.as_str() == self.as_str())
-            .then(|| self.accessibility_text_metrics.runs(document))
+    pub(super) fn accessibility_runs(
+        &self,
+        text: &str,
+        metrics: &AccessibilityTextMetrics,
+    ) -> Option<Vec<AccessibilityRun>> {
+        let document = self.current_document().ok()?.shaped;
+        (document.text.as_str() == text)
+            .then(|| metrics.runs(document))
             .filter(|runs| !runs.is_empty())
+    }
+
+    /// Whether the element shows this text masked.
+    fn is_masked(&self) -> bool {
+        self.layout_data.display_map.masked_text().is_some()
     }
 }
 
@@ -282,6 +306,7 @@ pub(super) fn run_position(runs: &[AccessibilityRun], character: usize) -> (usiz
     (index, character - runs[index].characters.start)
 }
 
+#[derive(Clone)]
 pub(super) struct AccessibilityTextMetrics {
     pub(super) character_lengths: Vec<u8>,
     byte_offsets: Vec<usize>,
@@ -474,16 +499,20 @@ impl EditableTextState {
 
 // Screen space (text layout engine output) & String space transformers
 impl EditableTextState {
-    fn current_document(&self) -> Result<&ShapedText, OldDocumentVersion> {
+    /// The current layout, read in storage offsets.
+    fn current_document(&self) -> Result<StorageDocument<'_>, OldDocumentVersion> {
         if self.layout_data.state.last_seen_storage_version != self.storage.version() {
             return Err(OldDocumentVersion);
         }
 
-        Ok(self
-            .layout_data
-            .document
-            .as_deref()
-            .expect("editable text layout invariant violated: current version has no document"))
+        Ok(StorageDocument {
+            shaped: self
+                .layout_data
+                .document
+                .as_deref()
+                .expect("editable text layout invariant violated: current version has no document"),
+            map: &self.layout_data.display_map,
+        })
     }
 
     fn point_for_caret(&self, caret: CaretPosition) -> Option<Point<Pixels>> {
@@ -787,6 +816,7 @@ impl EditableTextState {
             return;
         }
 
+        let boundary = self.masked_word_boundary(boundary);
         let range = self.selected_byte_range();
         let had_selection = !range.is_empty();
         let range = if had_selection {
@@ -846,8 +876,41 @@ impl EditableTextState {
         self.move_semantic(movement, true, cx);
     }
 
+    /// Masked text is one word, as in platform password fields, so a word boundary is the
+    /// document boundary.
+    fn masked_word_boundary(&self, boundary: TextBoundary) -> TextBoundary {
+        match boundary {
+            TextBoundary::Word if self.is_masked() => TextBoundary::Document,
+            boundary => boundary,
+        }
+    }
+
+    /// [`Self::masked_word_boundary`] for visual movement: a word left or right moves to the
+    /// document start or end on that side of the paragraph.
+    fn masked_word_movement(&self, movement: TextMovement) -> TextMovement {
+        if self.masked_word_boundary(movement.boundary) == movement.boundary {
+            return movement;
+        }
+
+        let rtl = self.current_document().is_ok_and(|document| {
+            document
+                .shaped
+                .visual_lines()
+                .first()
+                .is_some_and(|line| line.direction.is_rtl())
+        });
+        let direction = if (movement.direction == Direction::Left) != rtl {
+            Direction::Start
+        } else {
+            Direction::End
+        };
+
+        direction.with_boundary(TextBoundary::Document)
+    }
+
     /// Calculates destinations for both navigation and selection extension.
     fn move_semantic(&mut self, movement: TextMovement, extend: bool, cx: &mut Context<Self>) {
+        let movement = self.masked_word_movement(movement);
         let document_endpoint = match (movement.direction, movement.boundary) {
             (Direction::Start, TextBoundary::Document) => Some(0),
             (Direction::End, TextBoundary::Document) => Some(self.storage.content_utf8().len()),
@@ -910,6 +973,7 @@ impl EditableTextState {
         extend: bool,
         cx: &mut Context<Self>,
     ) {
+        let boundary = self.masked_word_boundary(boundary);
         if boundary == TextBoundary::Document {
             let direction = match direction {
                 NavigationDirection::Back => Direction::Start,
@@ -1006,6 +1070,10 @@ impl EditableTextState {
         group: SelectionGroup,
         cx: &mut Context<Self>,
     ) {
+        let group = match group {
+            SelectionGroup::Word if self.is_masked() => SelectionGroup::Document,
+            group => group,
+        };
         let selection = match group.layout_kind() {
             Some(kind) => match self.current_document() {
                 Ok(document) => document.selection_from_pixel_point(point, line_height, kind),
@@ -1211,16 +1279,15 @@ impl EntityInputHandler for EditableTextState {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.storage.utf_range_16to8(&range_utf16);
+        let range = self.layout_data.display_map.display_range(range);
         let line_height = window.line_height();
 
         // Between an edit and the next layout, answer from the previous layout: a caret at the
         // range start, clamped to the old text. Platforms query between edit and layout
         // (AppKit's firstRect right after setMarkedText) and would otherwise place IME windows at
         // the screen origin.
-        let (document, stale) = match self.current_document() {
-            Ok(document) => (document, false),
-            Err(OldDocumentVersion) => (self.layout_data.document.as_deref()?, true),
-        };
+        let stale = self.current_document().is_err();
+        let document = self.layout_data.document.as_deref()?;
         let document_origin = bounds.origin + self.layout_data.document_offset
             - self.layout_data.scroll_bounds.origin;
         let start = range.start.min(document.text.len());
@@ -1448,8 +1515,9 @@ impl<'app> EditableTextActionHandler<Context<'app, Self>> for EditableTextState 
         self.select_semantic(Direction::Right.with_boundary(TextBoundary::Word), cx);
     }
 
+    /// Does nothing on masked text, as in platform password fields.
     fn cut(&mut self, _: &Cut, _w: &mut Window, cx: &mut Context<'app, Self>) {
-        if !self.layout_data.accepts_input {
+        if !self.layout_data.accepts_input || self.is_masked() {
             return;
         }
 
@@ -1468,10 +1536,11 @@ impl<'app> EditableTextActionHandler<Context<'app, Self>> for EditableTextState 
         cx.notify();
     }
 
+    /// Does nothing on masked text, as in platform password fields.
     fn copy(&mut self, _: &Copy, _w: &mut Window, cx: &mut Context<'app, Self>) {
         let range = self.selected_byte_range();
 
-        if range.is_empty() {
+        if range.is_empty() || self.is_masked() {
             return;
         }
 

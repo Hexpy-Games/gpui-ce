@@ -10,7 +10,7 @@ use crate::{WgpuAtlas, WgpuContext};
 
 #[cfg(not(target_family = "wasm"))]
 use super::GpuContext;
-use super::{WgpuRenderer, WgpuSurfaceConfig};
+use super::{WgpuRenderer, WgpuSurfaceConfig, damage, frame};
 
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -123,6 +123,26 @@ impl WgpuRenderer {
 
     /// Acquires, renders, and presents one native or canvas surface frame.
     pub fn draw(&mut self, scene: &Scene) -> bool {
+        self.animation_time_ms = gpui::animation_time_ms();
+        self.present_frame(|renderer, view| renderer.render_to_view(scene, view))
+    }
+
+    /// Presents an animation tick of the scene last passed to [`Self::draw`]: it redraws only the
+    /// animated area over the retained frame, and falls back to a full encode when that is not
+    /// possible. Returns what [`Self::draw`] returns.
+    pub fn draw_animation_frame(&mut self, scene: &Scene) -> bool {
+        self.animation_time_ms = gpui::animation_time_ms();
+        self.present_frame(|renderer, view| {
+            damage::render_damage_to_view(renderer, scene, view, None).is_some()
+                || frame::render_to_view(renderer, scene, view, None, false).is_some()
+        })
+    }
+
+    /// Acquires the next surface frame, runs `encode` on its view and presents it.
+    fn present_frame(
+        &mut self,
+        encode: impl FnOnce(&mut Self, &wgpu::TextureView) -> bool,
+    ) -> bool {
         if !self.target.is_configured() {
             return false;
         }
@@ -157,7 +177,7 @@ impl WgpuRenderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let rendered = self.render_to_view(scene, &view);
+        let rendered = encode(self, &view);
         if rendered {
             frame.present();
         } else {
@@ -184,6 +204,7 @@ impl WgpuRenderer {
 
     /// Keeps device resources alive while detaching a destroyed native surface.
     pub fn unconfigure_surface(&mut self) {
+        self.retained = None;
         self.target.set_configured(false);
         if let Some(resources) = self.resources.as_mut() {
             resources.invalidate_intermediate_textures();
@@ -239,6 +260,7 @@ impl WgpuRenderer {
         surface.configure(&resources.device, &target_config);
         resources.surface = Some(surface);
         resources.invalidate_intermediate_textures();
+        self.retained = None;
         self.target.set_configured(true);
         Ok(())
     }

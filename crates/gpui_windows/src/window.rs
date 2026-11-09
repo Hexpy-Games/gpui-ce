@@ -831,6 +831,69 @@ impl PlatformWindow for WindowsWindow {
         Some(done_rx)
     }
 
+    fn popup_menu(
+        &self,
+        items: &[PopupMenuItem],
+        selected: Option<usize>,
+        anchor: Bounds<Pixels>,
+    ) -> Option<Receiver<Option<usize>>> {
+        let items = items.to_vec();
+        let hwnd = self.0.hwnd;
+        let scale_factor = self.0.state.scale_factor.get();
+        let (chosen_tx, chosen_rx) = oneshot::channel();
+        self.0
+            .executor
+            .spawn(async move {
+                // SAFETY: These menu operations run on the window's foreground executor. The
+                // HWND belongs to this window, menu handles are used only while alive, and each
+                // label remains alive for its AppendMenuW call.
+                unsafe {
+                    let Ok(menu) = CreatePopupMenu() else {
+                        return;
+                    };
+
+                    for (index, item) in items.iter().enumerate() {
+                        match item {
+                            PopupMenuItem::Option { label, enabled } => {
+                                let mut flags = MF_STRING;
+                                if !enabled {
+                                    flags |= MF_GRAYED;
+                                }
+                                if selected == Some(index) {
+                                    flags |= MF_CHECKED;
+                                }
+                                let label = HSTRING::from(label.as_ref());
+                                AppendMenuW(menu, flags, index + 1, &label).log_err();
+                            }
+                            PopupMenuItem::Group { label } => {
+                                let label = HSTRING::from(label.as_ref());
+                                AppendMenuW(menu, MF_STRING | MF_GRAYED, index + 1, &label)
+                                    .log_err();
+                            }
+                            PopupMenuItem::Separator => {
+                                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).log_err();
+                            }
+                        }
+                    }
+
+                    let mut position = POINT {
+                        x: (anchor.origin.x.as_f32() * scale_factor) as i32,
+                        y: ((anchor.origin.y + anchor.size.height).as_f32() * scale_factor) as i32,
+                    };
+                    ClientToScreen(hwnd, &mut position).ok().log_err();
+                    let flags = TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN;
+                    let result =
+                        TrackPopupMenuEx(menu, flags.0, position.x, position.y, hwnd, None);
+                    DestroyMenu(menu).log_err();
+                    let chosen = (result.0 > 0).then(|| result.0 as usize - 1);
+                    let _ = chosen_tx.send(chosen);
+                }
+            })
+            .detach();
+
+        Some(chosen_rx)
+    }
+
     fn activate(&self, token: Option<&str>) -> bool {
         if token.is_some() {
             return false;
@@ -1127,6 +1190,22 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    fn draw_live_layers(&self, scene: &Scene) {
+        self.state
+            .renderer
+            .borrow_mut()
+            .draw_live_layers(scene)
+            .log_err();
+    }
+
+    fn draw_animation_frame(&self, scene: &Scene) {
+        self.state
+            .renderer
+            .borrow_mut()
+            .draw_animation_frame(scene, self.state.background_appearance.get())
+            .log_err();
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
@@ -1135,8 +1214,20 @@ impl PlatformWindow for WindowsWindow {
             .render_to_image(scene, self.state.background_appearance.get())
     }
 
+    fn rasterize_offscreen(
+        &self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        self.state.renderer.borrow_mut().rasterize(scene, rect)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.renderer.borrow().sprite_atlas().clone()
+    }
+
+    fn supports_compositor_sprites(&self) -> bool {
+        self.state.renderer.borrow().supports_compositor_sprites()
     }
 
     fn get_raw_handle(&self) -> HWND {

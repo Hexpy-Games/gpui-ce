@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     ColorGlyphKind, FontStore, GlyphRasterizer, SwashGlyphRasterizer, SystemFonts,
     catalog::{family_names, new_font_context, register_font_blobs, resolve_face},
@@ -6,13 +7,13 @@ use anyhow::{Context as _, Result};
 use gpui::{
     Bounds, CaretAffinity, CaretMovement, CaretPosition, Font, FontId, FontMetrics, GlyphId,
     InlineBidiScope, InlineBoxRequest, InlineLayout, InlineLayoutRequest, InlineRangeGeometry,
-    InlineTextMetrics, InlineTextStyle, InlineVisualLine, LineLayout, PaintFragment, PaintStyle,
-    ParagraphDirection, Pixels, PlatformTextLayout, PlatformTextSystem, Point, PositionedInlineBox,
-    PreparedRasterStyle, RasterStyleRequest, RasterizedGlyph, RenderGlyphParams, ResolvedDirection,
-    ShapedGlyph, Size, TextAlign, TextBoundary as Boundary, TextDirection as Direction,
-    TextLayoutOptions, TextLayoutRequest, TextMovement, TextRangeExt, TextRenderingMode, TextRun,
-    TextSelectionKind, UnicodeBidi, VisualDirection, VisualLine, align_inline_boxes,
-    is_paragraph_separator, point, px, size,
+    InlineTextMetrics, InlineTextStyle, InlineVisualLine, LineLayout, OverflowWrap, PaintFragment,
+    PaintStyle, ParagraphDirection, Pixels, PlatformTextLayout, PlatformTextSystem, Point,
+    PositionedInlineBox, PreparedRasterStyle, RasterStyleRequest, RasterizedGlyph,
+    RenderGlyphParams, ResolvedDirection, ShapedGlyph, Size, TextAlign, TextBoundary as Boundary,
+    TextDirection as Direction, TextLayoutOptions, TextLayoutRequest, TextMovement, TextRangeExt,
+    TextRenderingMode, TextRun, TextSelectionKind, UnicodeBidi, VisualDirection, VisualLine,
+    WordBreak, align_inline_boxes, is_paragraph_separator, point, px, size,
 };
 use parking_lot::{Mutex, RwLock};
 use parley::setting::Tag;
@@ -75,6 +76,8 @@ struct ParagraphCacheKey {
     inline_boxes: Vec<InlineBoxRequest>,
     text_styles: Vec<InlineTextStyle>,
     line_height: Option<Pixels>,
+    word_break: WordBreak,
+    overflow_wrap: OverflowWrap,
 }
 
 struct BoundedCache<Key, Value, const CAPACITY: usize> {
@@ -1749,6 +1752,8 @@ impl ParleyTextSystem {
             alignment_width,
             direction,
             unicode_bidi,
+            word_break,
+            overflow_wrap,
         } = options;
         let wrap = (wrap_width.is_some() || line_clamp.is_some())
             .then_some((wrap_width.unwrap_or(Pixels::MAX), line_clamp));
@@ -1785,6 +1790,8 @@ impl ParleyTextSystem {
             inline_boxes: inline_boxes.to_vec(),
             text_styles: text_styles.to_vec(),
             line_height,
+            word_break,
+            overflow_wrap,
         };
         let result_cache_key = ParagraphResultCacheKey {
             paragraph: cache_key.clone(),
@@ -1856,6 +1863,16 @@ impl ParleyTextSystem {
             let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
             builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
             builder.push_default(StyleProperty::FontSize(f32::from(font_size)));
+            builder.push_default(StyleProperty::WordBreak(match word_break {
+                WordBreak::Normal => parley::style::WordBreak::Normal,
+                WordBreak::KeepAll => parley::style::WordBreak::KeepAll,
+                WordBreak::BreakAll => parley::style::WordBreak::BreakAll,
+            }));
+            builder.push_default(StyleProperty::OverflowWrap(match overflow_wrap {
+                OverflowWrap::Normal => parley::style::OverflowWrap::Normal,
+                OverflowWrap::Anywhere => parley::style::OverflowWrap::Anywhere,
+                OverflowWrap::BreakWord => parley::style::OverflowWrap::BreakWord,
+            }));
 
             let default_optical_settings = self.automatic_optical_sizing.then(|| {
                 [ParleyFontVariation::new(
@@ -2597,6 +2614,87 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn keep_all_preserves_cjk_words_at_wrap_points() {
+        let system = test_system();
+        let text = "가나다 라마바사";
+        let runs = [text_run(text, IBM_PLEX.family)];
+        let prefix = "가나다 라";
+        let prefix_run = [text_run(prefix, IBM_PLEX.family)];
+        let wrap_width = layout_line(&system, prefix, px(16.0), &prefix_run).width + px(1.0);
+
+        let keep_all = layout_with_options(
+            &system,
+            text,
+            px(16.0),
+            &runs,
+            TextLayoutOptions {
+                wrap_width: Some(wrap_width),
+                word_break: WordBreak::KeepAll,
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+        );
+        let normal = layout_with_options(
+            &system,
+            text,
+            px(16.0),
+            &runs,
+            TextLayoutOptions {
+                wrap_width: Some(wrap_width),
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            &text[keep_all.visual_lines[0].text_range.clone()],
+            "가나다 "
+        );
+        assert_eq!(
+            &text[normal.visual_lines[0].text_range.clone()],
+            "가나다 라"
+        );
+    }
+
+    #[test]
+    fn overflow_wrap_anywhere_breaks_unbroken_tokens() {
+        let system = test_system();
+        let text = "abcdefghijklmnopqrstuvwxyzabcdefghijklmn";
+        let runs = [text_run(text, IBM_PLEX.family)];
+        let ten_letters = "abcdefghij";
+        let ten_letter_run = [text_run(ten_letters, IBM_PLEX.family)];
+        let wrap_width =
+            layout_line(&system, ten_letters, px(16.0), &ten_letter_run).width + px(1.0);
+
+        let normal = layout_with_options(
+            &system,
+            text,
+            px(16.0),
+            &runs,
+            TextLayoutOptions {
+                wrap_width: Some(wrap_width),
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+        );
+        let anywhere = layout_with_options(
+            &system,
+            text,
+            px(16.0),
+            &runs,
+            TextLayoutOptions {
+                wrap_width: Some(wrap_width),
+                overflow_wrap: OverflowWrap::Anywhere,
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(normal.visual_lines.len(), 1);
+        assert!(anywhere.visual_lines.len() > 1);
     }
 
     #[test]

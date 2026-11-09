@@ -6,9 +6,10 @@
 
 use gpui::{
     AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ColorSpace, ContentMask, Corners,
-    DevicePixels, Edges, Hsla, MonochromeSprite, PlatformHeadlessRenderer, Point, PolychromeSprite,
-    Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool,
-    Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient, solid_background,
+    DevicePixels, Edges, FrameLoop, Hsla, MonochromeSprite, PlatformHeadlessRenderer, Point,
+    PolychromeSprite, Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene,
+    ShaderBool, Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient,
+    solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;
@@ -178,6 +179,7 @@ fn every_primitive_kind_renders() {
         color: green.into(),
         tile: mono,
         transformation: Default::default(),
+        frames: FrameLoop::NONE,
     });
     // 6. Polychrome sprite (red image).
     let poly_bounds = bounds(50.0, 60.0, 30.0, 30.0);
@@ -190,6 +192,7 @@ fn every_primitive_kind_renders() {
         content_mask: full_mask(),
         corner_radii: Default::default(),
         tile: poly,
+        frames: FrameLoop::NONE,
     });
     // 7. A second quad batch. Overlapping the image pushes this quad above it in draw
     //    order, so it starts past the first quads in the frame's quad buffer: a backend
@@ -389,6 +392,7 @@ fn smoothed_primitives_share_one_contour() {
         content_mask,
         corner_radii: radii,
         tile: image_tile,
+        frames: FrameLoop::NONE,
     });
 
     let drop_element = bounds(20.0, 96.0, 50.0, 44.0);
@@ -456,6 +460,7 @@ fn smoothed_primitives_share_one_contour() {
         filters: smallvec![ScaledFilter::Blur(ScaledPixels(5.0))],
         opacity: 1.0,
         lens: Default::default(),
+        appear: None,
         wallpaper: None,
     });
 

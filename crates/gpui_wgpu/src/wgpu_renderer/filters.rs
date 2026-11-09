@@ -1,5 +1,5 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
-use gpui::{Bounds, Corners, ScaledPixels};
+use gpui::{Bounds, Corners, Point, ScaledPixels};
 use gpui_render::shaders::interface as shader_interface;
 use gpui_render::{
     blur::{
@@ -20,7 +20,7 @@ pub(super) struct FrameUniformRequirements {
     pub(super) surface_count: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 432);
+const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 480);
 
 impl WgpuRenderer {
     pub(super) fn draw_filter_pass(
@@ -37,7 +37,7 @@ impl WgpuRenderer {
         let resources = self.resources();
         let uniform_offset = resources.filter_uniforms.write(&uniforms);
         let bind_group = resources.blur_bind_group(source);
-        let mut pass = begin_color_render_pass(encoder, label, target, load);
+        let mut pass = begin_color_render_pass(encoder, label, target, load, scissor);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(
             shader_interface::GLOBAL_BIND_GROUP,
@@ -50,10 +50,6 @@ impl WgpuRenderer {
             &[uniform_offset],
         );
 
-        if let Some(scissor) = scissor {
-            pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
-        }
-
         pass.draw(0..pipeline.fixed_vertex_count(), 0..1);
     }
 
@@ -63,6 +59,9 @@ impl WgpuRenderer {
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
+        blurred_ready: bool,
+        target_load: wgpu::LoadOp<wgpu::Color>,
+        target_scissor: Option<ScissorRectangle>,
     ) {
         if parameters.blur_radius <= 0.0
             && !parameters.lens.is_active()
@@ -74,7 +73,15 @@ impl WgpuRenderer {
         let full_size = [self.target.width() as f32, self.target.height() as f32];
 
         let Some(kernel) = BlurKernel::for_radius(parameters.blur_radius) else {
-            self.composite_texture(encoder, source, target, parameters, full_size);
+            self.composite_texture(
+                encoder,
+                source,
+                target,
+                parameters,
+                full_size,
+                target_load,
+                target_scissor,
+            );
 
             return;
         };
@@ -110,43 +117,53 @@ impl WgpuRenderer {
             }
         };
 
-        self.draw_filter_pass(
-            encoder,
-            "blur_downsample",
-            &self.resources().pipelines.blur_downsample,
-            &horizontal_target,
-            source,
-            BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-            // No clear for backdrops: each pass writes its whole scissor, and the composite only
-            // reads texels the passes wrote (the bounds lie 3 sigma inside the scissor), so
-            // whatever an earlier lens left outside it is never sampled; a full clear per pass
-            // per lens cost more than the passes. Content blurs composite out to the scissor's
-            // edge, so they keep the clear (transparent outside).
-            load,
-            Some(scissor),
-        );
-        self.draw_filter_pass(
-            encoder,
-            "blur_horizontal",
-            &self.resources().pipelines.blur,
-            &vertical_target,
-            &horizontal_target,
-            BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
-            load,
-            Some(scissor),
-        );
-        self.draw_filter_pass(
-            encoder,
-            "blur_vertical",
-            &self.resources().pipelines.blur,
-            &horizontal_target,
-            &vertical_target,
-            BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
-            load,
-            Some(scissor),
-        );
+        if !blurred_ready {
+            self.draw_filter_pass(
+                encoder,
+                "blur_downsample",
+                &self.resources().pipelines.blur_downsample,
+                &horizontal_target,
+                source,
+                BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
+                // No clear for backdrops: each pass writes its whole scissor, and the composite only
+                // reads texels the passes wrote (the bounds lie 3 sigma inside the scissor), so
+                // whatever an earlier lens left outside it is never sampled; a full clear per pass
+                // per lens cost more than the passes. Content blurs composite out to the scissor's
+                // edge, so they keep the clear (transparent outside).
+                load,
+                Some(scissor),
+            );
+            self.draw_filter_pass(
+                encoder,
+                "blur_horizontal",
+                &self.resources().pipelines.blur,
+                &vertical_target,
+                &horizontal_target,
+                BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
+                load,
+                Some(scissor),
+            );
+            self.draw_filter_pass(
+                encoder,
+                "blur_vertical",
+                &self.resources().pipelines.blur,
+                &horizontal_target,
+                &vertical_target,
+                BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
+                load,
+                Some(scissor),
+            );
+        }
 
-        self.composite_texture(encoder, &horizontal_target, target, parameters, blur_size);
+        self.composite_texture(
+            encoder,
+            &horizontal_target,
+            target,
+            parameters,
+            full_size,
+            target_load,
+            target_scissor,
+        );
         if parameters.lens.is_active() && parameters.lens.sharp_rim > 0.0 {
             self.composite_texture_with(
                 encoder,
@@ -155,6 +172,8 @@ impl WgpuRenderer {
                 parameters,
                 full_size,
                 parameters.lens.sharp_rim,
+                wgpu::LoadOp::Load,
+                target_scissor,
             );
         }
     }
@@ -166,10 +185,22 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
+        load: wgpu::LoadOp<wgpu::Color>,
+        scissor: Option<ScissorRectangle>,
     ) {
-        self.composite_texture_with(encoder, source, target, parameters, source_size, 0.0);
+        self.composite_texture_with(
+            encoder,
+            source,
+            target,
+            parameters,
+            source_size,
+            0.0,
+            load,
+            scissor,
+        );
     }
 
+    /// `scissor` limits the pass to a damage rectangle of `target`.
     /// `sharp_rim` > 0: the lens's sharp-rim pass (see `BlurUniforms::with_sharp_rim_pass`).
     fn composite_texture_with(
         &self,
@@ -179,6 +210,8 @@ impl WgpuRenderer {
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
         sharp_rim: f32,
+        load: wgpu::LoadOp<wgpu::Color>,
+        scissor: Option<ScissorRectangle>,
     ) {
         let clips_to_bounds = matches!(parameters.clip, FilterCompositeClip::RoundedBounds);
         let composite_bounds = if clips_to_bounds {
@@ -188,7 +221,7 @@ impl WgpuRenderer {
                 GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * parameters.blur_radius,
             ))
         };
-        let uniforms = BlurUniforms::composite(
+        let mut uniforms = BlurUniforms::composite(
             composite_bounds,
             parameters.content_mask,
             parameters.corner_radii,
@@ -196,10 +229,19 @@ impl WgpuRenderer {
             parameters.opacity,
             parameters.clip,
             source_size,
-            [self.target.width() as f32, self.target.height() as f32],
+            {
+                let size = self.target.viewport_size();
+                [size.width.0 as f32, size.height.0 as f32]
+            },
         )
         .with_lens(parameters.lens)
+        .with_composite_scale(parameters.scale, parameters.scale_origin)
         .with_sharp_rim_pass(sharp_rim);
+        uniforms.composite_offset = wgsl_rs::std::vec2f(
+            parameters.composite_offset.x.0,
+            parameters.composite_offset.y.0,
+        );
+        uniforms.composite_rotation = parameters.composite_rotation;
         let resources = self.resources();
         let pipeline = if uniforms.corner_smoothing > 0.0 {
             &resources.pipelines.smoothed_blur_composite
@@ -214,8 +256,8 @@ impl WgpuRenderer {
             target,
             source,
             uniforms,
-            wgpu::LoadOp::Load,
-            None,
+            load,
+            scissor,
         );
     }
 
@@ -273,10 +315,16 @@ impl WgpuRenderer {
                     corner_smoothing: 0.0,
                     blur_radius: 0.0,
                     opacity: 1.0,
+                    scale: 1.0,
+                    scale_origin: Point::default(),
+                    composite_offset: Point::default(),
+                    composite_rotation: 0.0,
                     clip: FilterCompositeClip::ContentShape,
                     lens: Default::default(),
                 },
                 full_size,
+                wgpu::LoadOp::Load,
+                None,
             );
         }
 

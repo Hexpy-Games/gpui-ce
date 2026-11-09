@@ -160,6 +160,7 @@ pub use profiler::*;
 pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
 pub use scene::*;
+pub use scene::{LayerMotion, LayerMotionSample};
 pub use shared_uri::*;
 use std::{any::Any, future::Future};
 pub use style::*;

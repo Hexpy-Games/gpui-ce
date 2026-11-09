@@ -1,17 +1,18 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, BackdropLens, Background,
-    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
-    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
-    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
-    Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
-    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropAppear, BackdropFilter, BackdropLens,
+    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
+    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs,
+    InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, LiveLayer, LivePaint, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem, Priority,
+    PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
     Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
     Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
@@ -1147,6 +1148,9 @@ pub(crate) struct Frame {
     cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    /// `debug_bounds` in insertion order, so a reused paint range records its selectors again.
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_history: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1174,9 +1178,18 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
+    /// Records `selector`'s bounds for [`crate::VisualTestContext::debug_bounds`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn insert_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.debug_bounds.insert(selector.clone(), bounds);
+        self.debug_bounds_history.push((selector, bounds));
+    }
+
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -1196,6 +1209,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_history: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1225,6 +1240,7 @@ impl Frame {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_bounds_history.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1320,6 +1336,7 @@ pub struct Window {
     pub(crate) measurement_unicode_bidi: UnicodeBidi,
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+    element_scale_stack: Vec<(f32, Point<Pixels>)>,
     /// Bounds of the parent `Div` currently prepainting this element as one of its children.
     /// Inset transitions use these bounds to resolve `auto` from the child's rendered position.
     style_transition_containing_bounds: Option<Bounds<Pixels>>,
@@ -1332,6 +1349,10 @@ pub struct Window {
     focused_text_input: Option<FocusId>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
+    last_frame_ms: Cell<u32>,
+    last_live_frame_ms: Cell<u32>,
+    layout_transition_until: Cell<u32>,
+    covered_live_keys: FxHashSet<u64>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
@@ -1873,12 +1894,48 @@ impl Window {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
                         .log_err();
+                } else {
+                    // Nothing changed but the scene carries animated primitives: the GPU
+                    // advances them, so present the same scene again.
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            let now = crate::animation_time_ms();
+                            if window.rendered_frame.scene.has_animations()
+                                && window
+                                    .rendered_frame
+                                    .scene
+                                    .retained_changes_between(window.last_frame_ms.get(), now)
+                            {
+                                window
+                                    .platform_window
+                                    .draw_animation_frame(&window.rendered_frame.scene);
+                                window.last_frame_ms.set(now);
+                            }
+                            if !window.rendered_frame.scene.live_layers().is_empty()
+                                && now.wrapping_sub(window.last_live_frame_ms.get()) >= 16
+                            {
+                                window
+                                    .platform_window
+                                    .draw_live_layers(&window.rendered_frame.scene);
+                                window.last_live_frame_ms.set(now);
+                            }
+                        })
+                        .log_err();
                 }
 
+                let animating = handle
+                    .update(&mut cx, |_, window, _| {
+                        window
+                            .rendered_frame
+                            .scene
+                            .animating_at(window.last_frame_ms.get())
+                    })
+                    .unwrap_or(false);
                 handle
                     .update(&mut cx, |_, window, _| {
                         if window.invalidator.is_dirty()
                             || !window.next_frame_callbacks.borrow().is_empty()
+                            || animating
                         {
                             window.platform_window.schedule_frame();
                         }
@@ -1890,7 +1947,8 @@ impl Window {
                 // after this frame (the window was re-invalidated mid-draw, or
                 // animations scheduled next-frame callbacks), re-arm the frame
                 // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() || animating
+                {
                     invalidator.wake_platform();
                 }
             }
@@ -2077,11 +2135,16 @@ impl Window {
             measurement_unicode_bidi: UnicodeBidi::Normal,
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
+            element_scale_stack: Vec::new(),
             style_transition_containing_bounds: None,
             content_mask_stack: Vec::new(),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
+            last_frame_ms: Cell::new(0),
+            last_live_frame_ms: Cell::new(0),
+            layout_transition_until: Cell::new(0),
+            covered_live_keys: FxHashSet::default(),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
@@ -3268,6 +3331,9 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        self.next_frame.scene.scale_factor = self.scale_factor();
+        self.next_frame.scene.offload_animations =
+            self.platform_window.supports_compositor_sprites();
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
             #[cfg(feature = "profiler")]
@@ -3372,7 +3438,20 @@ impl Window {
         if self.focus != focus_before_listeners {
             self.refresh();
         }
+        let newly_covered = self
+            .rendered_frame
+            .scene
+            .covered_live_keys()
+            .difference(&self.covered_live_keys)
+            .next()
+            .is_some();
+        self.covered_live_keys = self.rendered_frame.scene.covered_live_keys().clone();
+        if newly_covered {
+            self.refresh();
+        }
         self.needs_present.set(true);
+        self.last_frame_ms.set(crate::animation_time_ms());
+        self.last_live_frame_ms.set(self.last_frame_ms.get());
 
         #[cfg(feature = "profiler")]
         {
@@ -3808,6 +3887,21 @@ impl Window {
         }
     }
 
+    /// How many element states the frame being drawn has used so far.
+    pub(crate) fn element_states_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// Keeps the element states of `range` of the rendered frame for the frame being drawn, as
+    /// if they were used again, and returns where they now sit.
+    pub(crate) fn reuse_element_states(&mut self, range: Range<usize>) -> Range<usize> {
+        let start = self.next_frame.accessed_element_states.len();
+        self.next_frame
+            .accessed_element_states
+            .extend_from_slice(&self.rendered_frame.accessed_element_states[range]);
+        start..self.next_frame.accessed_element_states.len()
+    }
+
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
@@ -3869,10 +3963,19 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_history.len(),
         }
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_history
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+        {
+            self.next_frame
+                .insert_debug_bounds(selector.clone(), *bounds);
+        }
         Rc::make_mut(&mut self.next_frame.pointer_observers).extend(
             self.rendered_frame.pointer_observers
                 [range.start.pointer_observers_index..range.end.pointer_observers_index]
@@ -4068,6 +4171,23 @@ impl Window {
         result
     }
 
+    pub(crate) fn with_element_scale_hitboxes<R>(
+        &mut self,
+        scale: Option<f32>,
+        origin: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_prepaint();
+        let Some(scale) = scale.filter(|scale| *scale != 1.0) else {
+            return f(self);
+        };
+
+        self.element_scale_stack.push((scale, origin));
+        let result = f(self);
+        self.element_scale_stack.pop();
+        result
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
@@ -4094,7 +4214,124 @@ impl Window {
             corner_smoothing: 0.0,
             filters: SmallVec::new(),
             opacity,
+            scale: 1.0,
+            scale_origin: Point::default(),
+            motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
+            inline: false,
+        };
+
+        self.with_filter_boundary(boundary, paint)
+    }
+
+    /// Lets elements with a [`crate::LayoutMotion`] animate layout changes that happen in the
+    /// next `duration_ms`. Call it when a deliberate layout transition starts (an expand, a
+    /// panel opening); layout changes outside such a window jump, so content that merely
+    /// grows does not glide.
+    pub fn animate_layout(&self, duration_ms: u32) {
+        let until = crate::animation_time_ms().wrapping_add(duration_ms);
+        let current = self.layout_transition_until.get();
+        if !self.layout_transition_active(crate::animation_time_ms())
+            || until.wrapping_sub(current) < 1 << 31
+        {
+            self.layout_transition_until.set(until);
+        }
+    }
+
+    /// Whether a layout transition started by [`Self::animate_layout`] is open at `now_ms`.
+    pub fn layout_transition_active(&self, now_ms: u32) -> bool {
+        self.layout_transition_until.get().wrapping_sub(now_ms) < 1 << 31
+    }
+
+    /// Paints a retained subtree with a time-driven composite transform.
+    pub fn with_motion<R>(
+        &mut self,
+        motion: crate::LayerMotion,
+        bounds: Bounds<Pixels>,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if !motion.is_animated() {
+            return paint(self);
+        }
+        let parent = self.content_mask();
+        let viewport = Bounds::new(Point::default(), self.viewport_size());
+        let scale_origin = point(
+            bounds.origin.x + bounds.size.width * motion.origin.x,
+            bounds.origin.y + bounds.size.height * motion.origin.y,
+        )
+        .scale(self.scale_factor());
+        let motion_bounds = bounds.scale(self.scale_factor());
+        let bounds = self.cover_bounds(viewport);
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds,
+            content_mask: ContentMask {
+                bounds: self.cover_bounds(parent.bounds),
+                fade_out: parent.fade_out.scale(self.scale_factor()),
+            },
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin,
+            motion,
+            motion_bounds,
+            is_start: true,
+            inline: false,
+        };
+        // Only a motion that moves pixels needs its children unclipped, so the parent clip can
+        // apply after the move; a fade keeps the clip on the children (small painted bounds).
+        let moves = motion.offset.0 != motion.offset.1
+            || motion.offset.0 != Point::default()
+            || motion.relative_offset.0 != motion.relative_offset.1
+            || motion.relative_offset.0 != Point::default()
+            || motion.scale != (1.0, 1.0)
+            || motion.rotation != (0.0, 0.0);
+        self.with_filter_boundary(boundary, |window| {
+            if !moves {
+                return paint(window);
+            }
+            window.content_mask_stack.push(ContentMask {
+                bounds: viewport,
+                fade_out: Edges::default(),
+            });
+            let result = paint(window);
+            window.content_mask_stack.pop();
+            result
+        })
+    }
+
+    pub(crate) fn with_element_scale<R>(
+        &mut self,
+        scale: Option<f32>,
+        origin: Point<Pixels>,
+        paint: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        let Some(scale) = scale.filter(|scale| *scale != 1.0) else {
+            return paint(self);
+        };
+
+        let bounds = self.cover_bounds(Bounds::new(Point::default(), self.viewport_size()));
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds,
+            content_mask: ContentMask {
+                bounds,
+                fade_out: Edges::default(),
+            },
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale,
+            scale_origin: origin.scale(self.scale_factor()),
+            motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
+            is_start: true,
+            inline: false,
         };
 
         self.with_filter_boundary(boundary, paint)
@@ -4668,6 +4905,79 @@ impl Window {
             filters,
             opacity: 1.0,
             lens,
+            appear: None,
+            wallpaper: None,
+        });
+    }
+
+    /// Paints a backdrop lens whose lens and blur interpolate from the given starting values.
+    /// `filters` must contain exactly one [`Filter::Blur`], giving the final blur radius.
+    /// Starting lens lengths and blur are in logical pixels, as in [`Self::paint_backdrop_lens`].
+    pub fn paint_backdrop_lens_appearing(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_smoothing: f32,
+        filters: &[Filter],
+        lens: BackdropLens,
+        from_lens: BackdropLens,
+        from_blur: Pixels,
+        motion: crate::LayerMotion,
+    ) {
+        if !motion.is_animated() {
+            self.paint_backdrop_lens(bounds, corner_radii, corner_smoothing, filters, lens);
+            return;
+        }
+        assert!(matches!(filters, [Filter::Blur(_)]));
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let filters: SmallVec<[ScaledFilter; 4]> = filters
+            .iter()
+            .filter(|filter| !filter.is_identity())
+            .map(|filter| filter.scale(scale_factor))
+            .collect();
+        if filters.is_empty() && !lens.is_active() {
+            return;
+        }
+        let lens = BackdropLens {
+            bezel: lens.bezel * scale_factor,
+            refraction: lens.refraction * scale_factor,
+            frost: lens.frost * scale_factor,
+            rim: lens.rim * scale_factor,
+            depth: lens.depth * scale_factor,
+            curve: lens.curve * scale_factor,
+            ..lens
+        };
+
+        let from_lens = BackdropLens {
+            bezel: from_lens.bezel * scale_factor,
+            refraction: from_lens.refraction * scale_factor,
+            frost: from_lens.frost * scale_factor,
+            rim: from_lens.rim * scale_factor,
+            depth: from_lens.depth * scale_factor,
+            curve: from_lens.curve * scale_factor,
+            ..from_lens
+        };
+
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: if lens.exact {
+                bounds.scale(scale_factor)
+            } else {
+                self.snap_bounds(bounds)
+            },
+            content_mask: self.snapped_content_mask(),
+            corner_radii: corner_radii.scale(scale_factor),
+            corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
+            filters,
+            opacity: 1.0,
+            lens,
+            appear: Some(BackdropAppear {
+                lens: from_lens,
+                blur: f32::from(from_blur) * scale_factor,
+                motion,
+            }),
             wallpaper: None,
         });
     }
@@ -4692,6 +5002,7 @@ impl Window {
             filters: SmallVec::new(),
             opacity: opacity.clamp(0.0, 1.0),
             lens: BackdropLens::default(),
+            appear: None,
             wallpaper: Some(wallpaper),
         });
     }
@@ -4734,7 +5045,12 @@ impl Window {
             corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
             filters,
             opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Point::default(),
+            motion: crate::LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start: true,
+            inline: false,
         };
 
         self.with_filter_boundary(boundary, f)
@@ -4860,6 +5176,27 @@ impl Window {
                 });
             }
         }
+    }
+
+    /// Registers a procedural canvas during painting. Returns false when the previous scene
+    /// covered this key; paint the content into the window and request an animation frame then.
+    pub fn paint_live(
+        &mut self,
+        key: u64,
+        bounds: Bounds<Pixels>,
+        start_ms: u32,
+        paint: LivePaint,
+    ) -> bool {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.scene.insert_live_layer(LiveLayer {
+            key,
+            bounds: bounds.scale(self.scale_factor()),
+            content_mask: self.snapped_content_mask(),
+            order: 0,
+            start_ms,
+            paint,
+        });
+        !self.covered_live_keys.contains(&key)
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
@@ -5014,6 +5351,7 @@ impl Window {
                     color: mask_color.into(),
                     tile,
                     transformation: TransformationMatrix::unit(),
+                    frames: crate::FrameLoop::NONE,
                 });
             }
             RasterizedGlyphFormat::BgraSubpixelMask => {
@@ -5037,6 +5375,7 @@ impl Window {
                     content_mask,
                     tile,
                     opacity: 1.0,
+                    frames: crate::FrameLoop::NONE,
                 });
             }
         }
@@ -5179,8 +5518,116 @@ impl Window {
             color: color.into(),
             tile,
             transformation,
+            frames: crate::FrameLoop::NONE,
         });
 
+        Ok(())
+    }
+
+    /// Paints a looping flipbook in `bounds`. The first paint rasterizes `frame(i)` (SVG bytes of
+    /// frame i) for every frame into one atlas grid, cached by `key`, device size, frame count and
+    /// colour mode. `Some(color)` tints an alpha mask (monochrome sprite); `None` keeps the SVG's
+    /// colours (polychrome sprite). The scene then stays unchanged while the loop plays.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_svg_frames(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        key: SharedString,
+        frames: crate::FrameSpec,
+        frame: &dyn Fn(usize) -> Vec<u8>,
+        color: Option<Hsla>,
+        cx: &App,
+    ) -> Result<()> {
+        // Largest grid side; under every backend's atlas texture limit.
+        const MAX_GRID_SIDE: usize = 4096;
+
+        self.invalidator.debug_assert_paint();
+        anyhow::ensure!(
+            frames.frame_count > 0,
+            "a flipbook needs at least one frame"
+        );
+
+        // Rasterize 1:1 with the device pixels, so a cell maps pixel for pixel onto the sprite.
+        let bounds = self.snap_bounds(bounds);
+        let size = bounds.size.map(|value| DevicePixels(value.0.ceil() as i32));
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            return Ok(());
+        }
+        let gutter = 2 * crate::FRAME_GUTTER as usize;
+        let cell_width = size.width.0 as usize + gutter;
+        let cell_height = size.height.0 as usize + gutter;
+        let columns = (MAX_GRID_SIDE / cell_width).clamp(1, frames.frame_count);
+        let rows = frames.frame_count.div_ceil(columns);
+        anyhow::ensure!(
+            columns * cell_width <= MAX_GRID_SIDE && rows * cell_height <= MAX_GRID_SIDE,
+            "a flipbook of {} frames at {}x{} does not fit one atlas tile",
+            frames.frame_count,
+            size.width.0,
+            size.height.0,
+        );
+
+        let polychrome = color.is_none();
+        let params = crate::RenderFramesParams {
+            key,
+            size,
+            frame_count: frames.frame_count,
+            polychrome,
+        };
+        let Some(tile) =
+            self.sprite_atlas
+                .get_or_insert_with(&crate::AtlasKey::Frames(params), &mut || {
+                    let (grid_size, bytes) = cx.svg_renderer.render_frame_grid(
+                        size,
+                        frames.frame_count,
+                        columns,
+                        polychrome,
+                        frame,
+                    )?;
+                    Ok(Some((grid_size, Cow::Owned(bytes))))
+                })?
+        else {
+            return Ok(());
+        };
+
+        let millis = |duration: std::time::Duration| {
+            u32::try_from(duration.as_millis())
+                .unwrap_or(u32::MAX)
+                .max(1)
+        };
+        let frame_loop = crate::FrameLoop {
+            frame_count: frames.frame_count as u32,
+            columns: columns as u32,
+            period_ms: millis(frames.period),
+            start_ms: frames.start_ms,
+            turn_period_ms: frames.turn.map_or(0, millis),
+            padding: 0,
+        };
+        let content_mask = self.snapped_content_mask();
+        if let Some(color) = color {
+            self.next_frame.scene.insert_primitive(MonochromeSprite {
+                order: 0,
+                padding: 0,
+                bounds,
+                content_mask,
+                color: color.into(),
+                tile,
+                transformation: TransformationMatrix::unit(),
+                frames: frame_loop,
+            });
+        } else {
+            self.next_frame.scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                grayscale: false.into(),
+                corner_smoothing: 0.0,
+                bounds,
+                corner_radii: Default::default(),
+                content_mask,
+                tile,
+                opacity: 1.0,
+                frames: frame_loop,
+            });
+        }
         Ok(())
     }
 
@@ -5287,6 +5734,7 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity: 1.0,
+            frames: crate::FrameLoop::NONE,
         });
         Ok(())
     }
@@ -5639,6 +6087,14 @@ impl Window {
     ) -> &mut Hitbox {
         self.invalidator.debug_assert_prepaint();
 
+        let bounds =
+            self.element_scale_stack
+                .iter()
+                .rev()
+                .fold(bounds, |bounds, (scale, origin)| Bounds {
+                    origin: *origin + (bounds.origin - *origin) * *scale,
+                    size: size(bounds.size.width * *scale, bounds.size.height * *scale),
+                });
         let content_mask = self.content_mask();
         let hitbox_id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
@@ -6965,6 +7421,19 @@ impl Window {
         cx.prompt_builder = Some(prompt_builder);
 
         receiver
+    }
+
+    /// Show a native popup menu at the provided anchor bounds.
+    ///
+    /// Returns `None` when the platform does not support native popup menus. A returned receiver
+    /// resolves to the selected item index, or `None` when the menu is dismissed.
+    pub fn popup_menu(
+        &self,
+        items: &[PopupMenuItem],
+        selected: Option<usize>,
+        anchor: Bounds<Pixels>,
+    ) -> Option<oneshot::Receiver<Option<usize>>> {
+        self.platform_window.popup_menu(items, selected, anchor)
     }
 
     fn build_custom_prompt(
@@ -9771,5 +10240,52 @@ mod tests {
             assert_eq!(renders.get(), initial_renders);
             assert_eq!(paints.get(), initial_paints);
         }
+    }
+
+    struct KeyedStateChild {
+        seen: Rc<RefCell<Vec<EntityId>>>,
+    }
+
+    impl Render for KeyedStateChild {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let state = window.use_keyed_state("kept", cx, |_, _| 0usize);
+            self.seen.borrow_mut().push(state.entity_id());
+            div().size(px(10.0))
+        }
+    }
+
+    struct KeyedStateParent {
+        child: Entity<KeyedStateChild>,
+    }
+
+    impl Render for KeyedStateParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut child_style = div().size(px(10.0));
+            div().size(px(20.0)).child(
+                self.child
+                    .clone()
+                    .cached(child_style.style().clone())
+                    .into_any_element(),
+            )
+        }
+    }
+
+    #[test]
+    fn cached_view_keeps_render_time_state_across_reuse() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let mut app = TestApp::new();
+        let mut test_window = app.open_window(|_, cx| KeyedStateParent {
+            child: cx.new(|_| KeyedStateChild { seen: seen.clone() }),
+        });
+        test_window.draw();
+        // The parent redraws and reuses the cached child as it is.
+        test_window.update(|_, _, cx| cx.notify());
+        test_window.draw();
+        // The child renders again: the state it keyed during render is still the same entity.
+        test_window.update(|parent, _, cx| parent.child.update(cx, |_, cx| cx.notify()));
+        test_window.draw();
+        let seen = seen.borrow();
+        assert!(seen.len() >= 2, "the child rendered {} times", seen.len());
+        assert!(seen.windows(2).all(|pair| pair[0] == pair[1]));
     }
 }

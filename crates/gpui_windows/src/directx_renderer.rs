@@ -1,5 +1,6 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use std::{
+    cell::RefCell,
     slice,
     sync::{Arc, OnceLock},
 };
@@ -26,7 +27,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HMODULE, HWND},
+        Foundation::{FreeLibrary, HMODULE, HWND, POINT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -74,6 +75,11 @@ pub(crate) struct DirectXRenderer {
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
+    /// Visuals that draw the scene's compositor sprites (DirectComposition only).
+    compositor: compositor::CompositorVisuals,
+    group_pixels: FxHashMap<u64, (Size<DevicePixels>, Arc<[u8]>)>,
+    live: FxHashMap<u64, LiveSurface>,
+    last_live_frame_ms: u32,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -94,6 +100,14 @@ pub(crate) struct DirectXRenderer {
     path_sprites: Vec<PathSprite>,
     /// Cached wallpaper pass targets and noise textures (wallpapers.rs).
     wallpapers: wallpapers::DxWallpaperCacheCell,
+    /// The animation clock the shaders read, in milliseconds.
+    animation_time_ms: u32,
+    /// Generation of the scene whose complete frame the offscreen scene target holds.
+    retained: Option<u64>,
+    /// Generation and backdrop-cache keys of the last full encode; damage ticks reuse them.
+    frame_keys: (u64, Vec<Option<u64>>),
+    /// The damage rectangle every draw is clipped to while a damage redraw runs.
+    damage_scissor: Option<windows::Win32::Foundation::RECT>,
 }
 
 /// Direct3D objects
@@ -155,7 +169,6 @@ impl PathResources {
 }
 
 struct ColorTarget {
-    #[expect(dead_code)]
     texture: ID3D11Texture2D,
     target: Option<ID3D11RenderTargetView>,
     source: Option<ID3D11ShaderResourceView>,
@@ -167,6 +180,8 @@ struct BlurResources {
     scratch: Option<[ColorTarget; 2]>,
     snapshot: Option<ColorTarget>,
     groups: Vec<ColorTarget>,
+    /// Blurred backdrops kept across frames; dropped with these resources.
+    cache: RefCell<DxBackdropCache>,
 }
 
 struct DirectXRenderPipelines {
@@ -244,6 +259,13 @@ impl Drop for Annotation<'_> {
     }
 }
 
+struct LiveSurface {
+    surface: IDCompositionSurface,
+    clip: IDCompositionVisual,
+    visual: IDCompositionVisual,
+    size: Size<DevicePixels>,
+}
+
 struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
@@ -319,6 +341,10 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            compositor: Default::default(),
+            group_pixels: FxHashMap::default(),
+            live: FxHashMap::default(),
+            last_live_frame_ms: gpui::animation_time_ms().wrapping_sub(16),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -327,6 +353,10 @@ impl DirectXRenderer {
             path_rasterization_vertices: Vec::new(),
             path_sprites: Vec::new(),
             wallpapers: Default::default(),
+            animation_time_ms: 0,
+            retained: None,
+            frame_keys: (0, Vec::new()),
+            damage_scissor: None,
         })
     }
 
@@ -334,7 +364,12 @@ impl DirectXRenderer {
         self.atlas.clone()
     }
 
-    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+    pub(crate) fn supports_compositor_sprites(&self) -> bool {
+        self.direct_composition.is_some()
+    }
+
+    /// Uploads the per-frame global and font constants.
+    fn upload_globals(&self) -> Result<()> {
         let resources = self.resources.as_ref().expect("resources missing");
         let device_context = &self
             .devices
@@ -349,7 +384,7 @@ impl DirectXRenderer {
                 // DirectComposition wants premultiplied output, but path rasterization
                 // premultiplies in-shader; scene geometry blends straight alpha as before.
                 premultiplied_alpha: ShaderBool::Disabled,
-                padding: 0,
+                animation_time_ms: self.animation_time_ms,
             }],
         )?;
         update_buffer(
@@ -368,6 +403,17 @@ impl DirectXRenderer {
                 padding: 0,
             }],
         )?;
+        Ok(())
+    }
+
+    fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
+        self.upload_globals()?;
+        let resources = self.resources.as_ref().expect("resources missing");
+        let device_context = &self
+            .devices
+            .as_ref()
+            .expect("devices missing")
+            .device_context;
         unsafe {
             device_context.ClearRenderTargetView(
                 resources
@@ -425,6 +471,9 @@ impl DirectXRenderer {
                     .log_err();
             }
 
+            self.compositor.clear();
+            self.group_pixels.clear();
+            self.live.clear();
             self.direct_composition.take();
             self.devices.take();
         }
@@ -467,6 +516,7 @@ impl DirectXRenderer {
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
+        self.retained = None;
         Ok(())
     }
 
@@ -480,8 +530,217 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        self.group_pixels.retain(|key, _| {
+            scene
+                .compositor_groups()
+                .iter()
+                .any(|group| group.key == *key)
+        });
+        let mut sprites = scene.compositor_sprites().to_vec();
+        let mut keys = vec![None; sprites.len()];
+        for group in scene.compositor_groups() {
+            let pixels = match self.group_pixels.get(&group.key) {
+                Some(pixels) => pixels.clone(),
+                None => {
+                    let Some(pixels) = self.rasterize(&group.scene, group.rect) else {
+                        continue;
+                    };
+                    self.group_pixels.insert(group.key, pixels.clone());
+                    pixels
+                }
+            };
+            let mut motion = group.motion;
+            motion.origin = point(
+                (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
+                (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
+            );
+            let offset = |offset: gpui::Point<gpui::Pixels>, relative: gpui::Point<f32>| {
+                offset * scene.scale_factor
+                    + point(
+                        gpui::px(group.motion_bounds.size.width.0 * relative.x),
+                        gpui::px(group.motion_bounds.size.height.0 * relative.y),
+                    )
+            };
+            motion.offset = (
+                offset(motion.offset.0, motion.relative_offset.0),
+                offset(motion.offset.1, motion.relative_offset.1),
+            );
+            motion.relative_offset = (point(0.0, 0.0), point(0.0, 0.0));
+            motion.clip = motion.clip.map(|(from, to)| {
+                let insets = |edges: gpui::Edges<gpui::Pixels>| gpui::Edges {
+                    left: gpui::px(group.motion_bounds.left().0 - group.rect.left().0)
+                        + edges.left * scene.scale_factor,
+                    top: gpui::px(group.motion_bounds.top().0 - group.rect.top().0)
+                        + edges.top * scene.scale_factor,
+                    right: gpui::px(group.rect.right().0 - group.motion_bounds.right().0)
+                        + edges.right * scene.scale_factor,
+                    bottom: gpui::px(group.rect.bottom().0 - group.motion_bounds.bottom().0)
+                        + edges.bottom * scene.scale_factor,
+                };
+                (insets(from), insets(to))
+            });
+            sprites.push(CompositorSprite {
+                contents: SpriteContents::Pixels {
+                    size: pixels.0,
+                    bytes: pixels.1,
+                },
+                bounds: group.rect,
+                clip: group.content_mask.bounds,
+                color: None,
+                frames: FrameLoop::NONE,
+                motion,
+            });
+            keys.push(Some(group.key));
+        }
+        self.animation_time_ms = gpui::animation_time_ms();
         self.render(scene, background_appearance)?;
-        self.present()
+        self.present()?;
+        let live_changed = self.sync_live_layers(scene)?;
+        if let Some(composition) = &self.direct_composition {
+            let device_context = &self
+                .devices
+                .as_ref()
+                .context("devices missing")?
+                .device_context;
+            if self
+                .compositor
+                .update(composition, device_context, &sprites, &keys, &self.atlas)?
+                || live_changed
+            {
+                // Include visual changes in the commit after live surface uploads.
+                self.last_live_frame_ms = self.animation_time_ms.wrapping_sub(16);
+            }
+        }
+        self.draw_live_layers(scene)?;
+        Ok(())
+    }
+
+    fn sync_live_layers(&mut self, scene: &Scene) -> Result<bool> {
+        let Some(composition) = &self.direct_composition else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        let stale: Vec<_> = self
+            .live
+            .keys()
+            .copied()
+            .filter(|key| !scene.live_layers().iter().any(|layer| layer.key == *key))
+            .collect();
+        for key in stale {
+            let live = self.live.remove(&key).unwrap();
+            unsafe {
+                composition.comp_visual.RemoveVisual(&live.clip)?;
+            }
+            changed = true;
+        }
+        for layer in scene.live_layers() {
+            let size = layer
+                .bounds
+                .size
+                .map(|value| DevicePixels(value.0.ceil() as i32));
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {
+                unsafe {
+                    let surface = composition.comp_device.CreateSurface(
+                        size.width.0 as u32,
+                        size.height.0 as u32,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    )?;
+                    let clip = composition.comp_device.CreateVisual()?;
+                    let visual = composition.comp_device.CreateVisual()?;
+                    visual.SetContent(&surface)?;
+                    clip.AddVisual(&visual, true, None)?;
+                    composition.comp_visual.AddVisual(&clip, true, None)?;
+                    entry.insert(LiveSurface {
+                        surface,
+                        clip,
+                        visual,
+                        size,
+                    });
+                }
+                changed = true;
+            }
+            let live = self.live.get_mut(&layer.key).unwrap();
+            if live.size != size {
+                unsafe {
+                    live.surface = composition.comp_device.CreateSurface(
+                        size.width.0 as u32,
+                        size.height.0 as u32,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    )?;
+                    live.visual.SetContent(&live.surface)?;
+                }
+                live.size = size;
+            }
+            let clip = layer.content_mask.bounds;
+            unsafe {
+                live.clip.SetOffsetX2(clip.origin.x.0)?;
+                live.clip.SetOffsetY2(clip.origin.y.0)?;
+                let rect = composition.comp_device.CreateRectangleClip()?;
+                rect.SetLeft2(0.0)?;
+                rect.SetTop2(0.0)?;
+                rect.SetRight2(clip.size.width.0)?;
+                rect.SetBottom2(clip.size.height.0)?;
+                live.clip.SetClip(&rect)?;
+                live.visual
+                    .SetOffsetX2(layer.bounds.origin.x.0 - clip.origin.x.0)?;
+                live.visual
+                    .SetOffsetY2(layer.bounds.origin.y.0 - clip.origin.y.0)?;
+            }
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn draw_live_layers(&mut self, scene: &Scene) -> Result<()> {
+        let now = gpui::animation_time_ms();
+        if now.wrapping_sub(self.last_live_frame_ms) < 16 {
+            return Ok(());
+        }
+        self.last_live_frame_ms = now;
+        let Some(composition) = &self.direct_composition else {
+            return Ok(());
+        };
+        let devices = self.devices.as_ref().context("devices missing")?;
+        for layer in scene.live_layers() {
+            let live = self.live.get(&layer.key).context("live surface missing")?;
+            let mut canvas = LiveCanvas {
+                ops: Vec::new(),
+                scale_factor: scene.scale_factor,
+                size: layer
+                    .bounds
+                    .size
+                    .map(|value| px(value.0 / scene.scale_factor)),
+            };
+            (layer.paint)(
+                now.wrapping_sub(layer.start_ms) as f32 / 1000.0,
+                &mut canvas,
+            );
+            let (width, height) = (live.size.width.0 as u32, live.size.height.0 as u32);
+            let pixels = rasterize_live(&canvas.ops, width, height);
+            let mut offset = POINT::default();
+            let texture: ID3D11Texture2D = unsafe { live.surface.BeginDraw(None, &mut offset)? };
+            unsafe {
+                devices.device_context.UpdateSubresource(
+                    &texture,
+                    0,
+                    Some(&D3D11_BOX {
+                        left: offset.x as u32,
+                        top: offset.y as u32,
+                        front: 0,
+                        right: offset.x as u32 + width,
+                        bottom: offset.y as u32 + height,
+                        back: 1,
+                    }),
+                    pixels.as_ptr() as _,
+                    width * 4,
+                    0,
+                );
+                live.surface.EndDraw()?;
+            }
+        }
+        unsafe { composition.comp_device.Commit()? };
+        Ok(())
     }
 
     /// Encodes a complete frame without presenting it. Window drawing and test readback share
@@ -491,6 +750,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        self.retained = None;
         self.pre_draw(&match background_appearance {
             appearance if appearance.is_opaque() => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -498,7 +758,7 @@ impl DirectXRenderer {
 
         self.upload_scene_buffers(scene)?;
 
-        let use_offscreen = scene.requires_offscreen_rendering();
+        let use_offscreen = scene.requires_offscreen_rendering() || scene.has_animations();
         let requirements = scene.render_plan().requirements();
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
@@ -552,7 +812,7 @@ impl DirectXRenderer {
                 }
                 ctx.OMSetRenderTargets(Some(slice::from_ref(&scene_rtv)), None);
             }
-            self.active_render_target = scene_rtv.clone();
+            self.active_render_target = scene_rtv;
         } else {
             self.active_render_target = swapchain_rtv.clone();
         }
@@ -562,12 +822,64 @@ impl DirectXRenderer {
             use_offscreen.then(|| scene_srv.clone()).flatten(),
         ));
 
+        self.encode_commands(scene, scene.render_commands(), &mut targets, &groups, None)?;
+
+        // Present the offscreen scene by blitting it into the swapchain.
+        if use_offscreen {
+            self.dx_blit(&scene_srv, &swapchain_rtv)?;
+        }
+        self.active_render_target = None;
+        self.retained = use_offscreen.then(|| scene.generation());
+        Ok(())
+    }
+
+    /// Encodes `commands` (the whole scene, or a damage plan's restricted list) into the targets.
+    /// A full encode also records the frame's backdrop-cache keys for later damage ticks.
+    fn encode_commands(
+        &mut self,
+        scene: &Scene,
+        commands: &[RenderCommand],
+        targets: &mut TargetStack<(
+            Option<ID3D11RenderTargetView>,
+            Option<ID3D11ShaderResourceView>,
+        )>,
+        groups: &[(
+            Option<ID3D11RenderTargetView>,
+            Option<ID3D11ShaderResourceView>,
+        )],
+        damage: Option<&DamageRedraw>,
+    ) -> Result<()> {
+        let damage_scissor = self.damage_scissor;
+        let mut motion_target = None;
+        let ctx = self
+            .devices
+            .as_ref()
+            .context("devices missing")?
+            .device_context
+            .clone();
         let annotation = self
             .devices
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
-        for command in scene.render_commands() {
+        let backdrop_keys = if damage.is_some() {
+            // A damage tick reuses the keys of the full frame it patches.
+            self.frame_keys.1.clone()
+        } else if scene.backdrop_filters.is_empty() {
+            Vec::new()
+        } else {
+            gpui_render::backdrop_key::backdrop_keys(
+                scene,
+                size(
+                    DevicePixels(self.width as i32),
+                    DevicePixels(self.height as i32),
+                ),
+            )
+        };
+        if damage.is_none() {
+            self.frame_keys = (scene.generation(), backdrop_keys.clone());
+        }
+        for command in commands {
             let _annotation = annotation
                 .as_ref()
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(command.label())));
@@ -616,26 +928,55 @@ impl DirectXRenderer {
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     let (current_rtv, current_srv) = targets.current();
                     let result = (|| {
-                        for filter in &scene.backdrop_filters[range.clone()] {
+                        for (index, filter) in scene.backdrop_filters[range.clone()]
+                            .iter()
+                            .enumerate()
+                        {
                             if let Some(paint) = &filter.wallpaper {
                                 self.dx_draw_wallpaper(current_rtv, filter, paint)?;
                                 continue;
                             }
+                            let (lens, radius) =
+                                backdrop_appear_parameters(filter, self.animation_time_ms);
                             let region = backdrop_snapshot_region(
                                 filter.bounds,
-                                filter.max_blur_radius(),
-                                &filter.lens,
+                                radius,
+                                &lens,
                                 self.width,
                                 self.height,
                             );
+                            // The cache holds the blurred backdrop (and a lens's sharp copy) of a
+                            // filter whose sampling region did not change since it was stored.
+                            let reblur = damage
+                                .is_some_and(|plan| plan.reblur.contains(&(range.start + index)));
+                            let key = if targets.inherits_backdrop() || reblur {
+                                None
+                            } else {
+                                backdrop_keys.get(range.start + index).copied().flatten()
+                            };
+                            let hit = key.is_some_and(|key| self.dx_restore_backdrop(key));
+                            if damage.is_some()
+                                && !reblur
+                                && !hit
+                                && damage::uses_blurred_backdrop(filter)
+                            {
+                                // The plan promised a cache entry for every glass it does not re-blur.
+                                anyhow::bail!("damage redraw is missing a cached backdrop");
+                            }
                             // A lens reads the sharp full-resolution backdrop, so it needs a copy
                             // even when the backdrop is the target it composites into.
-                            let source = if targets.inherits_backdrop() {
+                            let source = if hit {
+                                if lens.is_active() {
+                                    self.dx_snapshot_source()?
+                                } else {
+                                    current_srv.clone()
+                                }
+                            } else if targets.inherits_backdrop() {
                                 self.dx_snapshot_backdrop(
                                     targets.backdrop_layers().map(|(_, source)| source),
                                     region,
                                 )?
-                            } else if filter.lens.is_active() {
+                            } else if lens.is_active() {
                                 self.dx_snapshot_backdrop(std::iter::once(current_srv), region)?
                             } else {
                                 current_srv.clone()
@@ -647,11 +988,19 @@ impl DirectXRenderer {
                                 filter.content_mask.bounds,
                                 filter.corner_radii,
                                 filter.corner_smoothing,
-                                filter.max_blur_radius(),
+                                radius,
                                 filter.opacity,
                                 true,
-                                filter.lens,
+                                1.0,
+                                Point::default(),
+                                Point::default(),
+                                0.0,
+                                lens,
+                                hit,
                             )?;
+                            if let (false, Some(key)) = (hit, key) {
+                                self.dx_store_backdrop(key, filter, region);
+                            }
                         }
                         Ok::<(), anyhow::Error>(())
                     })();
@@ -666,6 +1015,11 @@ impl DirectXRenderer {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(target_index),
                 } => {
+                    if motion_target.is_none() && scene.filter_boundaries[*boundary_index].motion.is_animated() {
+                        motion_target = Some(*target_index);
+                        self.damage_scissor = None;
+                        self.restore_rasterizer();
+                    }
                     targets.enter(
                         groups[target_index.as_usize()].clone(),
                         scene.filter_boundaries[*boundary_index].filters.is_empty(),
@@ -684,22 +1038,35 @@ impl DirectXRenderer {
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
-                    target: FilterRenderTarget::Isolated(_),
+                    target: FilterRenderTarget::Isolated(index),
                     ..
                 } => {
                     let boundary = &scene.filter_boundaries[*boundary_index];
                     let ((_, source), (parent_rtv, _)) = targets.exit();
+                    if motion_target == Some(*index) {
+                        motion_target = None;
+                        self.damage_scissor = damage_scissor;
+                        self.restore_rasterizer();
+                    }
+                    let (opacity, scale, composite_offset, composite_rotation, clip) = gpui::motion_composite_parameters(
+                        boundary, self.animation_time_ms, scene.scale_factor,
+                    );
                     let result = self.dx_blur_and_composite(
                         &source,
                         parent_rtv,
                         boundary.bounds,
-                        boundary.content_mask.bounds,
+                        clip.map_or(boundary.content_mask.bounds, |clip| boundary.content_mask.bounds.intersect(&clip)),
                         boundary.corner_radii,
                         boundary.corner_smoothing,
                         boundary.max_blur_radius(),
-                        boundary.opacity,
+                        opacity,
                         false,
+                        scale,
+                        boundary.scale_origin,
+                        composite_offset,
+                        composite_rotation,
                         BackdropLens::default(),
+                        false,
                     );
                     self.active_render_target = parent_rtv.clone();
                     unsafe {
@@ -737,13 +1104,118 @@ impl DirectXRenderer {
         }
 
         targets.assert_balanced();
-
-        // Present the offscreen scene by blitting it into the swapchain.
-        if use_offscreen {
-            self.dx_blit(&scene_srv, &swapchain_rtv)?;
-        }
-        self.active_render_target = None;
         Ok(())
+    }
+
+    /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
+    pub(crate) fn rasterize(
+        &mut self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let devices = self.devices.as_ref()?;
+        let device = devices.device.clone();
+        let context = devices.device_context.clone();
+        let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
+        let mut texture = None;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: self.width,
+            Height: self.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: RENDER_TARGET_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            ..Default::default()
+        };
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .ok()?;
+        }
+        let texture = texture?;
+        let mut view = None;
+        unsafe {
+            device
+                .CreateRenderTargetView(&texture, None, Some(&mut view))
+                .ok()?;
+        }
+        let resources = self.resources.as_mut()?;
+        let previous_texture = resources.render_target.replace(texture.clone());
+        let previous_view = std::mem::replace(&mut resources.render_target_view, view);
+        // The window keeps its retained frame and backdrop keys.
+        let (retained, frame_keys) = (self.retained, self.frame_keys.clone());
+        let rendered = self.render(scene, WindowBackgroundAppearance::Transparent);
+        (self.retained, self.frame_keys) = (retained, frame_keys);
+        let resources = self.resources.as_mut()?;
+        resources.render_target = previous_texture;
+        resources.render_target_view = previous_view;
+        rendered.ok()?;
+        let mut staging = None;
+        unsafe {
+            device
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Width: width,
+                        Height: height,
+                        Usage: D3D11_USAGE_STAGING,
+                        BindFlags: 0,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                        ..desc
+                    },
+                    None,
+                    Some(&mut staging),
+                )
+                .ok()?;
+        }
+        let staging = staging?;
+        unsafe {
+            context.CopySubresourceRegion(
+                &staging,
+                0,
+                0,
+                0,
+                0,
+                &texture,
+                0,
+                Some(&D3D11_BOX {
+                    left: rect.origin.x.0 as u32,
+                    top: rect.origin.y.0 as u32,
+                    front: 0,
+                    right: rect.right().0 as u32,
+                    bottom: rect.bottom().0 as u32,
+                    back: 1,
+                }),
+            );
+        }
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .ok()?;
+        }
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+        // SAFETY: Map exposes RowPitch bytes per row until Unmap; each logical row is width * 4 bytes.
+        unsafe {
+            for row in 0..height as usize {
+                bytes.extend_from_slice(slice::from_raw_parts(
+                    mapped
+                        .pData
+                        .cast::<u8>()
+                        .add(row * mapped.RowPitch as usize),
+                    width as usize * 4,
+                ));
+            }
+            context.Unmap(&staging, 0);
+        }
+        Some((
+            size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            bytes.into(),
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -830,6 +1302,7 @@ impl DirectXRenderer {
         }
         self.width = width;
         self.height = height;
+        self.retained = None;
 
         // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -1259,7 +1732,7 @@ impl DirectXRenderer {
     }
 
     /// Runs `pass` with the scissor test limited to `scissor` (half-resolution blur passes only
-    /// shade the blurred bounds, as on wgpu), then restores the plain rasterizer state.
+    /// shade the blurred bounds, as on wgpu), then restores the batch rasterizer state.
     fn dx_scissored(
         &self,
         scissor: &ScissorRectangle,
@@ -1281,8 +1754,26 @@ impl DirectXRenderer {
             ctx.RSSetScissorRects(Some(slice::from_ref(&rect)));
         }
         let result = pass();
-        unsafe { ctx.RSSetState(&self.pipelines.plain_rasterizer) };
+        self.restore_rasterizer();
         result
+    }
+
+    /// Sets the rasterizer state batch draws inherit: scissored to the damage rectangle during a
+    /// damage redraw, plain otherwise.
+    fn restore_rasterizer(&self) {
+        let Some(devices) = self.devices.as_ref() else {
+            return;
+        };
+        let ctx = &devices.device_context;
+        unsafe {
+            match self.damage_scissor {
+                Some(rect) => {
+                    ctx.RSSetState(&self.pipelines.scissor_rasterizer);
+                    ctx.RSSetScissorRects(Some(slice::from_ref(&rect)));
+                }
+                None => ctx.RSSetState(&self.pipelines.plain_rasterizer),
+            }
+        }
     }
 
     /// Blur `source_srv` (full-resolution) using the half-res ping/pong textures and composite the
@@ -1301,7 +1792,13 @@ impl DirectXRenderer {
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
+        scale: f32,
+        scale_origin: Point<ScaledPixels>,
+        composite_offset: Point<ScaledPixels>,
+        composite_rotation: f32,
         lens: BackdropLens,
+        // The blurred backdrop was restored into the ping texture, so the blur passes are skipped.
+        blurred_ready: bool,
     ) -> Result<()> {
         if clip_rounded && blur_radius <= 0.0 && !lens.is_active() {
             return Ok(());
@@ -1329,66 +1826,70 @@ impl DirectXRenderer {
         let resources = self.resources.as_ref().context("resources missing")?;
 
         let full_size = [full_width as f32, full_height as f32];
-        let (composite_source, source_size) = if let Some(kernel) =
-            BlurKernel::for_radius(blur_radius)
-        {
-            let [ping, pong] = resources
-                .blur
-                .as_ref()
-                .and_then(|blur| blur.scratch.as_ref())
-                .context("blur resources were not prepared")?;
-            let scissor = ScissorRectangle::for_blurred_bounds(
-                bounds,
-                GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
-                full_width,
-                full_height,
-            );
-            if scissor.is_empty() {
-                return Ok(());
-            }
-            // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
-            // shading only the blurred bounds.
-            self.dx_scissored(&scissor, || {
-                self.dx_blur_pass(
-                    &self.pipelines.blur_downsample_vertex,
-                    &self.pipelines.blur_downsample_fragment,
-                    &self.pipelines.blur_blend_replace,
-                    &ping.target,
-                    source_srv,
-                    BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-                    &half_vp,
-                    D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                    3,
-                    // Backdrops skip the clear: each pass writes its whole scissor and the
-                    // composite only reads texels the passes wrote (as on wgpu); content blurs
-                    // composite out to the scissor's edge and keep it.
-                    !clip_rounded,
-                )?;
-
-                for (axis, source, target) in [
-                    (BlurAxis::Horizontal, &ping.source, &pong.target),
-                    (BlurAxis::Vertical, &pong.source, &ping.target),
-                ] {
-                    self.dx_blur_pass(
-                        &self.pipelines.blur_vertex,
-                        &self.pipelines.blur_fragment,
-                        &self.pipelines.blur_blend_replace,
-                        target,
-                        source,
-                        BlurUniforms::gaussian(axis, blur_size, kernel),
-                        &half_vp,
-                        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                        3,
-                        !clip_rounded,
-                    )?;
+        let (composite_source, source_size) =
+            if let Some(kernel) = BlurKernel::for_radius(blur_radius) {
+                let [ping, pong] = resources
+                    .blur
+                    .as_ref()
+                    .and_then(|blur| blur.scratch.as_ref())
+                    .context("blur resources were not prepared")?;
+                let scissor = ScissorRectangle::for_blurred_bounds(
+                    bounds,
+                    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
+                    full_width,
+                    full_height,
+                );
+                if scissor.is_empty() {
+                    return Ok(());
                 }
-                Ok(())
-            })?;
+                // Downsample source -> ping, then separable gaussian ping -> pong -> ping, each
+                // shading only the blurred bounds.
+                if !blurred_ready {
+                    self.dx_scissored(&scissor, || {
+                        self.dx_blur_pass(
+                            &self.pipelines.blur_downsample_vertex,
+                            &self.pipelines.blur_downsample_fragment,
+                            &self.pipelines.blur_blend_replace,
+                            &ping.target,
+                            source_srv,
+                            BlurUniforms::downsample(
+                                [full_width as f32, full_height as f32],
+                                blur_size,
+                            ),
+                            &half_vp,
+                            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                            3,
+                            // Backdrops skip the clear: each pass writes its whole scissor and the
+                            // composite only reads texels the passes wrote (as on wgpu); content blurs
+                            // composite out to the scissor's edge and keep it.
+                            !clip_rounded,
+                        )?;
 
-            (&ping.source, blur_size)
-        } else {
-            (source_srv, full_size)
-        };
+                        for (axis, source, target) in [
+                            (BlurAxis::Horizontal, &ping.source, &pong.target),
+                            (BlurAxis::Vertical, &pong.source, &ping.target),
+                        ] {
+                            self.dx_blur_pass(
+                                &self.pipelines.blur_vertex,
+                                &self.pipelines.blur_fragment,
+                                &self.pipelines.blur_blend_replace,
+                                target,
+                                source,
+                                BlurUniforms::gaussian(axis, blur_size, kernel),
+                                &half_vp,
+                                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                                3,
+                                !clip_rounded,
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                }
+
+                (&ping.source, blur_size)
+            } else {
+                (source_srv, full_size)
+            };
 
         // Content blur bleeds ~3·radius past the box; composite over a dilated rect.
         let composite_bounds = if clip_rounded {
@@ -1398,17 +1899,21 @@ impl DirectXRenderer {
                 GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
             ))
         };
-        let composite_uniforms = BlurUniforms::composite(
+        let mut composite_uniforms = BlurUniforms::composite(
             composite_bounds,
             content_mask,
             corner_radii,
             corner_smoothing,
             opacity,
             clip,
-            source_size,
+            full_size,
             full_size,
         )
-        .with_lens(lens);
+        .with_lens(lens)
+        .with_composite_scale(scale, scale_origin);
+        composite_uniforms.composite_offset =
+            wgsl_rs::std::vec2f(composite_offset.x.0, composite_offset.y.0);
+        composite_uniforms.composite_rotation = composite_rotation;
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -1441,18 +1946,10 @@ impl DirectXRenderer {
                 &self.pipelines.blur_blend_composite,
                 target_rtv,
                 source_srv,
-                BlurUniforms::composite(
-                    composite_bounds,
-                    content_mask,
-                    corner_radii,
-                    corner_smoothing,
-                    opacity,
-                    clip,
-                    full_size,
-                    full_size,
-                )
-                .with_lens(lens)
-                .with_sharp_rim_pass(lens.sharp_rim),
+                BlurUniforms {
+                    source_size: wgsl_rs::std::vec2f(full_size[0], full_size[1]),
+                    ..composite_uniforms.with_sharp_rim_pass(lens.sharp_rim)
+                },
                 &resources.viewport,
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
                 4,
@@ -1519,11 +2016,88 @@ impl DirectXRenderer {
                 0.0,
                 1.0,
                 false,
+                1.0,
+                Point::default(),
+                Point::default(),
+                0.0,
                 BackdropLens::default(),
+                false,
             )?;
         }
 
         Ok(snapshot.source.clone())
+    }
+
+    /// The sharp backdrop snapshot's view, for a lens whose snapshot was restored from the cache.
+    fn dx_snapshot_source(&self) -> Result<Option<ID3D11ShaderResourceView>> {
+        self.resources
+            .as_ref()
+            .and_then(|resources| resources.blur.as_ref())
+            .and_then(|blur| blur.snapshot.as_ref())
+            .map(|snapshot| snapshot.source.clone())
+            .context("backdrop snapshot missing")
+    }
+
+    /// Restores the cached blurred backdrop (and sharp snapshot) for `key`; false on a miss.
+    fn dx_restore_backdrop(&self, key: u64) -> bool {
+        let (Some(devices), Some(blur)) = (
+            self.devices.as_ref(),
+            self.resources
+                .as_ref()
+                .and_then(|resources| resources.blur.as_ref()),
+        ) else {
+            return false;
+        };
+        let ping = blur.scratch.as_ref().map(|[ping, _]| &ping.texture);
+        let snapshot = blur.snapshot.as_ref().map(|snapshot| &snapshot.texture);
+        blur.cache
+            .borrow_mut()
+            .restore(key, &devices.device_context, ping, snapshot)
+    }
+
+    /// Stores the blurred backdrop just produced for `filter` (and its sharp snapshot, for a
+    /// lens) under `key`. `region` is the filter's `backdrop_snapshot_region`.
+    fn dx_store_backdrop(&self, key: u64, filter: &BackdropFilter, region: Bounds<ScaledPixels>) {
+        let (Some(devices), Some(blur)) = (
+            self.devices.as_ref(),
+            self.resources
+                .as_ref()
+                .and_then(|resources| resources.blur.as_ref()),
+        ) else {
+            return;
+        };
+        let (lens, radius) = backdrop_appear_parameters(filter, self.animation_time_ms);
+        let blurred = match (BlurKernel::for_radius(radius), blur.scratch.as_ref()) {
+            (Some(_), Some([ping, _])) => Some((
+                &ping.texture,
+                ScissorRectangle::for_blurred_bounds(
+                    filter.bounds,
+                    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * radius,
+                    self.width,
+                    self.height,
+                ),
+            )),
+            _ => None,
+        };
+        let sharp = match (lens.is_active(), blur.snapshot.as_ref()) {
+            (true, Some(snapshot)) => Some((
+                &snapshot.texture,
+                ScissorRectangle {
+                    x: region.origin.x.0 as u32,
+                    y: region.origin.y.0 as u32,
+                    width: region.size.width.0 as u32,
+                    height: region.size.height.0 as u32,
+                },
+            )),
+            _ => None,
+        };
+        blur.cache.borrow_mut().store(
+            &devices.device,
+            &devices.device_context,
+            key,
+            blurred,
+            sharp,
+        );
     }
 
     /// Copy the offscreen scene texture into the swapchain render target.
@@ -1617,6 +2191,7 @@ impl DirectXResources {
                 &devices.device,
                 width,
                 height,
+                BUFFER_COUNT as u32,
             )?
         };
 
@@ -1667,6 +2242,7 @@ impl DirectXResources {
                 scratch: None,
                 snapshot: None,
                 groups: Vec::with_capacity(requirements.isolated_target_count),
+                cache: RefCell::default(),
             });
         }
 
@@ -2194,6 +2770,7 @@ fn create_swap_chain_for_composition(
     device: &ID3D11Device,
     width: u32,
     height: u32,
+    buffer_count: u32,
 ) -> Result<IDXGISwapChain1> {
     let desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
@@ -2205,7 +2782,7 @@ fn create_swap_chain_for_composition(
             Quality: 0,
         },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: BUFFER_COUNT as u32,
+        BufferCount: buffer_count,
         // Composition SwapChains only support the DXGI_SCALING_STRETCH Scaling.
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
@@ -2622,7 +3199,12 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 
 const BUFFER_COUNT: usize = 3;
 
+mod backdrop_cache;
+mod compositor;
+mod damage;
 mod wallpapers;
+
+use backdrop_cache::DxBackdropCache;
 
 pub(crate) mod shader_resources {
     //! D3D11 bytecode generated from the shared Rust shader sources at build time.
@@ -2939,10 +3521,10 @@ mod tests {
     use anyhow::Result;
     use gpui::{
         AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ContentMask, Corners,
-        DevicePixels, Edges, FilterBoundary, ImageId, MonochromeSprite, PlatformAtlas, Point,
-        PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, RenderImageParams, RenderSvgParams,
-        ScaledFilter, ScaledPixels, Scene, ShaderBool, Size, WindowBackgroundAppearance, hsla, rgb,
-        rgb_to_hsla, solid_background, white,
+        DevicePixels, Edges, FilterBoundary, FrameLoop, ImageId, MonochromeSprite, PlatformAtlas,
+        Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, RenderImageParams,
+        RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool, Size,
+        WindowBackgroundAppearance, hsla, rgb, rgb_to_hsla, solid_background, white,
     };
     use smallvec::{SmallVec, smallvec};
     use std::borrow::Cow;
@@ -3070,7 +3652,12 @@ mod tests {
             corner_smoothing: 0.0,
             filters: SmallVec::new(),
             opacity,
+            scale: 1.0,
+            scale_origin: Point::default(),
+            motion: gpui::LayerMotion::NONE,
+            motion_bounds: Bounds::default(),
             is_start: true,
+            inline: false,
         };
         scene.insert_primitive(boundary.clone());
         paint(scene);
@@ -3160,6 +3747,7 @@ mod tests {
             color: green.into(),
             tile: mono,
             transformation: Default::default(),
+            frames: FrameLoop::NONE,
         });
         scene.insert_primitive(PolychromeSprite {
             order: 0,
@@ -3170,6 +3758,7 @@ mod tests {
             content_mask: full_mask(),
             corner_radii: Default::default(),
             tile: poly,
+            frames: FrameLoop::NONE,
         });
         // Overlapping the image lifts this quad above it, splitting the quads into two
         // batches. The second one starts at instance 1 of the frame's quad buffer.
@@ -3249,6 +3838,8 @@ mod tests {
         opacity_group(&mut nested, bounds, 0.5, |scene| {
             opacity_group(scene, bounds, 0.5, |scene| {
                 opacity_group(scene, bounds, 0.5, |scene| {
+                    // Two primitives: a single one inside an opacity group is drawn inline.
+                    scene.insert_primitive(ordinary.quads[0]);
                     scene.insert_primitive(ordinary.quads[0]);
                 });
             });
@@ -3269,6 +3860,8 @@ mod tests {
                 opacity: 1.0,
                 ..Default::default()
             });
+            // A second primitive keeps the group isolated (a single one is drawn inline).
+            scene.insert_primitive(ordinary.quads[0]);
         });
         filtered.finish();
         renderer.render(&filtered, WindowBackgroundAppearance::Opaque)?;

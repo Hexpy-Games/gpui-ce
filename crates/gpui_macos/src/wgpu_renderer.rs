@@ -2,16 +2,34 @@
 //! feature. Applications can then share the window's device through
 //! `gpui_wgpu::WgpuContextHandle` and composite their own textures.
 
-use std::sync::Arc;
+mod compositor;
 
+use std::{collections::HashMap, sync::Arc};
+
+use compositor::CompositorLayers;
 use foreign_types::ForeignType as _;
-use gpui::{DevicePixels, GpuSpecs, Scene, Size};
+use gpui::{
+    Bounds, CompositorSprite, DevicePixels, FrameLoop, GpuSpecs, LiveCanvas, ScaledPixels, Scene,
+    Size, SpriteContents, animation_time_ms, point, px, rasterize_live,
+};
 use gpui_apple::metal_renderer::new_window_layer;
 use gpui_wgpu::{
     GpuContext, WgpuAtlas, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
     WgpuSurfaceConfig, wgpu,
 };
 use metal::{CAMetalLayer, MetalLayer, MetalLayerRef};
+use objc2::{
+    class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, Bool},
+};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+struct LiveSurface {
+    layer: compositor::MainThread<Retained<AnyObject>>,
+    clip: compositor::MainThread<Retained<AnyObject>>,
+    size: Size<DevicePixels>,
+}
 
 /// The device every window shares, and what the application requires of it.
 #[derive(Clone, Default)]
@@ -39,6 +57,11 @@ pub fn new_renderer(
 pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
     layer: MetalLayer,
+    compositor: CompositorLayers,
+    live: HashMap<u64, LiveSurface>,
+    last_live_frame_ms: u32,
+    group_pixels: HashMap<u64, (Size<DevicePixels>, Arc<[u8]>)>,
+    presents_with_transaction: bool,
 }
 
 impl MacWgpuRenderer {
@@ -55,7 +78,15 @@ impl MacWgpuRenderer {
         };
         let renderer =
             WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;
-        Ok(Self { renderer, layer })
+        Ok(Self {
+            renderer,
+            layer,
+            compositor: CompositorLayers::default(),
+            live: HashMap::new(),
+            last_live_frame_ms: animation_time_ms().wrapping_sub(16),
+            group_pixels: HashMap::new(),
+            presents_with_transaction: false,
+        })
     }
 
     pub fn layer(&self) -> Option<&MetalLayerRef> {
@@ -70,7 +101,13 @@ impl MacWgpuRenderer {
         self.renderer.sprite_atlas()
     }
 
+    /// Whether windows draw the scene's compositor sprites with Core Animation.
+    pub fn supports_compositor_sprites(&self) -> bool {
+        true
+    }
+
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
+        self.presents_with_transaction = presents_with_transaction;
         self.layer
             .set_presents_with_transaction(presents_with_transaction);
     }
@@ -86,6 +123,10 @@ impl MacWgpuRenderer {
     }
 
     pub fn destroy(&mut self) {
+        for live in self.live.values() {
+            let _: () = unsafe { msg_send![&*live.clip.0, removeFromSuperlayer] };
+        }
+        self.live.clear();
         self.renderer.destroy();
     }
 
@@ -98,7 +139,214 @@ impl MacWgpuRenderer {
             }
             return true;
         }
+        // A frame that adds or removes a compositor sprite appears together with its layer.
+        let root = self.layer.as_ptr() as *mut AnyObject;
+        self.group_pixels.retain(|key, _| {
+            scene
+                .compositor_groups()
+                .iter()
+                .any(|group| group.key == *key)
+        });
+        let mut sprites = scene.compositor_sprites().to_vec();
+        for group in scene.compositor_groups() {
+            let pixels = match self.group_pixels.get(&group.key) {
+                Some(pixels) => pixels.clone(),
+                None => {
+                    let Some(pixels) = self.renderer.rasterize(&group.scene, group.rect) else {
+                        continue;
+                    };
+                    self.group_pixels.insert(group.key, pixels.clone());
+                    pixels
+                }
+            };
+            let mut motion = group.motion;
+            motion.origin = point(
+                (group.origin.x.0 - group.rect.origin.x.0) / group.rect.size.width.0,
+                (group.origin.y.0 - group.rect.origin.y.0) / group.rect.size.height.0,
+            );
+            let offset = |offset: gpui::Point<gpui::Pixels>, relative: gpui::Point<f32>| {
+                offset
+                    + point(
+                        gpui::px(
+                            group.motion_bounds.size.width.0 * relative.x / scene.scale_factor,
+                        ),
+                        gpui::px(
+                            group.motion_bounds.size.height.0 * relative.y / scene.scale_factor,
+                        ),
+                    )
+            };
+            motion.offset = (
+                offset(motion.offset.0, motion.relative_offset.0),
+                offset(motion.offset.1, motion.relative_offset.1),
+            );
+            motion.relative_offset = (point(0.0, 0.0), point(0.0, 0.0));
+            motion.clip = motion.clip.map(|(from, to)| {
+                let insets = |edges: gpui::Edges<gpui::Pixels>| gpui::Edges {
+                    left: gpui::px(
+                        (group.motion_bounds.left().0 - group.rect.left().0) / scene.scale_factor,
+                    ) + edges.left,
+                    top: gpui::px(
+                        (group.motion_bounds.top().0 - group.rect.top().0) / scene.scale_factor,
+                    ) + edges.top,
+                    right: gpui::px(
+                        (group.rect.right().0 - group.motion_bounds.right().0) / scene.scale_factor,
+                    ) + edges.right,
+                    bottom: gpui::px(
+                        (group.rect.bottom().0 - group.motion_bounds.bottom().0)
+                            / scene.scale_factor,
+                    ) + edges.bottom,
+                };
+                (insets(from), insets(to))
+            });
+            sprites.push(CompositorSprite {
+                contents: SpriteContents::Pixels {
+                    size: pixels.0,
+                    bytes: pixels.1,
+                },
+                bounds: group.rect,
+                clip: group.content_mask.bounds,
+                color: None,
+                frames: FrameLoop::NONE,
+                motion,
+            });
+        }
+        let sprites_changed = self.compositor.changed(root, &sprites);
+        let layers_changed =
+            sprites_changed || !scene.live_layers().is_empty() || !self.live.is_empty();
+        if layers_changed {
+            self.layer.set_presents_with_transaction(true);
+            let _: () = unsafe { msg_send![class!(CATransaction), begin] };
+            let _: () = unsafe { msg_send![class!(CATransaction), setDisableActions: Bool::YES] };
+            self.sync_live_layers(scene);
+        }
         self.renderer.draw(scene);
+        self.draw_live_layers(scene);
+        if sprites_changed {
+            self.compositor
+                .update(root, &sprites, self.renderer.sprite_atlas());
+        }
+        if layers_changed {
+            let _: () = unsafe { msg_send![class!(CATransaction), commit] };
+            self.layer
+                .set_presents_with_transaction(self.presents_with_transaction);
+        }
+        self.renderer.needs_redraw()
+    }
+
+    fn sync_live_layers(&mut self, scene: &Scene) {
+        let root = self.layer.as_ptr() as *mut AnyObject;
+        let root_bounds: NSRect = unsafe { msg_send![root, bounds] };
+        let scale: f64 = unsafe { msg_send![root, contentsScale] };
+        let flipped: Bool = unsafe { msg_send![root, isGeometryFlipped] };
+        self.live.retain(|key, live| {
+            if scene.live_layers().iter().any(|layer| layer.key == *key) {
+                true
+            } else {
+                let _: () = unsafe { msg_send![&*live.clip.0, removeFromSuperlayer] };
+                false
+            }
+        });
+        for layer in scene.live_layers() {
+            let size = layer
+                .bounds
+                .size
+                .map(|value| DevicePixels(value.0.ceil() as i32));
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {
+                let sprite: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
+                let clip: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
+                let _: () = unsafe { msg_send![&*clip, setMasksToBounds: Bool::YES] };
+                let _: () = unsafe { msg_send![&*clip, addSublayer: &*sprite] };
+                let _: () = unsafe { msg_send![root, addSublayer: &*clip] };
+                entry.insert(LiveSurface {
+                    layer: compositor::MainThread(sprite),
+                    clip: compositor::MainThread(clip),
+                    size,
+                });
+            }
+            let live = self.live.get_mut(&layer.key).unwrap();
+            live.size = size;
+            let points = |value: f32| f64::from(value) / scale;
+            let clip = layer.content_mask.bounds;
+            let clip_height = points(clip.size.height.0);
+            let clip_y = if flipped.as_bool() {
+                points(clip.origin.y.0)
+            } else {
+                root_bounds.size.height - points(clip.origin.y.0) - clip_height
+            };
+            let _: () = unsafe {
+                msg_send![&*live.clip.0, setFrame: NSRect::new(
+                NSPoint::new(points(clip.origin.x.0), clip_y),
+                NSSize::new(points(clip.size.width.0), clip_height))]
+            };
+            let sprite = &*live.layer.0;
+            let _: () = unsafe { msg_send![sprite, setContentsScale: scale] };
+            let _: () = unsafe {
+                msg_send![sprite, setFrame: NSRect::new(
+                NSPoint::new(points(layer.bounds.origin.x.0 - clip.origin.x.0),
+                    clip_height - points(layer.bounds.origin.y.0 - clip.origin.y.0) - points(layer.bounds.size.height.0)),
+                NSSize::new(points(layer.bounds.size.width.0), points(layer.bounds.size.height.0)))]
+            };
+        }
+    }
+
+    pub fn draw_live_layers(&mut self, scene: &Scene) {
+        let now = animation_time_ms();
+        if now.wrapping_sub(self.last_live_frame_ms) < 16 {
+            return;
+        }
+        self.last_live_frame_ms = now;
+        for layer in scene.live_layers() {
+            let Some(live) = self.live.get(&layer.key) else {
+                continue;
+            };
+            let mut canvas = LiveCanvas {
+                ops: Vec::new(),
+                scale_factor: scene.scale_factor,
+                size: layer
+                    .bounds
+                    .size
+                    .map(|value| px(value.0 / scene.scale_factor)),
+            };
+            (layer.paint)(
+                now.wrapping_sub(layer.start_ms) as f32 / 1000.0,
+                &mut canvas,
+            );
+            let pixels = rasterize_live(
+                &canvas.ops,
+                live.size.width.0 as u32,
+                live.size.height.0 as u32,
+            );
+            let image = compositor::image_from_bgra(
+                live.size.width.0 as usize,
+                live.size.height.0 as usize,
+                pixels.into(),
+            );
+            let _: () = unsafe { msg_send![class!(CATransaction), begin] };
+            let _: () = unsafe { msg_send![class!(CATransaction), setDisableActions: Bool::YES] };
+            let _: () =
+                unsafe { msg_send![&*live.layer.0, setContents: image.as_ptr() as *mut AnyObject] };
+            let _: () = unsafe { msg_send![class!(CATransaction), commit] };
+        }
+    }
+
+    pub fn rasterize(
+        &mut self,
+        scene: &Scene,
+        rect: Bounds<ScaledPixels>,
+    ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        self.renderer.rasterize(scene, rect)
+    }
+
+    /// Presents an animation tick of the scene last passed to [`Self::draw`]. Returns whether the
+    /// next frame must render the scene again, uncached.
+    pub fn draw_animation_frame(&mut self, scene: &Scene) -> bool {
+        if self.renderer.device_lost() {
+            if let Err(error) = self.renderer.recover_metal_layer(&self.layer) {
+                log::warn!("GPU recovery failed, will retry on next frame: {error}");
+            }
+            return true;
+        }
+        self.renderer.draw_animation_frame(scene);
         self.renderer.needs_redraw()
     }
 

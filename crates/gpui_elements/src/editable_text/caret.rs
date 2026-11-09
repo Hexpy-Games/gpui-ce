@@ -20,9 +20,8 @@ pub enum CaretNotify {
 pub struct Caret {
     /// The frequency at which the caret blinks
     interval: Duration,
-    generation: usize,
-    /// Whether the caret is presently visible in this frame
-    visible: bool,
+    /// Animation clock value of the last focus gain or user activity.
+    blink_start_ms: u32,
     /// Whether the caret's EditableText element is currently focused.
     /// Caret is only eligible to be blinking if currently focused.
     has_focus: bool,
@@ -65,52 +64,44 @@ impl Caret {
                 }
 
                 // Leave the caret visible for one complete interval after user activity.
-                state.visible = true;
-                state.restart_blink_ticker(cx);
+                state.blink_start_ms = gpui::animation_time_ms();
                 cx.notify();
             }
         });
         self.subscriptions.push(handle);
     }
 
-    /// Processes updates during prepaint and returns whether the caret is currently visible.
+    /// Processes updates during prepaint and returns whether the caret is focused.
     pub(super) fn update_focus(&mut self, is_focused: bool, cx: &mut Context<Self>) -> bool {
         if self.has_focus != is_focused {
             self.has_focus = is_focused;
-            self.visible = is_focused;
-
-            if is_focused && !self.interval.is_zero() {
-                self.restart_blink_ticker(cx);
-            } else {
-                self.generation = self.generation.wrapping_add(1);
+            if is_focused {
+                self.blink_start_ms = gpui::animation_time_ms();
             }
-
             cx.notify();
         }
 
-        is_focused && (self.interval.is_zero() || self.visible)
+        is_focused
     }
 
-    fn restart_blink_ticker(&mut self, cx: &mut Context<Self>) {
-        let generation = self.generation.wrapping_add(1);
-        self.generation = generation;
-
-        let interval = self.interval;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(interval).await;
-
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if this.generation != generation || !this.has_focus || this.interval.is_zero() {
-                    return;
-                }
-
-                this.visible = !this.visible;
-                cx.notify();
-                this.restart_blink_ticker(cx);
-            });
-        })
-        .detach();
+    pub(super) fn blink(&self) -> gpui::LayerMotion {
+        if self.interval.is_zero() {
+            gpui::LayerMotion::NONE
+        } else {
+            gpui::LayerMotion {
+                start_ms: self.blink_start_ms,
+                duration_ms: 2 * self.interval.as_millis() as u32,
+                repeat: gpui::MotionRepeat::Loop,
+                easing: gpui::MotionEasing::linear(&[
+                    (0.0, 0.0),
+                    (0.5, 0.0),
+                    (0.5, 1.0),
+                    (1.0, 1.0),
+                ]),
+                opacity: (1.0, 0.0),
+                ..gpui::LayerMotion::NONE
+            }
+        }
     }
 }
 
@@ -133,25 +124,15 @@ mod tests {
 
         caret.update(cx, |caret, cx| assert!(caret.update_focus(true, cx)));
 
-        cx.run_until_parked();
+        let blink = cx.read(|cx| caret.read(cx).blink());
+        assert!(blink.is_animated());
+        assert_eq!(blink.duration_ms, 2 * interval.as_millis() as u32);
 
-        cx.executor().advance_clock(interval);
-        cx.run_until_parked();
-        assert!(!cx.read(|cx| caret.read(cx).visible));
-
+        std::thread::sleep(interval);
         emitter.update(cx, |_, cx| cx.emit(CaretNotify::PauseBlinking));
-
         cx.run_until_parked();
-        assert!(cx.read(|cx| caret.read(cx).visible));
-
-        cx.executor().advance_clock(interval);
-        cx.run_until_parked();
-        assert!(!cx.read(|cx| caret.read(cx).visible));
+        assert!(cx.read(|cx| caret.read(cx).blink().start_ms) > blink.start_ms);
 
         caret.update(cx, |caret, cx| assert!(!caret.update_focus(false, cx)));
-
-        cx.executor().advance_clock(interval);
-        cx.run_until_parked();
-        assert!(!cx.read(|cx| caret.read(cx).visible));
     }
 }

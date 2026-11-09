@@ -9,7 +9,7 @@ pub use crate::shaders::{
 use gpui::{BackdropLens, Bounds, Corners, ScaledPixels, WallpaperPass};
 use wgsl_rs::std::vec2f;
 
-pub const DOWNSAMPLE_FACTOR: u32 = 2;
+pub const DOWNSAMPLE_FACTOR: u32 = gpui::BLUR_DOWNSAMPLE_FACTOR;
 
 /// Texture dimension for the downsampled blur passes; allocations must agree.
 pub fn downsampled_dimension(dimension: u32) -> u32 {
@@ -39,6 +39,10 @@ pub struct FilterCompositeParameters {
     pub corner_smoothing: f32,
     pub blur_radius: f32,
     pub opacity: f32,
+    pub scale: f32,
+    pub scale_origin: gpui::Point<ScaledPixels>,
+    pub composite_offset: gpui::Point<ScaledPixels>,
+    pub composite_rotation: f32,
     pub clip: FilterCompositeClip,
     pub lens: BackdropLens,
 }
@@ -78,6 +82,15 @@ impl BlurUniforms {
             source_size,
             target_size,
         )
+    }
+
+    /// A fill of the pass's scissor with `color`, drawn with the overwrite downsample pipeline;
+    /// the colour travels in `wp_mode`, unused outside wallpaper passes.
+    pub fn fill(color: [f32; 4]) -> Self {
+        Self {
+            wp_mode: wgsl_rs::std::vec4f(color[0], color[1], color[2], color[3]),
+            ..empty_uniforms(DownsampleMode::Fill)
+        }
     }
 
     pub fn gaussian(axis: BlurAxis, texture_size: [f32; 2], kernel: BlurKernel) -> Self {
@@ -120,6 +133,7 @@ impl BlurUniforms {
         self.lens_fold_band = lens.fold_band;
         self.lens_fold_depth = lens.fold_depth;
         self.lens_curve = lens.curve;
+        self.lens_saturation = lens.saturation.unwrap_or(1.0);
         // padding2 flags (no layout change): bit 0 tone curve, bit 1 full-shape sharp pass. With
         // the tone on, its coefficients ride in lens_refraction, lens_depth and lens_shade, which
         // only the v5 bevel (fold off) and the inner shade read; the tone forces both off.
@@ -134,6 +148,12 @@ impl BlurUniforms {
             self.lens_curve = lens.hairline[0];
             self.lens_fresnel = lens.hairline[1];
         }
+        self
+    }
+
+    pub fn with_composite_scale(mut self, scale: f32, origin: gpui::Point<ScaledPixels>) -> Self {
+        self.composite_scale = scale;
+        self.composite_scale_origin = vec2f(origin.x.0, origin.y.0);
         self
     }
 
@@ -234,28 +254,15 @@ pub fn backdrop_snapshot_region(
     full_width: u32,
     full_height: u32,
 ) -> Bounds<ScaledPixels> {
-    let short = bounds.size.width.0.min(bounds.size.height.0) * 0.5;
-    let fold_reach = if lens.is_active() {
-        (lens.fold_depth.max(0.0) * (1.0 + lens.dispersion.abs()) - 1.0).max(0.0) * short
-    } else {
-        0.0
-    };
-    let margin = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius
-        + lens.sampling_margin()
-        + lens.depth.max(0.0)
-        + fold_reach
-        + 4.0;
-    let half = ScissorRectangle::for_blurred_bounds(bounds, margin, full_width, full_height);
-    let x0 = (half.x * DOWNSAMPLE_FACTOR).min(full_width);
-    let y0 = (half.y * DOWNSAMPLE_FACTOR).min(full_height);
-    let x1 = ((half.x + half.width) * DOWNSAMPLE_FACTOR).min(full_width);
-    let y1 = ((half.y + half.height) * DOWNSAMPLE_FACTOR).min(full_height);
+    let region = gpui::backdrop_sampling_region(bounds, blur_radius, lens);
+    let clamp = |value: f32, limit: u32| value.clamp(0.0, limit as f32);
+    let x0 = clamp(region.origin.x.0, full_width);
+    let y0 = clamp(region.origin.y.0, full_height);
+    let x1 = clamp(region.origin.x.0 + region.size.width.0, full_width).max(x0);
+    let y1 = clamp(region.origin.y.0 + region.size.height.0, full_height).max(y0);
     Bounds::new(
-        gpui::point(ScaledPixels(x0 as f32), ScaledPixels(y0 as f32)),
-        gpui::size(
-            ScaledPixels((x1 - x0) as f32),
-            ScaledPixels((y1 - y0) as f32),
-        ),
+        gpui::point(ScaledPixels(x0), ScaledPixels(y0)),
+        gpui::size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)),
     )
 }
 
@@ -372,7 +379,7 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         lens_fold_band: 0.0,
         lens_fold_depth: 0.0,
         lens_curve: 0.0,
-        padding0: 0,
+        lens_saturation: 1.0,
         padding1: 0,
         padding2: 0,
         wp_mode: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
@@ -390,12 +397,22 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         wp_p3: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
         wp_p4: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
         wp_p5: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        composite_scale: 1.0,
+        composite_scale_padding: 0.0,
+        composite_scale_origin: vec2f(0.0, 0.0),
+        composite_offset: vec2f(0.0, 0.0),
+        composite_offset_padding: vec2f(0.0, 0.0),
+        composite_rotation: 0.0,
+        composite_rotation_padding0: 0.0,
+        composite_rotation_padding1: 0.0,
+        composite_rotation_padding2: 0.0,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::downsampled_dimension;
+    use super::{BlurUniforms, FilterCompositeClip, downsampled_dimension};
+    use gpui::{BackdropLens, Bounds, Corners};
 
     #[test]
     fn downsampled_dimensions_cover_odd_edges() {
@@ -404,5 +421,32 @@ mod tests {
         assert_eq!(downsampled_dimension(2), 1);
         assert_eq!(downsampled_dimension(3), 2);
         assert_eq!(downsampled_dimension(33), 17);
+    }
+
+    #[test]
+    fn lens_saturation_defaults_to_one_and_uses_the_requested_amount() {
+        let uniforms = BlurUniforms::composite(
+            Bounds::default(),
+            Bounds::default(),
+            Corners::default(),
+            0.0,
+            1.0,
+            FilterCompositeClip::ContentShape,
+            [1.0, 1.0],
+            [1.0, 1.0],
+        );
+        assert_eq!(
+            uniforms
+                .with_lens(BackdropLens {
+                    saturation: Some(1.35),
+                    ..Default::default()
+                })
+                .lens_saturation,
+            1.35
+        );
+        assert_eq!(
+            uniforms.with_lens(BackdropLens::default()).lens_saturation,
+            1.0
+        );
     }
 }

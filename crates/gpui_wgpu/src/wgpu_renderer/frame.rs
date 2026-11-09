@@ -6,30 +6,83 @@ use super::{
     path_types,
 };
 use gpui::{
-    FilterRenderTarget, MonochromeSprite, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand,
-    Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
+    BackdropFilter, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow,
+    Size, SubpixelSprite, Underline, backdrop_appear_parameters,
 };
 use gpui_render::TargetStack;
-use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
+use gpui_render::blur::{
+    BlurKernel, FilterCompositeClip, FilterCompositeParameters,
+    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
+};
 use gpui_render::shaders::{
+    blur::BlurUniforms,
     common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool},
     interface as shader_interface,
 };
 
+/// Submits a complete scene. Animation fallbacks leave `release_unused` disabled.
 pub(super) fn render_to_view(
     renderer: &mut WgpuRenderer,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
+    release_unused: bool,
 ) -> Option<wgpu::SubmissionIndex> {
-    let Some(targets) = PreparedTargets::prepare(renderer, scene, frame_view) else {
+    let mut planned = *scene.render_plan().requirements();
+    planned.uses_offscreen_target |= scene.has_animations();
+    let commands = scene.render_commands();
+    let Some(targets) = PreparedTargets::prepare(
+        renderer,
+        commands,
+        planned,
+        0,
+        frame_view,
+        renderer.target.viewport_size(),
+    ) else {
+        renderer.retained = None;
         return None;
     };
     // Prune once against the complete scene. Doing this inside each draw batch would evict a
     // texture that reappears after an intervening primitive and recreate its platform view.
     renderer.retain_surface_cache(&scene.surfaces);
 
-    match FrameEncoder::new(renderer, scene, targets).encode(readback) {
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    let offscreen = encoder.offscreen.is_some();
+    let keys = encoder.backdrop_keys.clone();
+    let submission = submit(renderer, encoder, readback);
+    renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
+    renderer.frame_keys = (scene.generation(), keys);
+    if submission.is_some() && release_unused {
+        renderer.resources_mut().release_unused(&planned);
+    }
+    submission
+}
+
+/// Renders `scene` into `view` for an offscreen copy, leaving the window's retained frame,
+/// backdrop keys and surface cache as they are.
+pub(super) fn render_offscreen(
+    renderer: &mut WgpuRenderer,
+    scene: &Scene,
+    view: &wgpu::TextureView,
+    size: Size<DevicePixels>,
+) -> bool {
+    let planned = *scene.render_plan().requirements();
+    let commands = scene.render_commands();
+    let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view, size) else {
+        return false;
+    };
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    submit(renderer, encoder, None).is_some()
+}
+
+/// Encodes and submits `encoder`; `None` when encoding failed (nothing is submitted).
+pub(super) fn submit(
+    renderer: &WgpuRenderer,
+    encoder: FrameEncoder<'_>,
+    readback: Option<ReadbackCopy<'_>>,
+) -> Option<wgpu::SubmissionIndex> {
+    match encoder.encode(readback) {
         Ok(command_buffer) => Some(renderer.resources().queue.submit([command_buffer])),
         Err(DrawError::ExternalSurface) => None,
         Err(DrawError::CapacityPlanningInvariant) => {
@@ -51,7 +104,7 @@ pub(super) struct ReadbackCopy<'a> {
     pub(super) height: u32,
 }
 
-struct PreparedTargets {
+pub(super) struct PreparedTargets {
     active: wgpu::TextureView,
     presentation: wgpu::TextureView,
     offscreen: Option<wgpu::TextureView>,
@@ -59,18 +112,25 @@ struct PreparedTargets {
 }
 
 impl PreparedTargets {
-    fn prepare(
+    /// Sizes and uploads for `commands`; `extra_filter_uniforms` reserves slots the encoder
+    /// writes beyond what `planned` accounts for. `planned.uses_offscreen_target` selects the
+    /// offscreen target.
+    pub(super) fn prepare(
         renderer: &mut WgpuRenderer,
-        scene: &Scene,
+        commands: &[RenderCommand],
+        planned: ScenePlanRequirements,
+        extra_filter_uniforms: u64,
         frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
     ) -> Option<Self> {
         if !begin_frame(renderer) {
             return None;
         }
-        let requirements = {
+        let mut requirements = {
             let transport = renderer.resources().instances.transport();
-            FrameRequirements::for_scene(scene, transport)
+            FrameRequirements::for_commands(commands, &planned, transport)
         };
+        requirements.uniforms.filter_count += extra_filter_uniforms;
         let device = renderer.resources().device.clone();
         let resources = renderer.resources_mut();
         if !resources.instances.ensure_capacity(
@@ -94,12 +154,12 @@ impl PreparedTargets {
         }
 
         if requirements.planned.uses_path_target {
-            renderer.ensure_path_textures();
+            renderer.ensure_path_textures(size);
         }
         if requirements.planned.uses_offscreen_target {
             renderer.ensure_filter_textures(&requirements.planned);
         }
-        write_shader_globals(renderer);
+        write_shader_globals(renderer, size);
 
         if requirements.planned.uses_offscreen_target {
             let resources = renderer.resources();
@@ -132,6 +192,7 @@ fn begin_frame(renderer: &mut WgpuRenderer) -> bool {
         return true;
     };
 
+    renderer.retained = None;
     renderer.faults.consecutive_failed_frames += 1;
     log::error!(
         "GPU error during frame (failure {} of 10): {error}",
@@ -161,7 +222,7 @@ pub(super) struct GlobalUniformState {
     font_rasterization: FontRasterizationUniforms,
 }
 
-fn write_shader_globals(renderer: &mut WgpuRenderer) {
+pub(super) fn write_shader_globals(renderer: &mut WgpuRenderer, size: Size<DevicePixels>) {
     let font = renderer.rendering_params.font_rasterization;
     let font_rasterization = FontRasterizationUniforms {
         gamma_ratios: wgsl_rs::std::vec4f(
@@ -178,14 +239,11 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         padding: 0,
     };
     let globals = GlobalUniforms {
-        viewport_size: wgsl_rs::std::vec2f(
-            renderer.target.width() as f32,
-            renderer.target.height() as f32,
-        ),
+        viewport_size: wgsl_rs::std::vec2f(size.width.0 as f32, size.height.0 as f32),
         premultiplied_alpha: ShaderBool::from(
             renderer.target.alpha_mode() == wgpu::CompositeAlphaMode::PreMultiplied,
         ),
-        padding: 0,
+        animation_time_ms: renderer.animation_time_ms,
     };
     let path_globals = GlobalUniforms {
         premultiplied_alpha: ShaderBool::Disabled,
@@ -242,8 +300,11 @@ pub(super) struct FrameRequirements {
 }
 
 impl FrameRequirements {
-    pub(super) fn for_scene(scene: &Scene, transport: InstanceTransport) -> Self {
-        let planned = scene.render_plan().requirements();
+    pub(super) fn for_commands(
+        commands: &[RenderCommand],
+        planned: &ScenePlanRequirements,
+        transport: InstanceTransport,
+    ) -> Self {
         let mut storage_bytes = 0_u64;
         let mut instance_batches = 0_u64;
         let mut reserve = |element_size: usize, count: usize| {
@@ -255,7 +316,7 @@ impl FrameRequirements {
             }
         };
 
-        for command in scene.render_commands() {
+        for command in commands {
             let RenderCommand::Batch(batch) = command else {
                 continue;
             };
@@ -317,18 +378,37 @@ impl FrameRequirements {
     }
 }
 
-struct FrameEncoder<'a> {
+pub(super) struct FrameEncoder<'a> {
     renderer: &'a WgpuRenderer,
     scene: &'a Scene,
+    /// The commands to encode: the whole scene, or a damage plan's restricted list.
+    commands: &'a [RenderCommand],
+    /// Set for a damage redraw over the retained frame.
+    damage: Option<&'a DamageRedraw>,
+    /// The damage rectangle every pass that writes the scene target is limited to.
+    scissor: Option<ScissorRectangle>,
     encoder: wgpu::CommandEncoder,
     targets: TargetStack<wgpu::TextureView>,
     offscreen: Option<wgpu::TextureView>,
     presentation: wgpu::TextureView,
     instances: InstanceUpload,
+    backdrop_keys: Vec<Option<u64>>,
+}
+
+/// Whether compositing `filter` reads a blurred backdrop that the cache can supply.
+pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
+    BlurKernel::for_radius(filter.max_blur_radius()).is_some() || filter.lens.is_active()
 }
 
 impl<'a> FrameEncoder<'a> {
-    fn new(renderer: &'a WgpuRenderer, scene: &'a Scene, targets: PreparedTargets) -> Self {
+    pub(super) fn new(
+        renderer: &'a WgpuRenderer,
+        scene: &'a Scene,
+        commands: &'a [RenderCommand],
+        damage: Option<&'a DamageRedraw>,
+        scissor: Option<ScissorRectangle>,
+        targets: PreparedTargets,
+    ) -> Self {
         let encoder =
             renderer
                 .resources()
@@ -336,18 +416,30 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
+        let backdrop_keys = if damage.is_some() {
+            // Damage ticks reuse the keys of the full frame they patch.
+            renderer.frame_keys.1.clone()
+        } else if scene.backdrop_filters.is_empty() {
+            Vec::new()
+        } else {
+            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size())
+        };
         Self {
             renderer,
             scene,
+            commands,
+            damage,
+            scissor,
             encoder,
             targets: TargetStack::new(targets.active),
             offscreen: targets.offscreen,
             presentation: targets.presentation,
             instances: targets.instances,
+            backdrop_keys,
         }
     }
 
-    fn encode(
+    pub(super) fn encode(
         mut self,
         readback: Option<ReadbackCopy<'_>>,
     ) -> Result<wgpu::CommandBuffer, DrawError> {
@@ -383,15 +475,42 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn encode_commands(&mut self) -> DrawResult {
-        let mut pass = begin_scene_render_pass(
-            self.renderer,
-            &mut self.encoder,
-            "main_pass",
-            self.targets.current(),
-            wgpu::LoadOp::Clear(self.renderer.target.clear_color()),
-        );
+        let mut scissor = self.scissor;
+        let mut motion_target = None;
+        let damage = self.damage;
+        let mut pending_load = if let Some(scissor) = scissor.filter(|_| damage.is_some()) {
+            // A clear ignores the scissor, so the damage rectangle is overwritten with the
+            // frame's clear colour by a scissored draw instead.
+            let renderer = self.renderer;
+            let ping = renderer
+                .resources()
+                .blur_ping_view
+                .clone()
+                .ok_or(DrawError::MissingIntermediateTarget)?;
+            let clear = renderer.target.clear_color();
+            renderer.draw_filter_pass(
+                &mut self.encoder,
+                "damage_clear",
+                &renderer.resources().pipelines.blur_downsample,
+                self.targets.current(),
+                &ping,
+                BlurUniforms::fill([
+                    clear.r as f32,
+                    clear.g as f32,
+                    clear.b as f32,
+                    clear.a as f32,
+                ]),
+                wgpu::LoadOp::Load,
+                Some(scissor),
+            );
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(self.renderer.target.clear_color())
+        };
+        let mut pass = None;
+        let mut parent_loads = smallvec::SmallVec::<[_; gpui::MAX_FILTER_GROUP_DEPTH]>::new();
 
-        for command in self.scene.render_commands() {
+        for command in self.commands {
             match command {
                 RenderCommand::Batch(PrimitiveBatch::Paths {
                     range,
@@ -402,54 +521,76 @@ impl<'a> FrameEncoder<'a> {
                         continue;
                     }
                     let paths = &self.scene.paths[range.clone()];
-                    drop(pass);
-                    let rasterized = self.renderer.draw_paths_to_intermediate(
+                    drop(pass.take());
+                    self.renderer.draw_paths_to_intermediate(
                         &mut self.encoder,
                         paths,
                         &mut self.instances,
-                    );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_paths",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                    );
-                    rasterized?;
-                    self.renderer.draw_paths_from_intermediate(
-                        paths,
-                        &mut self.instances,
-                        &mut pass,
                     )?;
+                    let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    self.renderer
+                        .draw_paths_from_intermediate(paths, &mut self.instances, pass)?;
                 }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
-                    drop(pass);
-                    for filter in &self.scene.backdrop_filters[range.clone()] {
+                    self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    drop(pass.take());
+                    for index in range.clone() {
+                        let filter = &self.scene.backdrop_filters[index];
                         if let Some(paint) = &filter.wallpaper {
                             self.renderer.draw_wallpaper(
                                 &mut self.encoder,
                                 self.targets.current(),
                                 filter,
                                 paint,
+                                scissor,
                             );
                             continue;
                         }
+                        let (lens, radius) =
+                            backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
+                        let width = self.renderer.target.width();
+                        let height = self.renderer.target.height();
                         let region = gpui_render::blur::backdrop_snapshot_region(
                             filter.bounds,
-                            filter.max_blur_radius(),
-                            &filter.lens,
-                            self.renderer.target.width(),
-                            self.renderer.target.height(),
+                            radius,
+                            &lens,
+                            width,
+                            height,
                         );
-                        // A lens reads the sharp full-resolution backdrop, so it needs a copy even
-                        // when the backdrop is the target it composites into.
-                        let snapshot = if self.targets.inherits_backdrop() {
+                        let reblur = damage.is_some_and(|plan| plan.reblur.contains(&index));
+                        let key = if self.targets.inherits_backdrop() || reblur {
+                            None
+                        } else {
+                            self.backdrop_keys.get(index).copied().flatten()
+                        };
+                        let hit = key.is_some_and(|key| {
+                            let resources = self.renderer.resources();
+                            resources.backdrop_cache.borrow_mut().restore(
+                                key,
+                                &mut self.encoder,
+                                resources.blur_ping_texture.as_ref(),
+                                resources.backdrop_snapshot_texture.as_ref(),
+                            )
+                        });
+                        if damage.is_some() && !reblur && !hit && uses_blurred_backdrop(filter) {
+                            // The plan promised a cache entry for every glass it does not re-blur.
+                            return Err(DrawError::MissingIntermediateTarget);
+                        }
+                        let snapshot = if hit {
+                            if lens.is_active() {
+                                self.renderer.resources().backdrop_snapshot_view.clone()
+                            } else {
+                                None
+                            }
+                        } else if self.targets.inherits_backdrop() {
+                            // A lens reads the sharp full-resolution backdrop, so it needs a copy
+                            // even when the backdrop is the target it composites into.
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
                                 region,
                             ))
-                        } else if filter.lens.is_active() {
+                        } else if lens.is_active() {
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 std::iter::once(self.targets.current()),
@@ -468,82 +609,143 @@ impl<'a> FrameEncoder<'a> {
                                 content_mask: filter.content_mask.bounds,
                                 corner_radii: filter.corner_radii,
                                 corner_smoothing: filter.corner_smoothing,
-                                blur_radius: filter.max_blur_radius(),
+                                blur_radius: radius,
                                 opacity: filter.opacity,
+                                scale: 1.0,
+                                scale_origin: Point::default(),
+                                composite_offset: Point::default(),
+                                composite_rotation: 0.0,
                                 clip: FilterCompositeClip::RoundedBounds,
-                                lens: filter.lens,
+                                lens,
                             },
+                            hit,
+                            wgpu::LoadOp::Load,
+                            scissor,
                         );
+                        if let (false, Some(key)) = (hit, key) {
+                            let resources = self.renderer.resources();
+                            let blurred = BlurKernel::for_radius(radius)
+                                .and_then(|_| resources.blur_ping_texture.as_ref())
+                                .map(|ping| {
+                                    (
+                                        ping,
+                                        ScissorRectangle::for_blurred_bounds(
+                                            filter.bounds,
+                                            GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * radius,
+                                            width,
+                                            height,
+                                        ),
+                                    )
+                                });
+                            let sharp = if lens.is_active() {
+                                resources.backdrop_snapshot_texture.as_ref().map(|texture| {
+                                    (
+                                        texture,
+                                        ScissorRectangle {
+                                            x: region.origin.x.0 as u32,
+                                            y: region.origin.y.0 as u32,
+                                            width: region.size.width.0 as u32,
+                                            height: region.size.height.0 as u32,
+                                        },
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                            resources.backdrop_cache.borrow_mut().store(
+                                &resources.device,
+                                &mut self.encoder,
+                                key,
+                                blurred,
+                                sharp,
+                            );
+                        }
                     }
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_backdrop_filter",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                    );
                 }
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries must be compiled into render commands")
                 }
-                RenderCommand::Batch(batch) => encode_inline_batch(
-                    self.renderer,
-                    self.scene,
-                    batch,
-                    &mut self.instances,
-                    &mut pass,
-                )?,
+                RenderCommand::Batch(batch) => {
+                    let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    encode_inline_batch(
+                        self.renderer,
+                        self.scene,
+                        batch,
+                        &mut self.instances,
+                        pass,
+                    )?;
+                }
                 RenderCommand::BeginFilter {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(index),
                 } => {
-                    drop(pass);
+                    drop(pass.take());
+                    parent_loads.push(pending_load);
                     let target =
                         self.renderer.resources().filter_group_views[index.as_usize()].clone();
+                    if motion_target.is_none()
+                        && self.scene.filter_boundaries[*boundary_index]
+                            .motion
+                            .is_animated()
+                    {
+                        motion_target = Some(*index);
+                        scissor = None;
+                    }
                     self.targets.enter(
                         target,
                         self.scene.filter_boundaries[*boundary_index]
                             .filters
                             .is_empty(),
                     );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "filter_group",
-                        self.targets.current(),
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    );
+                    pending_load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
-                    target: FilterRenderTarget::Isolated(_),
+                    target: FilterRenderTarget::Isolated(index),
                     ..
                 } => {
-                    drop(pass);
+                    if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+                        self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    }
+                    drop(pass.take());
                     let (filtered, parent) = self.targets.exit();
+                    pending_load = parent_loads.pop().expect("filter parent load must exist");
+                    if motion_target == Some(*index) {
+                        motion_target = None;
+                        scissor = self.scissor;
+                    }
                     let boundary = &self.scene.filter_boundaries[*boundary_index];
+                    let (opacity, scale, composite_offset, composite_rotation, clip) =
+                        gpui::motion_composite_parameters(
+                            boundary,
+                            self.renderer.animation_time_ms,
+                            self.scene.scale_factor,
+                        );
                     self.renderer.blur_and_composite(
                         &mut self.encoder,
                         &filtered,
                         parent,
                         FilterCompositeParameters {
                             bounds: boundary.bounds,
-                            content_mask: boundary.content_mask.bounds,
+                            content_mask: clip.map_or(boundary.content_mask.bounds, |clip| {
+                                boundary.content_mask.bounds.intersect(&clip)
+                            }),
                             corner_radii: boundary.corner_radii,
                             corner_smoothing: boundary.corner_smoothing,
                             blur_radius: boundary.max_blur_radius(),
-                            opacity: boundary.opacity,
+                            opacity,
+                            scale,
+                            composite_offset,
+                            composite_rotation,
+                            scale_origin: boundary.scale_origin,
                             clip: FilterCompositeClip::ContentShape,
                             lens: Default::default(),
                         },
+                        false,
+                        pending_load,
+                        scissor,
                     );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_content_filter",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                    );
+                    pending_load = wgpu::LoadOp::Load;
                 }
                 RenderCommand::BeginFilter {
                     target: FilterRenderTarget::Inline,
@@ -555,9 +757,33 @@ impl<'a> FrameEncoder<'a> {
                 } => {}
             }
         }
+        if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+            self.scene_pass(&mut pass, &mut pending_load, scissor);
+        }
         drop(pass);
         self.targets.assert_balanced();
         Ok(())
+    }
+
+    fn scene_pass<'pass>(
+        &mut self,
+        pass: &'pass mut Option<wgpu::RenderPass<'static>>,
+        pending_load: &mut wgpu::LoadOp<wgpu::Color>,
+        scissor: Option<ScissorRectangle>,
+    ) -> &'pass mut wgpu::RenderPass<'static> {
+        pass.get_or_insert_with(|| {
+            let pass = begin_scene_render_pass(
+                self.renderer,
+                &mut self.encoder,
+                "scene_pass",
+                self.targets.current(),
+                *pending_load,
+                scissor,
+            )
+            .forget_lifetime();
+            *pending_load = wgpu::LoadOp::Load;
+            pass
+        })
     }
 }
 
@@ -567,8 +793,9 @@ fn begin_scene_render_pass<'a>(
     label: &'a str,
     target: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
+    scissor: Option<ScissorRectangle>,
 ) -> wgpu::RenderPass<'a> {
-    let mut pass = begin_color_render_pass(encoder, label, target, load);
+    let mut pass = begin_color_render_pass(encoder, label, target, load, scissor);
     pass.set_bind_group(
         shader_interface::GLOBAL_BIND_GROUP,
         &renderer.resources().globals_bind_group,

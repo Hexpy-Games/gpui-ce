@@ -2,6 +2,7 @@
 // todo("windows"): remove
 #![cfg_attr(windows, allow(dead_code))]
 
+use collections::FxHashSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +16,23 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+mod bounds;
+pub use bounds::*;
+mod compositor;
+pub use compositor::{CompositorGroup, CompositorSprite, SpriteContents};
+mod damage;
+pub use damage::{DamagePlan, DamageRedraw};
+mod live_raster;
+pub use live_raster::rasterize_live;
+mod motion;
+pub use motion::*;
+mod frame_loop;
+pub use frame_loop::*;
 mod plan;
 pub use plan::*;
 mod abi;
@@ -58,6 +74,16 @@ impl From<bool> for ShaderBool {
     }
 }
 
+/// An open filter group while its contents are being recorded.
+struct FilterGroup {
+    /// The group is fully transparent, so it and its contents are not recorded.
+    suppressed: bool,
+    /// Index of the group's start marker in `Scene::filter_boundaries`.
+    start_index: usize,
+    /// `Scene::paint_operations` length right after the start marker was recorded.
+    start_len: usize,
+}
+
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
@@ -65,6 +91,7 @@ pub struct Scene {
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<Option<DrawOrder>>,
     filter_depth: usize,
+    filter_groups: Vec<FilterGroup>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -74,10 +101,20 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     surface_opacities: Vec<f32>,
+    /// Set by the window before painting: whether the platform compositor draws animated sprites
+    /// that nothing covers, so `finish` moves them out of the sprite lists.
+    pub offload_animations: bool,
+    pub scale_factor: f32,
+    compositor_sprites: Vec<CompositorSprite>,
+    compositor_groups: Vec<CompositorGroup>,
+    live_layers: Vec<LiveLayer>,
+    covered_live_keys: FxHashSet<u64>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
     is_finished: bool,
+    has_animations: bool,
+    generation: u64,
 }
 
 #[expect(missing_docs)]
@@ -87,6 +124,7 @@ impl Scene {
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.filter_depth = 0;
+        self.filter_groups.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -96,10 +134,16 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.surface_opacities.clear();
+        self.compositor_sprites.clear();
+        self.compositor_groups.clear();
+        self.live_layers.clear();
+        self.covered_live_keys.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
         self.is_finished = false;
+        self.has_animations = false;
+        self.generation = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -138,6 +182,45 @@ impl Scene {
         let mut primitive = primitive.into();
         self.is_finished = false;
 
+        // A fully transparent group paints nothing: it and its contents produce no draw data.
+        // Their operations are still recorded, so a cached view inside replays them when the
+        // group is visible again.
+        let suppressed = self
+            .filter_groups
+            .last()
+            .is_some_and(|group| group.suppressed);
+        match &primitive {
+            Primitive::FilterBoundary(boundary)
+                if boundary.is_start && (suppressed || boundary.opacity <= 0.0) =>
+            {
+                self.filter_groups.push(FilterGroup {
+                    suppressed: true,
+                    start_index: 0,
+                    start_len: 0,
+                });
+                self.paint_operations
+                    .push(PaintOperation::Primitive(primitive));
+                return;
+            }
+            Primitive::FilterBoundary(boundary) if !boundary.is_start => {
+                if let Some(group) = self.filter_groups.pop() {
+                    if group.suppressed {
+                        self.paint_operations
+                            .push(PaintOperation::Primitive(primitive));
+                        return;
+                    }
+                    self.close_opacity_group(&group);
+                }
+            }
+            Primitive::FilterBoundary(_) => {}
+            _ if suppressed => {
+                self.paint_operations
+                    .push(PaintOperation::Primitive(primitive));
+                return;
+            }
+            _ => {}
+        }
+
         // Cached glyph batches may have been recorded outside isolation. The monochrome
         // pipeline also accepts RGB atlas masks and provides a scalar-alpha fallback.
         if self.is_in_filter_group()
@@ -151,6 +234,7 @@ impl Scene {
                 color: sprite.color,
                 tile: sprite.tile,
                 transformation: sprite.transformation,
+                frames: FrameLoop::NONE,
             });
         }
 
@@ -178,9 +262,15 @@ impl Scene {
             // A backdrop reads past its bounds; order it above everything it samples.
             let order_bounds = match &primitive {
                 Primitive::BackdropFilter(filter) => filter
-                    .bounds
-                    .dilate(ScaledPixels(filter.sampling_margin()))
+                    .sampling_region()
                     .intersect(&filter.content_mask.bounds),
+                // A turning sprite sweeps past its bounds; order it above what it can reach.
+                Primitive::MonochromeSprite(MonochromeSprite { frames, .. })
+                | Primitive::PolychromeSprite(PolychromeSprite { frames, .. })
+                    if frames.turn_period_ms != 0 =>
+                {
+                    primitive.painted_bounds().unwrap_or(clipped_bounds)
+                }
                 _ => clipped_bounds,
             };
             self.layer_stack
@@ -244,8 +334,110 @@ impl Scene {
             }
         }
 
+        let opens_group =
+            matches!(&primitive, Primitive::FilterBoundary(boundary) if boundary.is_start);
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
+        if opens_group {
+            self.filter_groups.push(FilterGroup {
+                suppressed: false,
+                start_index: self.filter_boundaries.len() - 1,
+                start_len: self.paint_operations.len(),
+            });
+        }
+    }
+
+    /// An opacity-only group draws no more than its content. A group of one primitive draws it
+    /// with its alpha multiplied ([`FilterBoundary::inline`]); any other group composites only the
+    /// union of its contents instead of the whole window. Only the drawn copies change: the
+    /// recorded operations stay as painted, so `replay` derives both again from the group as it
+    /// is then.
+    fn close_opacity_group(&mut self, group: &FilterGroup) {
+        let start = &self.filter_boundaries[group.start_index];
+        if !start.motion.is_animated() && (!start.filters.is_empty() || start.scale != 1.0) {
+            return;
+        }
+        if !start.motion.is_animated() && self.inline_single_primitive_group(group) {
+            return;
+        }
+        let content = self.paint_operations[group.start_len..]
+            .iter()
+            .filter_map(|operation| match operation {
+                PaintOperation::Primitive(primitive) => primitive.painted_bounds(),
+                _ => None,
+            })
+            .reduce(|a, b| a.union(&b))
+            .unwrap_or_default();
+        let start = &mut self.filter_boundaries[group.start_index];
+        start.bounds = start.bounds.intersect(&content);
+        if !start.motion.is_animated() {
+            start.content_mask.bounds = start.content_mask.bounds.intersect(&content);
+        }
+    }
+
+    /// Compositing a group of one primitive at `opacity` equals drawing that primitive with its
+    /// alpha multiplied by `opacity`; marks the group inline when it holds exactly one.
+    fn inline_single_primitive_group(&mut self, group: &FilterGroup) -> bool {
+        let factor = self.filter_boundaries[group.start_index].opacity;
+        let [PaintOperation::Primitive(primitive)] = &self.paint_operations[group.start_len..]
+        else {
+            return false;
+        };
+        match primitive {
+            Primitive::Shadow(_) => {
+                if let Some(shadow) = self.shadows.last_mut() {
+                    shadow.color = shadow.color.opacity(factor);
+                }
+            }
+            Primitive::Quad(_) => {
+                if let Some(quad) = self.quads.last_mut() {
+                    quad.background = quad.background.opacity(factor);
+                    quad.border_color = quad.border_color.opacity(factor);
+                }
+            }
+            Primitive::Path(_) => {
+                if let Some(path) = self.paths.last_mut() {
+                    path.color = path.color.opacity(factor);
+                }
+            }
+            Primitive::Underline(_) => {
+                if let Some(underline) = self.underlines.last_mut() {
+                    underline.color.a *= factor;
+                }
+            }
+            Primitive::MonochromeSprite(_) => {
+                if let Some(sprite) = self.monochrome_sprites.last_mut() {
+                    sprite.color.a *= factor;
+                }
+            }
+            Primitive::SubpixelSprite(_) => {
+                if let Some(sprite) = self.subpixel_sprites.last_mut() {
+                    sprite.color.a *= factor;
+                }
+            }
+            Primitive::PolychromeSprite(_) => {
+                if let Some(sprite) = self.polychrome_sprites.last_mut() {
+                    sprite.opacity *= factor;
+                }
+            }
+            Primitive::BackdropFilter(_) => {
+                if let Some(filter) = self.backdrop_filters.last_mut() {
+                    filter.opacity *= factor;
+                }
+            }
+            // A surface has no alpha of its own to carry the opacity; nested groups stay isolated.
+            Primitive::Surface(_) | Primitive::FilterBoundary(_) => return false,
+        }
+        self.filter_boundaries[group.start_index].inline = true;
+        true
+    }
+
+    pub(crate) fn insert_live_layer(&mut self, mut layer: LiveLayer) {
+        self.is_finished = false;
+        layer.order = self.primitive_bounds.insert(layer.bounds);
+        self.paint_operations
+            .push(PaintOperation::LiveLayer(layer.clone()));
+        self.live_layers.push(layer);
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -254,11 +446,32 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::LiveLayer(layer) => self.insert_live_layer(layer.clone()),
             }
         }
     }
 
     pub fn finish(&mut self) {
+        let layers = std::mem::take(&mut self.live_layers);
+        for layer in layers {
+            // A layer laid out at zero size has no surface to present to; it paints nothing.
+            if layer.bounds.size.width.0 < 1.0 || layer.bounds.size.height.0 < 1.0 {
+                continue;
+            }
+            if !self.offload_animations
+                || compositor::covered(
+                    self,
+                    std::ptr::null(),
+                    (layer.order, layer.order),
+                    &layer.bounds,
+                )
+                || !compositor::unfaded(&layer.bounds, &layer.content_mask)
+            {
+                self.covered_live_keys.insert(layer.key);
+            } else {
+                self.live_layers.push(layer);
+            }
+        }
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
@@ -278,9 +491,158 @@ impl Scene {
         // the start (false = 0) ahead of the end (true = 1) so the pair stays well-formed.
         self.filter_boundaries
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
+        let now = animation_time_ms();
+        let mut pending_starts = SmallVec::<[usize; 4]>::new();
+        let mut removed_orders = FxHashSet::default();
+        for (index, boundary) in self.filter_boundaries.iter().enumerate() {
+            if boundary.is_start {
+                pending_starts.push(index);
+            } else if let Some(start_index) = pending_starts.pop() {
+                let start = &self.filter_boundaries[start_index];
+                let plain = start.opacity == 1.0 && start.scale == 1.0 && start.filters.is_empty();
+                // A played-out motion at rest draws what its content draws, and a motion around
+                // nothing draws nothing: neither needs a group or frames.
+                let finished = !start.motion.is_active(now) && start.motion.rests_at_end();
+                let empty = !self.paints_between(start.order, boundary.order);
+                if start.motion.is_animated() && plain && (finished || empty) {
+                    removed_orders.insert(start.order);
+                    removed_orders.insert(boundary.order);
+                }
+            }
+        }
+        self.filter_boundaries
+            .retain(|boundary| !removed_orders.contains(&boundary.order));
+        // Only the render data loses them: cached views replay `paint_operations` by index.
         let commands = std::mem::take(&mut self.render_plan.commands);
         self.render_plan = ScenePlan::build(self, commands);
+        // The plan says which filter groups are isolated, so sprites move out only after it.
+        if self.offload_animations && compositor::offload(self) {
+            let commands = std::mem::take(&mut self.render_plan.commands);
+            self.render_plan = ScenePlan::build(self, commands);
+        }
+        self.has_animations = !self.live_layers.is_empty()
+            || self
+                .monochrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .polychrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.is_animated())
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_animated())
+            });
+        self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.is_finished = true;
+    }
+
+    /// Whether any primitive carries an animated motion (set by `finish`).
+    pub fn has_animations(&self) -> bool {
+        self.has_animations
+    }
+
+    /// Whether any primitive is drawn strictly between two draw orders (a group's markers).
+    fn paints_between(&self, start: DrawOrder, end: DrawOrder) -> bool {
+        let inside = |order: DrawOrder| start < order && order < end;
+        self.shadows.iter().any(|p| inside(p.order))
+            || self.quads.iter().any(|p| inside(p.order))
+            || self.paths.iter().any(|p| inside(p.order))
+            || self.underlines.iter().any(|p| inside(p.order))
+            || self.monochrome_sprites.iter().any(|p| inside(p.order))
+            || self.subpixel_sprites.iter().any(|p| inside(p.order))
+            || self.polychrome_sprites.iter().any(|p| inside(p.order))
+            || self.surfaces.iter().any(|p| inside(p.order))
+            || self.backdrop_filters.iter().any(|p| inside(p.order))
+    }
+
+    /// Whether any retained animation is still playing at this clock value.
+    pub fn animating_at(&self, now_ms: u32) -> bool {
+        !self.live_layers.is_empty()
+            || self
+                .monochrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .polychrome_sprites
+                .iter()
+                .any(|sprite| sprite.frames.is_animated())
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.is_active(now_ms))
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_active(now_ms))
+            })
+    }
+
+    /// Whether retained animation parameters differ between these clock values.
+    pub fn changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
+        (!self.live_layers.is_empty() && b_ms.wrapping_sub(a_ms) >= 16)
+            || self.retained_changes_between(a_ms, b_ms)
+    }
+
+    pub(crate) fn retained_changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
+        self.monochrome_sprites
+            .iter()
+            .map(|sprite| &sprite.frames)
+            .chain(self.polychrome_sprites.iter().map(|sprite| &sprite.frames))
+            .any(|frames| {
+                frames.turn_period_ms != 0
+                    || (frames.frame_count > 1
+                        && a_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+                            * frames.frame_count
+                            / frames.period_ms
+                            != b_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+                                * frames.frame_count
+                                / frames.period_ms)
+            })
+            || self
+                .filter_boundaries
+                .iter()
+                .any(|boundary| boundary.motion.changes_between(a_ms, b_ms))
+            || self.backdrop_filters.iter().any(|filter| {
+                filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.changes_between(a_ms, b_ms))
+            })
+    }
+
+    /// Procedural layers drawn on separate platform surfaces.
+    pub fn live_layers(&self) -> &[LiveLayer] {
+        &self.live_layers
+    }
+
+    /// Live layer keys that require window painting on the next frame.
+    pub fn covered_live_keys(&self) -> &FxHashSet<u64> {
+        &self.covered_live_keys
+    }
+
+    /// The animated sprites the platform compositor draws; see [`Self::offload_animations`].
+    pub fn compositor_sprites(&self) -> &[CompositorSprite] {
+        &self.compositor_sprites
+    }
+
+    /// The looping motion groups the platform rasterises and animates.
+    pub fn compositor_groups(&self) -> &[CompositorGroup] {
+        &self.compositor_groups
+    }
+
+    /// A process-unique id assigned by every `finish`; equal ids mean identical primitives.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// What an animation tick redraws; computed once per finished scene.
+    pub fn damage_plan(&self) -> &DamagePlan {
+        self.render_plan().damage.get_or_init(|| damage::plan(self))
     }
 
     #[cfg_attr(
@@ -391,6 +753,7 @@ pub(crate) enum PrimitiveKind {
 }
 
 pub(crate) enum PaintOperation {
+    LiveLayer(LiveLayer),
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
@@ -441,6 +804,30 @@ impl Primitive {
             Primitive::BackdropFilter(filter) => &filter.content_mask,
             Primitive::FilterBoundary(boundary) => &boundary.content_mask,
         }
+    }
+
+    /// The device-pixel area this primitive can change, clipped to its content mask. A group
+    /// that filters or scales its content can draw anywhere in its bounds, so its start marker
+    /// claims them; any other boundary is `None`, since an opacity-only group draws no more than
+    /// its content.
+    fn painted_bounds(&self) -> Option<Bounds<ScaledPixels>> {
+        Some(match self {
+            Primitive::FilterBoundary(boundary)
+                if boundary.is_start && (!boundary.filters.is_empty() || boundary.scale != 1.0) =>
+            {
+                boundary.bounds.intersect(&boundary.content_mask.bounds)
+            }
+            Primitive::FilterBoundary(_) => return None,
+            Primitive::Shadow(shadow) => shadow.painted_bounds(),
+            Primitive::Quad(quad) => quad.painted_bounds(),
+            Primitive::Path(path) => path.painted_bounds(),
+            Primitive::Underline(underline) => underline.painted_bounds(),
+            Primitive::MonochromeSprite(sprite) => sprite.painted_bounds(),
+            Primitive::SubpixelSprite(sprite) => sprite.painted_bounds(),
+            Primitive::PolychromeSprite(sprite) => sprite.painted_bounds(),
+            Primitive::Surface(surface) => surface.painted_bounds(),
+            Primitive::BackdropFilter(filter) => filter.painted_bounds(),
+        })
     }
 }
 
@@ -890,8 +1277,33 @@ pub struct BackdropFilter {
     pub opacity: f32,
     /// Optional liquid-glass lens applied while compositing.
     pub lens: BackdropLens,
+    /// Optional starting lens and blur, interpolated at draw time.
+    pub appear: Option<BackdropAppear>,
     /// A procedural wallpaper drawn here instead of filtering the backdrop.
     pub wallpaper: Option<WallpaperPaint>,
+}
+
+/// Starting lens and blur in device pixels, with appearance timing.
+#[derive(Debug, Clone, Copy)]
+#[expect(missing_docs)]
+pub struct BackdropAppear {
+    pub lens: BackdropLens,
+    pub blur: f32,
+    pub motion: LayerMotion,
+}
+
+/// Resolves a backdrop filter's lens and blur at the wrapping animation clock value.
+pub fn backdrop_appear_parameters(filter: &BackdropFilter, now_ms: u32) -> (BackdropLens, f32) {
+    let blur = filter.max_blur_radius();
+    if let Some(appear) = filter.appear {
+        let p = appear.motion.progress(now_ms);
+        (
+            appear.lens.lerp(&filter.lens, p),
+            appear.blur + (blur - appear.blur) * p,
+        )
+    } else {
+        (filter.lens, blur)
+    }
 }
 
 /// One fullscreen shader pass of a [`WallpaperPaint`], rendered into its own cached texture of
@@ -929,19 +1341,6 @@ impl BackdropFilter {
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
     }
-
-    /// How far outside `bounds` compositing reads the backdrop, in device pixels: the blur runs
-    /// at half resolution with sigma = radius/2 texels, reaching 3 sigma, i.e. 3 * radius here.
-    /// A lens reads only its frost radius past the rim.
-    pub fn sampling_margin(&self) -> f32 {
-        let radius = self.max_blur_radius();
-        let blur = if radius > 0.0 {
-            3.0 * radius + 2.0
-        } else {
-            0.0
-        };
-        blur.max(self.lens.sampling_margin())
-    }
 }
 
 /// A liquid-glass lens for a [`BackdropFilter`], in device pixels, after the height-field
@@ -960,6 +1359,8 @@ impl BackdropFilter {
 pub struct BackdropLens {
     /// Radius of the circular bevel, measured inward from the edge (capped at the half size).
     pub bezel: f32,
+    /// CSS `saturate()` amount applied to the sampled backdrop after the blur; `None` leaves it unchanged
+    pub saturation: Option<f32>,
     /// Inward shift per unit of bevel slope (ybouane's refraction strength).
     pub refraction: f32,
     /// Rim highlight and Fresnel strength, 0 to 1.
@@ -1022,9 +1423,45 @@ pub struct BackdropLens {
 }
 
 impl BackdropLens {
+    /// Interpolates lens strengths, taking non-numeric fields from `to`.
+    pub fn lerp(&self, to: &Self, p: f32) -> Self {
+        Self {
+            bezel: self.bezel + (to.bezel - self.bezel) * p,
+            saturation: match (self.saturation, to.saturation) {
+                (Some(from), Some(to)) => Some(from + (to - from) * p),
+                _ => to.saturation,
+            },
+            refraction: self.refraction + (to.refraction - self.refraction) * p,
+            specular: self.specular + (to.specular - self.specular) * p,
+            dispersion: self.dispersion + (to.dispersion - self.dispersion) * p,
+            frost: self.frost + (to.frost - self.frost) * p,
+            lift: self.lift + (to.lift - self.lift) * p,
+            rim: self.rim + (to.rim - self.rim) * p,
+            depth: self.depth + (to.depth - self.depth) * p,
+            light_angle: self.light_angle + (to.light_angle - self.light_angle) * p,
+            opposite: self.opposite + (to.opposite - self.opposite) * p,
+            shade: self.shade + (to.shade - self.shade) * p,
+            fresnel: self.fresnel + (to.fresnel - self.fresnel) * p,
+            focus: self.focus + (to.focus - self.focus) * p,
+            ambient: self.ambient + (to.ambient - self.ambient) * p,
+            halo: self.halo + (to.halo - self.halo) * p,
+            fold: self.fold + (to.fold - self.fold) * p,
+            fold_band: self.fold_band + (to.fold_band - self.fold_band) * p,
+            fold_depth: self.fold_depth + (to.fold_depth - self.fold_depth) * p,
+            curve: self.curve + (to.curve - self.curve) * p,
+            sharp_rim: self.sharp_rim + (to.sharp_rim - self.sharp_rim) * p,
+            sharp_full: to.sharp_full,
+            tone: std::array::from_fn(|i| self.tone[i] + (to.tone[i] - self.tone[i]) * p),
+            hairline: std::array::from_fn(|i| {
+                self.hairline[i] + (to.hairline[i] - self.hairline[i]) * p
+            }),
+            exact: to.exact,
+        }
+    }
+
     /// Whether the lens changes anything.
     pub fn is_active(&self) -> bool {
-        self.bezel > 0.0
+        self.bezel > 0.0 || self.saturation.is_some()
     }
 
     /// How far outside the shape the lens reads the backdrop, in device pixels: its samples
@@ -1043,10 +1480,11 @@ impl From<BackdropFilter> for Primitive {
     }
 }
 
-/// The start or end marker of a content-filter or opacity isolation group. The element's
-/// subtree is painted between a matched start/end pair; the renderer redirects that span into
-/// an offscreen target, filters it, and composites it back at `bounds`. Produces the CSS
-/// `filter` effect (e.g. blurring the element and its children as a single group).
+/// The start or end marker of a content-filter, opacity, or scale isolation group. The
+/// element's subtree is painted between a matched start/end pair; the renderer redirects that
+/// span into an offscreen target, filters it, and composites it back at `bounds` with its
+/// configured opacity and scale. Produces the CSS `filter` effect (e.g. blurring the element
+/// and its children as a single group).
 #[derive(Debug, Clone)]
 #[expect(missing_docs)]
 pub struct FilterBoundary {
@@ -1056,13 +1494,25 @@ pub struct FilterBoundary {
     pub corner_radii: Corners<ScaledPixels>,
     pub corner_smoothing: f32,
     /// The filter chain applied to the isolated group, in scene (device-pixel) space. Identity
-    /// filters are dropped at paint time. An empty chain represents an opacity-only group.
+    /// filters are dropped at paint time. An empty chain represents an opacity-only or
+    /// scale-only group.
     /// Inline capacity 4 (same struct size as 1 here — see [`BackdropFilter::filters`]).
     pub filters: SmallVec<[ScaledFilter; 4]>,
     /// Opacity applied once when compositing the completed group into its parent.
     pub opacity: f32,
+    /// Uniform scale applied while compositing the completed group into its parent.
+    pub scale: f32,
+    /// Origin of the group scale in scene (device-pixel) space.
+    pub scale_origin: Point<ScaledPixels>,
+    /// Time-driven composite transform.
+    pub motion: LayerMotion,
+    /// Element bounds used by relative offsets and animated clips.
+    pub motion_bounds: Bounds<ScaledPixels>,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
+    /// The group holds one primitive that already carries the group's opacity, so it is drawn
+    /// directly into the parent without an offscreen target. Set by [`Scene::insert_primitive`].
+    pub inline: bool,
 }
 
 impl FilterBoundary {
@@ -1213,6 +1663,7 @@ pub struct MonochromeSprite {
     pub color: SceneHsla,
     pub tile: AtlasTile,
     pub transformation: TransformationMatrix,
+    pub frames: FrameLoop,
 }
 
 impl From<MonochromeSprite> for Primitive {
@@ -1252,6 +1703,7 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub frames: FrameLoop,
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -1508,6 +1960,7 @@ mod tests {
                 padding: 0,
                 bounds: Bounds::<DevicePixels>::default(),
             },
+            frames: FrameLoop::NONE,
         }
     }
 
@@ -1599,7 +2052,12 @@ mod tests {
             corner_smoothing: 0.0,
             filters: smallvec::smallvec![ScaledFilter::Blur(scaled(8.0))],
             opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Point::default(),
+            motion: LayerMotion::NONE,
+            motion_bounds: Default::default(),
             is_start,
+            inline: false,
         }
     }
 
@@ -1809,6 +2267,8 @@ mod tests {
                 scene.insert_primitive(backdrop());
             }
 
+            // Two primitives: a single one inside an opacity group is drawn inline.
+            scene.insert_primitive(quad());
             scene.insert_primitive(quad());
 
             if group {
@@ -1830,5 +2290,52 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Inserts `start`, `quads`, then the matching end marker, and finishes the scene.
+    fn finished_group(opacity: f32, quads: Vec<Quad>) -> Scene {
+        let mut start = boundary(true);
+        start.filters.clear();
+        start.opacity = opacity;
+        let mut scene = Scene::default();
+        scene.insert_primitive(start.clone());
+        for quad in quads {
+            scene.insert_primitive(quad);
+        }
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..start
+        });
+        scene.finish();
+        scene
+    }
+
+    #[test]
+    fn fully_transparent_group_paints_nothing() {
+        let scene = finished_group(0.0, vec![quad()]);
+
+        assert!(scene.quads.is_empty());
+        assert!(scene.filter_boundaries.is_empty());
+        assert!(!scene.render_plan().requirements().uses_offscreen_target);
+    }
+
+    #[test]
+    fn single_primitive_opacity_group_is_drawn_inline() {
+        let mut solid = quad();
+        solid.background.solid.a = 1.0;
+        let scene = finished_group(0.5, vec![solid]);
+
+        assert_eq!(scene.render_plan().requirements().isolated_target_count, 0);
+        assert_eq!(scene.quads[0].background.solid.a, 0.5);
+    }
+
+    #[test]
+    fn multi_primitive_opacity_group_stays_isolated() {
+        let scene = finished_group(0.5, vec![quad(), quad()]);
+
+        assert_eq!(scene.render_plan().requirements().isolated_target_count, 1);
+        // The group composites its content's area, not the window.
+        let content = quad().bounds.intersect(&quad().content_mask.bounds);
+        assert_eq!(scene.filter_boundaries[0].bounds, content);
     }
 }

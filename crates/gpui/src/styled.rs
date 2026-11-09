@@ -1,10 +1,12 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Edges, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures,
     FontStyle, FontWeight, FontWidth, GridPlacement, GridTemplate, GridTemplateMinSize,
-    JustifyContent, LayoutDirection, Length, Pixels, SharedString, StrikethroughStyle,
-    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, TextTransform, UnderlineStyle,
-    UnicodeBidi, VerticalAlign, WhiteSpace, px, relative, rems,
+    JustifyContent, LayoutDirection, Length, OverflowWrap, Pixels, SharedString,
+    StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
+    TextTransform, UnderlineStyle, UnicodeBidi, VerticalAlign, WhiteSpace, WordBreak, px, relative,
+    rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -239,6 +241,18 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/whitespace#nowrap)
     fn whitespace_nowrap(mut self) -> Self {
         self.text_style().white_space = Some(WhiteSpace::Nowrap);
+        self
+    }
+
+    /// Sets how words may break across lines.
+    fn word_break(mut self, word_break: WordBreak) -> Self {
+        self.text_style().word_break = Some(word_break);
+        self
+    }
+
+    /// Sets whether long words may break to avoid overflowing a line.
+    fn overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
+        self.text_style().overflow_wrap = Some(overflow_wrap);
         self
     }
 
@@ -969,6 +983,33 @@ pub trait Styled: Sized {
     /// Sets the opacity of this element and its children, composited together as one group.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);
+        self
+    }
+
+    /// Sets the time-driven composite transform of this element and its children.
+    fn motion(mut self, motion: gpui::LayerMotion) -> Self {
+        self.style().motion = Some(motion);
+        self
+    }
+
+    /// Animates changes to this element's layout position and size.
+    fn layout_motion(mut self, motion: gpui::LayoutMotion) -> Self {
+        self.style().layout_motion = Some(motion);
+        self
+    }
+
+    /// Sets the uniform scale of this element and its children.
+    fn scale(mut self, s: f32) -> Self {
+        self.style().scale = Some(s);
+        self
+    }
+
+    /// Sets the transform origin as fractions of this element's bounds.
+    fn transform_origin(mut self, x: f32, y: f32) -> Self {
+        self.style().transform_origin = gpui::PointRefinement {
+            x: Some(x),
+            y: Some(y),
+        };
         self
     }
 

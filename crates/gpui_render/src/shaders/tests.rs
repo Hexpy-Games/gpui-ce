@@ -126,10 +126,11 @@ fn scene_instance_storage_sizes_are_bounded() {
         ("Quad", std::mem::size_of::<gpui::Quad>(), 248),
         // e7278008d9 added `clip_outside` and `padding` on purpose (+8 bytes).
         ("Shadow", std::mem::size_of::<gpui::Shadow>(), 192),
+        // The frame loop (`FrameLoop`, 24 bytes) rides on every sprite instance.
         (
             "PolychromeSprite",
             std::mem::size_of::<gpui::PolychromeSprite>(),
-            112,
+            136,
         ),
     ] {
         assert!(

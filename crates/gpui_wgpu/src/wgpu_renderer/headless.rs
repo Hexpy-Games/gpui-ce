@@ -38,9 +38,9 @@ impl WgpuRenderer {
         Ok(renderer)
     }
 
-    fn create_offscreen_target(&self) -> OffscreenTarget {
-        let width = self.target.width();
-        let height = self.target.height();
+    fn create_offscreen_target(&self, size: Size<DevicePixels>) -> OffscreenTarget {
+        let width = size.width.0 as u32;
+        let height = size.height.0 as u32;
         let padded_bytes_per_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let texture = self
             .resources()
@@ -74,7 +74,7 @@ impl WgpuRenderer {
             view,
             readback,
             padded_bytes_per_row,
-            size: self.viewport_size(),
+            size,
         }
     }
 
@@ -123,7 +123,7 @@ impl WgpuRenderer {
 
     /// Renders through the normal scene path and reads back without presenting.
     pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
-        let target = self.create_offscreen_target();
+        let target = self.create_offscreen_target(self.viewport_size());
         let submission = self
             .render_to_view_with_readback(scene, &target.view, target.readback_copy())
             .ok_or_else(|| anyhow::anyhow!("failed to render scene into the offscreen target"))?;
@@ -178,7 +178,7 @@ impl WgpuHeadlessRenderer {
             return Ok(());
         }
         self.renderer.update_drawable_size(size);
-        self.target = Some(self.renderer.create_offscreen_target());
+        self.target = Some(self.renderer.create_offscreen_target(size));
         Ok(())
     }
 
@@ -191,7 +191,7 @@ impl WgpuHeadlessRenderer {
         self.ensure_target(size)?;
         let target = self.target.as_ref().expect("target was just ensured");
         let submission =
-            super::frame::render_to_view(&mut self.renderer, scene, &target.view, None)
+            super::frame::render_to_view(&mut self.renderer, scene, &target.view, None, true)
                 .ok_or_else(|| anyhow::anyhow!("failed to render headless scene"))?;
         self.renderer
             .resources()
@@ -217,6 +217,27 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
             .renderer
             .render_to_view_with_readback(scene, &target.view, target.readback_copy())
             .ok_or_else(|| anyhow::anyhow!("failed to render headless scene"))?;
+        self.renderer.read_offscreen_target(target, submission)
+    }
+
+    fn set_animation_time_ms(&mut self, time_ms: u32) {
+        self.renderer.set_animation_time_ms(time_ms);
+    }
+
+    fn render_animation_frame_to_image(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.ensure_target(size)?;
+        let target = self.target.as_ref().expect("target was just ensured");
+        let submission = super::damage::render_damage_to_view(
+            &mut self.renderer,
+            scene,
+            &target.view,
+            Some(target.readback_copy()),
+        )
+        .ok_or_else(|| anyhow::anyhow!("the animation tick needs a full encode"))?;
         self.renderer.read_offscreen_target(target, submission)
     }
 

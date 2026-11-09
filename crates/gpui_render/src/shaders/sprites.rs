@@ -94,6 +94,7 @@ pub mod monochrome_sprite {
         pub color: Hsla,
         pub tile: AtlasTile,
         pub transformation: TransformationMatrix,
+        pub frames: FrameLoop,
     }
     storage!(group(1), binding(0), MONOCHROME_SPRITES: RuntimeArray<MonochromeSprite>);
     texture!(group(1), binding(1), MONOCHROME_TEXTURE: Texture2D<f32>);
@@ -121,12 +122,17 @@ pub mod monochrome_sprite {
         #[builtin(instance_index)] instance_id: u32,
     ) -> MonochromeSpriteVarying {
         let sprite = get!(MONOCHROME_SPRITES)[instance_id as usize];
-        let vertex = transformed_rectangle_vertex(vertex_id, sprite.bounds, sprite.transformation);
+        let vertex = framed_rectangle_vertex(
+            vertex_id,
+            sprite.bounds,
+            sprite.transformation,
+            sprite.frames,
+        );
         MonochromeSpriteVarying {
             position: vertex.clip_position,
             tile_position: atlas_texture_coordinates(
                 vertex.unit_position,
-                sprite.tile,
+                framed_tile(sprite.tile, sprite.frames),
                 texture_dimensions(MONOCHROME_TEXTURE),
             ),
             color: hsla_to_rgba(sprite.color),
@@ -177,6 +183,7 @@ pub mod polychrome_sprite {
         pub content_mask: ContentMask,
         pub corner_radii: Corners,
         pub tile: AtlasTile,
+        pub frames: FrameLoop,
     }
     storage!(group(1), binding(0), POLYCHROME_SPRITES: RuntimeArray<PolychromeSprite>);
     texture!(group(1), binding(1), POLYCHROME_TEXTURE: Texture2D<f32>);
@@ -195,16 +202,21 @@ pub mod polychrome_sprite {
         instance_id: u32,
         sprite: PolychromeSprite,
     ) -> PolychromeVertexData {
-        let vertex = rectangle_vertex(vertex_id, sprite.bounds);
+        let unit_position = rectangle_corner(vertex_id);
+        let viewport_position = turn_about(
+            Bounds::position(sprite.bounds, unit_position),
+            Bounds::center(sprite.bounds),
+            sprite.frames,
+        );
         PolychromeVertexData {
-            position: vertex.clip_position,
+            position: viewport_to_clip_position(viewport_position),
             tile_position: atlas_texture_coordinates(
-                vertex.unit_position,
-                sprite.tile,
+                unit_position,
+                framed_tile(sprite.tile, sprite.frames),
                 texture_dimensions(POLYCHROME_TEXTURE),
             ),
             sprite_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, sprite.content_mask.bounds),
+            clip_distances: clip_distances(viewport_position, sprite.content_mask.bounds),
         }
     }
 

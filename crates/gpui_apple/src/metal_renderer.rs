@@ -75,7 +75,7 @@ impl SceneUniforms {
                 // Metal composites straight-alpha; paths premultiply in-shader, matching
                 // the neutral (disabled) shader behavior.
                 premultiplied_alpha: ShaderBool::Disabled,
-                padding: 0,
+                animation_time_ms: gpui::animation_time_ms(),
             },
             // Metal text is gamma-corrected grayscale; font corrections stay neutral.
             font: FontRasterizationUniforms {
@@ -544,6 +544,11 @@ impl MetalRenderer {
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
         &self.sprite_atlas
+    }
+
+    /// The Metal renderer draws every sprite itself.
+    pub fn supports_compositor_sprites(&self) -> bool {
+        false
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -1353,7 +1358,7 @@ impl MetalRenderer {
                     );
                 }
 
-                (ping, blur_size)
+                (ping, full_size)
             } else {
                 (source, full_size)
             };
@@ -2278,6 +2283,7 @@ mod tests {
             color: white().into(),
             tile,
             transformation: TransformationMatrix::unit(),
+            frames: gpui::FrameLoop::NONE,
         });
         scene.finish();
 
@@ -2855,6 +2861,7 @@ mod tests {
             },
             corner_radii: Corners::all(ScaledPixels(1.0)),
             tile,
+            frames: gpui::FrameLoop::NONE,
         });
         sprite.finish();
         let Some(image) = render_for_contracts(
