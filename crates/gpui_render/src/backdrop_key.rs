@@ -66,6 +66,15 @@ fn filter_key(
     {
         return None;
     }
+    if scene.has_live_box_morphs()
+        && (scene.quads.iter().enumerate().any(|(index, quad)| {
+            quad.order < order && quad.padding != 0 && touches(scene.quad_reach(index))
+        }) || scene.shadows.iter().enumerate().any(|(index, shadow)| {
+            shadow.order < order && shadow.padding != 0 && touches(scene.shadow_reach(index))
+        }))
+    {
+        return None;
+    }
     let filters_end = scene.backdrop_filters[..index].partition_point(|p| p.order < order);
     let mut entries: Vec<(DrawOrder, u8, u64)> = Vec::new();
     for (lower_index, lower) in scene.backdrop_filters[..filters_end].iter().enumerate() {

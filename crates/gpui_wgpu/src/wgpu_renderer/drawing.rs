@@ -1,5 +1,5 @@
 use gpui::{
-    AtlasTextureId, MonochromeSprite, Path, PolychromeSprite, Quad, ScaledPixels, Shadow,
+    AtlasTextureId, MonochromeSprite, Path, PolychromeSprite, Quad, ScaledPixels, Scene, Shadow,
     SubpixelSprite, Underline,
 };
 
@@ -15,6 +15,7 @@ use super::{
 impl WgpuRenderer {
     pub(super) fn draw_quads(
         &self,
+        scene: &Scene,
         quads: &[Quad],
         smoothed: bool,
         instances: &mut InstanceUpload,
@@ -26,11 +27,30 @@ impl WgpuRenderer {
         } else {
             &pipelines.quads
         };
-        self.draw_instances(quads, pipeline, instances, pass)
+        if scene.has_live_box_morphs() {
+            let Some(slice) = instances.write_iter(
+                quads.len(),
+                quads
+                    .iter()
+                    .map(|value| scene.sampled_quad(value, self.animation_time_ms)),
+            ) else {
+                return Err(frame::DrawError::CapacityPlanningInvariant);
+            };
+            self.draw_bound_slice(
+                pipeline,
+                self.resources().instances.bind_group(),
+                &slice,
+                pass,
+            );
+            Ok(())
+        } else {
+            self.draw_instances(quads, pipeline, instances, pass)
+        }
     }
 
     pub(super) fn draw_shadows(
         &self,
+        scene: &Scene,
         shadows: &[Shadow],
         smoothed: bool,
         instances: &mut InstanceUpload,
@@ -42,7 +62,25 @@ impl WgpuRenderer {
         } else {
             &pipelines.shadows
         };
-        self.draw_instances(shadows, pipeline, instances, pass)
+        if scene.has_live_box_morphs() {
+            let Some(slice) = instances.write_iter(
+                shadows.len(),
+                shadows
+                    .iter()
+                    .map(|value| scene.sampled_shadow(value, self.animation_time_ms)),
+            ) else {
+                return Err(frame::DrawError::CapacityPlanningInvariant);
+            };
+            self.draw_bound_slice(
+                pipeline,
+                self.resources().instances.bind_group(),
+                &slice,
+                pass,
+            );
+            Ok(())
+        } else {
+            self.draw_instances(shadows, pipeline, instances, pass)
+        }
     }
 
     pub(super) fn draw_underlines(

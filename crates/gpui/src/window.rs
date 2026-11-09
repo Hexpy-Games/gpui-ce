@@ -2,17 +2,17 @@
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropAppear, BackdropFilter, BackdropLens,
-    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
-    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
-    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
+    Background, BorderStyle, Bounds, BoxMorph, BoxShadow, Capslock, Context, Corners,
+    CursorHideMode, CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId,
+    DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
     FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs,
     InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, LiveLayer, LivePaint, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem, Priority,
-    PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
+    MouseUpEvent, PaintOperation, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem,
+    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
     Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
     Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
@@ -1337,6 +1337,7 @@ pub struct Window {
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<TaffyLayoutEngine>,
     pub(crate) collecting_inline: bool,
+    pub(crate) box_morph: Option<Arc<BoxMorph>>,
     pub(crate) current_inline_fragments: Option<Arc<[Bounds<Pixels>]>>,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: SmallVec<[ElementId; 32]>,
@@ -2114,6 +2115,7 @@ impl Window {
             layout_engine: Some(TaffyLayoutEngine::new()),
             collecting_inline: false,
             current_inline_fragments: None,
+            box_morph: None,
             root: None,
             element_id_stack: SmallVec::default(),
             text_style_stack: Vec::new(),
@@ -4314,6 +4316,18 @@ impl Window {
         self.layout_transition_until.get().wrapping_sub(now_ms) < 1 << 31
     }
 
+    /// Paints a box's own quads and shadows with shared geometry timing.
+    pub fn with_box_morph<R>(
+        &mut self,
+        morph: Option<Arc<BoxMorph>>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.box_morph, morph);
+        let result = f(self);
+        self.box_morph = previous;
+        result
+    }
+
     /// Paints a retained subtree with a time-driven composite transform.
     pub fn with_motion<R>(
         &mut self,
@@ -4893,7 +4907,7 @@ impl Window {
                 corner_radii
             };
 
-            self.next_frame.scene.insert_primitive(Shadow {
+            let shadow = Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
@@ -4906,7 +4920,14 @@ impl Window {
                 corner_smoothing,
                 clip_outside: clip_outside.into(),
                 padding: 0,
-            });
+            };
+            if let Some(morph) = &self.box_morph {
+                self.next_frame
+                    .scene
+                    .insert_primitive(PaintOperation::Morphed(shadow.into(), morph.clone()));
+            } else {
+                self.next_frame.scene.insert_primitive(shadow);
+            }
         }
     }
 
@@ -5196,6 +5217,13 @@ impl Window {
             corner_smoothing: quad.corner_smoothing.clamp(0.0, 1.0),
             padding: 0,
         };
+
+        if let Some(morph) = &self.box_morph {
+            self.next_frame
+                .scene
+                .insert_primitive(PaintOperation::Morphed(quad.into(), morph.clone()));
+            return;
+        }
 
         if !quad.background.is_transparent() {
             self.next_frame.scene.insert_primitive(quad);

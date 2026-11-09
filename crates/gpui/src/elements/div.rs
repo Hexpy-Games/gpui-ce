@@ -3281,90 +3281,128 @@ impl Interactivity {
                     return ((), element_state);
                 }
 
-                let layout_motion =
-                    if let (Some(config), Some(global_id)) = (style.layout_motion, global_id) {
-                        let rest = self.layout_motion_rest;
-                        let radii = style
-                            .corner_radii
-                            .to_pixels(window.rem_size())
-                            .clamp_radii_for_quad_size(rest.size);
-                        let viewport = window.viewport_size();
-                        let now = crate::animation_time_ms();
-                        window.with_optional_element_state::<LayoutMotionState, _>(
-                            Some(global_id),
-                            |state, window| {
-                                let previous = state.flatten();
-                                let mut active = previous.as_ref().and_then(|state| state.active);
-                                if let Some(previous) = previous
-                                    && previous.viewport == viewport
-                                    && window.layout_transition_active(now)
-                                    && [
-                                        rest.origin.x - previous.rest.origin.x,
-                                        rest.origin.y - previous.rest.origin.y,
-                                        rest.size.width - previous.rest.size.width,
-                                        rest.size.height - previous.rest.size.height,
-                                    ]
-                                    .into_iter()
-                                    .any(|delta| delta.abs() > px(0.5))
-                                {
-                                    let sample = previous.active.map(|motion| {
-                                        motion.sample(
-                                            now,
-                                            window.scale_factor(),
-                                            bounds.scale(window.scale_factor()),
-                                        )
-                                    });
-                                    let from = previous.rest.origin
-                                        + sample.map_or(Point::default(), |sample| {
-                                            sample
-                                                .offset
-                                                .map(|value| px(value.0 / window.scale_factor()))
-                                        })
-                                        - rest.origin;
-                                    let from_radii = sample.and_then(|sample| sample.clip).map_or(
-                                        previous.radii,
-                                        |(_, radii)| {
-                                            radii.map(|value| px(value.0 / window.scale_factor()))
+                let layout_motion = if let (Some(config), Some(global_id)) =
+                    (style.layout_motion, global_id)
+                {
+                    let rest = self.layout_motion_rest;
+                    let radii = style
+                        .corner_radii
+                        .to_pixels(window.rem_size())
+                        .clamp_radii_for_quad_size(rest.size);
+                    let viewport = window.viewport_size();
+                    let now = crate::animation_time_ms();
+                    window.with_optional_element_state::<LayoutMotionState, _>(
+                        Some(global_id),
+                        |state, window| {
+                            let previous = state.flatten();
+                            let mut active = previous.as_ref().and_then(|state| state.active);
+                            if let Some(previous) = previous
+                                && previous.viewport == viewport
+                                && window.layout_transition_active(now)
+                                && [
+                                    rest.origin.x - previous.rest.origin.x,
+                                    rest.origin.y - previous.rest.origin.y,
+                                    rest.size.width - previous.rest.size.width,
+                                    rest.size.height - previous.rest.size.height,
+                                ]
+                                .into_iter()
+                                .any(|delta| delta.abs() > px(0.5))
+                            {
+                                let sample = previous.active.map(|motion| {
+                                    motion.sample(
+                                        now,
+                                        window.scale_factor(),
+                                        previous.rest.scale(window.scale_factor()),
+                                    )
+                                });
+                                let from = previous.rest.origin
+                                    + sample.map_or(Point::default(), |sample| {
+                                        sample
+                                            .offset
+                                            .map(|value| px(value.0 / window.scale_factor()))
+                                    })
+                                    - rest.origin;
+                                let from_radii = sample.and_then(|sample| sample.clip).map_or(
+                                    previous.radii,
+                                    |(_, radii)| {
+                                        radii.map(|value| px(value.0 / window.scale_factor()))
+                                    },
+                                );
+                                let from_size = sample.and_then(|sample| sample.clip).map_or(
+                                    previous.rest.size,
+                                    |(clip, _)| {
+                                        clip.size.map(|value| px(value.0 / window.scale_factor()))
+                                    },
+                                );
+                                let growth = rest.size - from_size;
+                                active = Some(crate::LayerMotion {
+                                    start_ms: now,
+                                    duration_ms: config.duration_ms,
+                                    repeat: crate::MotionRepeat::Once,
+                                    easing: config.easing,
+                                    offset: (from, Point::default()),
+                                    // The old size shows through the clip: a grown element is revealed
+                                    // from it, a shrunk one keeps painting past its new bounds and closes.
+                                    clip: Some((
+                                        crate::Edges {
+                                            right: growth.width,
+                                            bottom: growth.height,
+                                            ..Default::default()
                                         },
-                                    );
-                                    let growth = rest.size - previous.rest.size;
-                                    active = Some(crate::LayerMotion {
-                                        start_ms: now,
-                                        duration_ms: config.duration_ms,
-                                        repeat: crate::MotionRepeat::Once,
-                                        easing: config.easing,
-                                        offset: (from, Point::default()),
-                                        // The old size shows through the clip: a grown element is revealed
-                                        // from it, a shrunk one keeps painting past its new bounds and closes.
-                                        clip: Some((
-                                            crate::Edges {
-                                                right: growth.width,
-                                                bottom: growth.height,
-                                                ..Default::default()
-                                            },
-                                            crate::Edges::default(),
-                                        )),
-                                        clip_radii: (from_radii != crate::Corners::default()
-                                            || radii != crate::Corners::default())
-                                        .then_some((from_radii, radii)),
-                                        ..crate::LayerMotion::NONE
-                                    });
-                                }
-                                active = active.filter(|motion| motion.is_active(now));
-                                (
+                                        crate::Edges::default(),
+                                    )),
+                                    clip_radii: (from_radii != crate::Corners::default()
+                                        || radii != crate::Corners::default())
+                                    .then_some((from_radii, radii)),
+                                    ..crate::LayerMotion::NONE
+                                });
+                            }
+                            active = active.filter(|motion| motion.is_active(now));
+                            (
+                                active,
+                                Some(LayoutMotionState {
+                                    rest,
+                                    radii,
+                                    viewport,
                                     active,
-                                    Some(LayoutMotionState {
-                                        rest,
-                                        radii,
-                                        viewport,
-                                        active,
-                                    }),
-                                )
+                                }),
+                            )
+                        },
+                    )
+                } else {
+                    None
+                };
+                let box_morph = layout_motion
+                    .filter(|_| style.backdrop_filter.is_empty())
+                    .map(|motion| {
+                        let from = motion.offset.0;
+                        let (clip, _) = motion.clip.unwrap_or_default();
+                        let (from_radii, radii) = motion.clip_radii.unwrap_or_default();
+                        let scale_factor = window.scale_factor();
+                        Arc::new(crate::BoxMorph {
+                            delta: crate::Edges {
+                                top: from.y + clip.top,
+                                left: from.x + clip.left,
+                                right: from.x - clip.right,
+                                bottom: from.y - clip.bottom,
+                            }
+                            .scale(scale_factor),
+                            radii_delta: crate::Corners {
+                                top_left: from_radii.top_left - radii.top_left,
+                                top_right: from_radii.top_right - radii.top_right,
+                                bottom_right: from_radii.bottom_right - radii.bottom_right,
+                                bottom_left: from_radii.bottom_left - radii.bottom_left,
+                            }
+                            .scale(scale_factor),
+                            timing: crate::LayerMotion {
+                                start_ms: motion.start_ms,
+                                duration_ms: motion.duration_ms,
+                                repeat: crate::MotionRepeat::Once,
+                                easing: motion.easing,
+                                ..crate::LayerMotion::NONE
                             },
-                        )
-                    } else {
-                        None
-                    };
+                        })
+                    });
                 let motion = style.motion.take().unwrap_or(crate::LayerMotion::NONE);
 
                 let tab_group = self.tab_group.then_some(self.tab_index).flatten();
@@ -3462,13 +3500,23 @@ impl Interactivity {
                     );
                 window.with_element_scale(style.scale, origin, |window| {
                     window.with_motion(motion, bounds, |window| {
-                        window.with_motion(
-                            layout_motion.unwrap_or(crate::LayerMotion::NONE),
-                            bounds,
-                            |window| {
-                                style.paint(bounds, window, cx, paint_text_style);
-                            },
-                        );
+                        if let Some(box_morph) = box_morph {
+                            window.with_box_morph(Some(box_morph), |window| {
+                                style.paint(bounds, window, cx, |window, cx| {
+                                    window.with_motion(
+                                        layout_motion.unwrap_or(crate::LayerMotion::NONE),
+                                        bounds,
+                                        |window| paint_text_style(window, cx),
+                                    );
+                                });
+                            });
+                        } else {
+                            window.with_motion(
+                                layout_motion.unwrap_or(crate::LayerMotion::NONE),
+                                bounds,
+                                |window| style.paint(bounds, window, cx, paint_text_style),
+                            );
+                        }
                     });
                 });
 
@@ -5407,27 +5455,27 @@ mod tests {
             let second = window
                 .rendered_frame
                 .scene
-                .filter_boundaries
-                .iter()
-                .find(|boundary| boundary.is_start && boundary.motion.is_animated())
+                .box_morphs
+                .first()
                 .unwrap()
                 .clone();
             assert_eq!(
-                second.motion.offset,
-                (point(px(0.0), px(-30.0)), Point::default())
+                second.delta,
+                crate::Edges {
+                    top: px(-30.0).scale(window.scale_factor()),
+                    bottom: px(-30.0).scale(window.scale_factor()),
+                    ..Default::default()
+                }
             );
 
             scroll.set_offset(point(px(0.0), px(-10.0)));
             window.refresh();
             window.draw(cx).clear(cx);
-            let third = window
-                .rendered_frame
-                .scene
-                .filter_boundaries
-                .iter()
-                .find(|boundary| boundary.is_start && boundary.motion.is_animated())
-                .unwrap();
-            assert_eq!(third.motion, second.motion);
+            let third = window.rendered_frame.scene.box_morphs.first().unwrap();
+            assert_eq!(
+                (third.delta, third.radii_delta, third.timing),
+                (second.delta, second.radii_delta, second.timing),
+            );
         })
         .unwrap();
     }

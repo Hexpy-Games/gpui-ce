@@ -173,6 +173,10 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
                     }
                     content.insert_primitive(primitive.clone());
                 }
+                PaintOperation::Morphed(_, _) if inside => {
+                    eligible = false;
+                    break;
+                }
                 PaintOperation::StartLayer(bounds) if inside => content.push_layer(*bounds),
                 PaintOperation::EndLayer if inside => content.pop_layer(),
                 _ => {}
@@ -183,6 +187,16 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
             .iter()
             .filter_map(|operation| match operation {
                 PaintOperation::Primitive(primitive) => primitive.painted_bounds(),
+                PaintOperation::Morphed(primitive, morph) => Some(
+                    morph
+                        .reach(match primitive {
+                            Primitive::Shadow(shadow) => shadow
+                                .bounds
+                                .dilate(ScaledPixels(3.0 * shadow.blur_radius.0)),
+                            _ => *primitive.bounds(),
+                        })
+                        .intersect(&primitive.content_mask().bounds),
+                ),
                 _ => None,
             })
             .reduce(|a, b| a.union(&b))
@@ -319,11 +333,13 @@ pub(super) fn covered(
     scene
         .shadows
         .iter()
-        .any(|item| above(item.order) && hit(item.painted_bounds()))
+        .enumerate()
+        .any(|(index, item)| above(item.order) && hit(scene.shadow_reach(index)))
         || scene
             .quads
             .iter()
-            .any(|item| above(item.order) && hit(item.painted_bounds()))
+            .enumerate()
+            .any(|(index, item)| above(item.order) && hit(scene.quad_reach(index)))
         || scene
             .paths
             .iter()
