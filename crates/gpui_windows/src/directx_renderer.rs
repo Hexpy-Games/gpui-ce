@@ -766,8 +766,9 @@ impl DirectXRenderer {
         self.upload_scene_buffers(scene)?;
 
         let use_offscreen = scene.requires_offscreen_rendering() || scene.has_animations();
-        let mut requirements = *scene.render_plan().requirements();
-        requirements.uses_offscreen_target = use_offscreen;
+        let mut planned = *scene.render_plan().requirements();
+        planned.uses_offscreen_target = use_offscreen;
+        let requirements = &planned;
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
         resources.retain_surface_views(&scene.surfaces);
@@ -777,7 +778,7 @@ impl DirectXRenderer {
         }
 
         if use_offscreen {
-            resources.ensure_blur_resources(device, &requirements)?;
+            resources.ensure_blur_resources(device, requirements)?;
         }
 
         // Clone the views we need (AddRef) so the loop can rebind render targets without holding a
@@ -847,7 +848,7 @@ impl DirectXRenderer {
             self.resources
                 .as_mut()
                 .context("resources missing")?
-                .release_unused(&requirements);
+                .release_unused(requirements);
         }
         Ok(())
     }
