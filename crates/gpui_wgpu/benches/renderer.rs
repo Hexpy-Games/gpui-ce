@@ -12,7 +12,7 @@ const TARGET_SIZE: Size<DevicePixels> = Size {
 
 fn quad_scene(count: usize) -> Scene {
     let mut scene = unplanned_quad_scene(count);
-    scene.finish();
+    scene.finish(None);
     scene
 }
 
@@ -22,7 +22,7 @@ fn smoothed_quad_scene(count: usize, corner_radii: Corners<ScaledPixels>) -> Sce
         quad.corner_radii = corner_radii;
         quad.corner_smoothing = 1.0;
     }
-    scene.finish();
+    scene.finish(None);
     scene
 }
 
@@ -32,7 +32,7 @@ fn alternating_corner_modes_scene(count: usize) -> Scene {
         quad.corner_radii = Corners::all(ScaledPixels(8.0));
         quad.corner_smoothing = if index % 2 == 0 { 0.0 } else { 1.0 };
     }
-    scene.finish();
+    scene.finish(None);
     scene
 }
 
@@ -120,7 +120,7 @@ fn bench_renderer(criterion: &mut Criterion) {
     );
     let alternating_corner_modes = alternating_corner_modes_scene(512);
     let mut mixed_batches = unplanned_mixed_scene(512);
-    mixed_batches.finish();
+    mixed_batches.finish(None);
 
     let mut group = criterion.benchmark_group("renderer_end_to_end");
     group.bench_function("single_quad", |bencher| {
@@ -186,14 +186,14 @@ fn bench_renderer(criterion: &mut Criterion) {
         bencher.iter_batched(
             || unplanned_mixed_scene(512),
             |mut scene| {
-                scene.finish();
+                scene.finish(None);
                 black_box(*scene.render_plan().requirements())
             },
             BatchSize::SmallInput,
         )
     });
     let mut mixed_scene = unplanned_mixed_scene(512);
-    mixed_scene.finish();
+    mixed_scene.finish(None);
     group.bench_function("traverse_1024_mixed_batches", |bencher| {
         bencher.iter(|| {
             for command in mixed_scene.render_commands() {

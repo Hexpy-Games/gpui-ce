@@ -229,7 +229,7 @@ mod tests {
             opacity: 1.0,
             ..Default::default()
         });
-        scene.finish();
+        scene.finish(None);
         let target = size(DevicePixels(1000), DevicePixels(1000));
         let keys = backdrop_keys(&scene, target);
         assert_eq!(keys.len(), 1);

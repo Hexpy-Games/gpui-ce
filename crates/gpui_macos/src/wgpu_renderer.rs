@@ -418,7 +418,7 @@ mod tests {
             background: gpui::solid_background(gpui::red()),
             ..Default::default()
         });
-        scene.finish();
+        scene.finish(None);
 
         let image = renderer.render_to_image(&scene).unwrap();
 

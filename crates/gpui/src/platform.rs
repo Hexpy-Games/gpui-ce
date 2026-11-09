@@ -1192,8 +1192,8 @@ pub trait PlatformHeadlessRenderer {
     /// Sets the animation clock the next renders read.
     fn set_animation_time_ms(&mut self, _time_ms: u32) {}
 
-    /// Redraws an animation tick over the frame the previous render of the same scene retained,
-    /// and reads it back; errors when the tick needs a full encode.
+    /// Redraws damage over the retained frame and reads it back; errors when the scene needs
+    /// a full encode. Supports animation ticks and changes from the retained scene.
     fn render_animation_frame_to_image(
         &mut self,
         _scene: &Scene,

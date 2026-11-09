@@ -104,6 +104,8 @@ pub(crate) struct DirectXRenderer {
     animation_time_ms: u32,
     /// Generation of the scene whose complete frame the offscreen scene target holds.
     retained: Option<u64>,
+    retained_atlas_epoch: u64,
+    uploaded_generation: Option<u64>,
     /// Generation and backdrop-cache keys of the last full encode; damage ticks reuse them.
     frame_keys: (u64, Vec<Option<u64>>),
     /// The damage rectangle every draw is clipped to while a damage redraw runs.
@@ -355,6 +357,8 @@ impl DirectXRenderer {
             wallpapers: Default::default(),
             animation_time_ms: 0,
             retained: None,
+            retained_atlas_epoch: 0,
+            uploaded_generation: None,
             frame_keys: (0, Vec::new()),
             damage_scissor: None,
         })
@@ -593,7 +597,9 @@ impl DirectXRenderer {
             keys.push(Some(group.key));
         }
         self.animation_time_ms = gpui::animation_time_ms();
-        self.render(scene, background_appearance)?;
+        if !self.render_damage(scene)? {
+            self.render(scene, background_appearance)?;
+        }
         self.present()?;
         let live_changed = self.sync_live_layers(scene)?;
         if let Some(composition) = &self.direct_composition {
@@ -830,6 +836,7 @@ impl DirectXRenderer {
         }
         self.active_render_target = None;
         self.retained = use_offscreen.then(|| scene.generation());
+        self.retained_atlas_epoch = self.atlas.removal_epoch();
         Ok(())
     }
 
@@ -862,8 +869,8 @@ impl DirectXRenderer {
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
-        let backdrop_keys = if damage.is_some() {
-            // A damage tick reuses the keys of the full frame it patches.
+        let backdrop_keys = if damage.is_some() && self.frame_keys.0 == scene.generation() {
+            // Reuse keys only for the same generation.
             self.frame_keys.1.clone()
         } else if scene.backdrop_filters.is_empty() {
             Vec::new()
@@ -876,9 +883,7 @@ impl DirectXRenderer {
                 ),
             )
         };
-        if damage.is_none() {
-            self.frame_keys = (scene.generation(), backdrop_keys.clone());
-        }
+        self.frame_keys = (scene.generation(), backdrop_keys.clone());
         for command in commands {
             let _annotation = annotation
                 .as_ref()
@@ -949,12 +954,12 @@ impl DirectXRenderer {
                             // filter whose sampling region did not change since it was stored.
                             let reblur = damage
                                 .is_some_and(|plan| plan.reblur.contains(&(range.start + index)));
-                            let key = if targets.inherits_backdrop() || reblur {
+                            let key = if targets.inherits_backdrop() {
                                 None
                             } else {
                                 backdrop_keys.get(range.start + index).copied().flatten()
                             };
-                            let hit = key.is_some_and(|key| self.dx_restore_backdrop(key));
+                            let hit = !reblur && key.is_some_and(|key| self.dx_restore_backdrop(key));
                             if damage.is_some()
                                 && !reblur
                                 && !hit
@@ -1015,7 +1020,11 @@ impl DirectXRenderer {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(target_index),
                 } => {
-                    if motion_target.is_none() && scene.filter_boundaries[*boundary_index].motion.is_animated() {
+                    if motion_target.is_none()
+                        && (scene.filter_boundaries[*boundary_index].motion.is_animated()
+                            || scene.filter_boundaries[*boundary_index].max_blur_radius() > 0.0
+                            || scene.filter_boundaries[*boundary_index].scale != 1.0)
+                    {
                         motion_target = Some(*target_index);
                         self.damage_scissor = None;
                         self.restore_rasterizer();
@@ -1147,10 +1156,9 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut()?;
         let previous_texture = resources.render_target.replace(texture.clone());
         let previous_view = std::mem::replace(&mut resources.render_target_view, view);
-        // The window keeps its retained frame and backdrop keys.
-        let (retained, frame_keys) = (self.retained, self.frame_keys.clone());
+        // Rasterizing reuses the retained scene target and scene buffers.
         let rendered = self.render(scene, WindowBackgroundAppearance::Transparent);
-        (self.retained, self.frame_keys) = (retained, frame_keys);
+        self.retained = None;
         let resources = self.resources.as_mut()?;
         resources.render_target = previous_texture;
         resources.render_target_view = previous_view;
@@ -1390,6 +1398,7 @@ impl DirectXRenderer {
             )?;
         }
 
+        self.uploaded_generation = Some(scene.generation());
         Ok(())
     }
 
@@ -3606,7 +3615,7 @@ mod tests {
             });
         }
 
-        scene.finish();
+        scene.finish(None);
 
         scene
     }
@@ -3769,7 +3778,7 @@ mod tests {
             background: solid_background(blue),
             ..Default::default()
         });
-        scene.finish();
+        scene.finish(None);
         let quad_batches: Vec<_> = scene
             .render_commands()
             .iter()
@@ -3830,7 +3839,7 @@ mod tests {
             background: solid_background(white()),
             ..Default::default()
         });
-        ordinary.finish();
+        ordinary.finish(None);
         renderer.render(&ordinary, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), None);
 
@@ -3844,7 +3853,7 @@ mod tests {
                 });
             });
         });
-        nested.finish();
+        nested.finish(None);
         renderer.render(&nested, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), Some((3, false, false)));
 
@@ -3863,7 +3872,7 @@ mod tests {
             // A second primitive keeps the group isolated (a single one is drawn inline).
             scene.insert_primitive(ordinary.quads[0]);
         });
-        filtered.finish();
+        filtered.finish(None);
         renderer.render(&filtered, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), Some((3, true, true)));
 

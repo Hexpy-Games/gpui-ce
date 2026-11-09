@@ -15,18 +15,28 @@ pub(super) fn render_damage_to_view(
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
 ) -> Option<wgpu::SubmissionIndex> {
-    let DamagePlan::Partial(plan) = scene.damage_plan() else {
+    let Some(DamagePlan::Partial(plan)) = scene.damage_plan_over(renderer.retained) else {
         return None;
     };
     let generation = scene.generation();
-    if renderer.retained != Some(generation)
-        || renderer.frame_keys.0 != generation
+    if renderer.retained_atlas_epoch != renderer.atlas.removal_epoch()
         || renderer.resources.as_ref()?.scene_color_view.is_none()
-        || !backdrops_cached(renderer, scene, plan)
     {
         return None;
     }
     let scissor = damage_scissor(renderer, plan.rect)?;
+    if !gpui_render::damage_fits(scissor, renderer.target.viewport_size()) {
+        return None;
+    }
+    if renderer.frame_keys.0 != generation {
+        renderer.frame_keys = (
+            generation,
+            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size()),
+        );
+    }
+    if !backdrops_cached(renderer, scene, plan) {
+        return None;
+    }
 
     // The fill needs a ping view, and its uniform slot is not part of the plan's accounting.
     let mut planned = plan.requirements;
@@ -48,7 +58,9 @@ pub(super) fn render_damage_to_view(
         Some(scissor),
         targets,
     );
-    submit(renderer, encoder, readback)
+    let submission = submit(renderer, encoder, readback);
+    renderer.retained = submission.as_ref().map(|_| generation);
+    submission
 }
 
 /// Whether every kept backdrop filter the plan does not re-blur can restore its blur from the cache.

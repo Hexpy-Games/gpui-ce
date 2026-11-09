@@ -59,6 +59,7 @@ pub struct ScenePlan {
     requirements: ScenePlanRequirements,
     scene_lengths: SceneLengths,
     pub(super) damage: OnceLock<DamagePlan>,
+    pub(super) change_damage: OnceLock<DamagePlan>,
 }
 
 impl ScenePlan {
@@ -67,6 +68,7 @@ impl ScenePlan {
         self.requirements = ScenePlanRequirements::default();
         self.scene_lengths = SceneLengths::default();
         self.damage = OnceLock::new();
+        self.change_damage = OnceLock::new();
     }
 
     pub(super) fn build(scene: &Scene, mut commands: Vec<RenderCommand>) -> Self {
@@ -132,6 +134,7 @@ impl ScenePlan {
             requirements,
             scene_lengths: SceneLengths::for_scene(scene),
             damage: OnceLock::new(),
+            change_damage: OnceLock::new(),
         }
     }
 

@@ -1296,7 +1296,7 @@ impl Frame {
             }
         }
 
-        self.scene.finish();
+        self.scene.finish(Some(&prev_frame.scene));
     }
 }
 
@@ -3332,6 +3332,7 @@ impl Window {
             }
         }
         self.next_frame.scene.scale_factor = self.scale_factor();
+        self.next_frame.scene.viewport_size = self.viewport_size().scale(self.scale_factor());
         self.next_frame.scene.offload_animations =
             self.platform_window.supports_compositor_sprites();
         if !cx.mode.skip_drawing() {

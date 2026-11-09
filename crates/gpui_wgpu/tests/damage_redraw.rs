@@ -13,8 +13,8 @@ use smallvec::smallvec;
 use std::borrow::Cow;
 
 const TARGET: Size<DevicePixels> = Size {
-    width: DevicePixels(128),
-    height: DevicePixels(48),
+    width: DevicePixels(256),
+    height: DevicePixels(128),
 };
 
 fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
@@ -93,7 +93,11 @@ fn glass(glass_bounds: Bounds<ScaledPixels>) -> BackdropFilter {
     }
 }
 
-fn animated_scene(renderer: &WgpuHeadlessRenderer) -> Scene {
+fn animated_scene(
+    renderer: &WgpuHeadlessRenderer,
+    under_glass: Hsla,
+    previous: Option<&Scene>,
+) -> Scene {
     // Frame k of the mask lights the vertical stripe x in [4k, 4k + 4).
     let mono = flipbook_tile(
         renderer,
@@ -146,7 +150,7 @@ fn animated_scene(renderer: &WgpuHeadlessRenderer) -> Scene {
     scene.insert_primitive(Quad {
         bounds: bounds(8.0, 8.0, 40.0, 32.0),
         content_mask: mask(),
-        background: checkerboard(color(0xffffff), 3.0),
+        background: checkerboard(under_glass, 3.0),
         ..Default::default()
     });
     scene.insert_primitive(glass(bounds(8.0, 8.0, 40.0, 32.0)));
@@ -178,7 +182,7 @@ fn animated_scene(renderer: &WgpuHeadlessRenderer) -> Scene {
         background: solid_background(color(0x00ff00)),
         ..Default::default()
     });
-    scene.finish();
+    scene.finish(previous);
     scene
 }
 
@@ -186,7 +190,7 @@ fn animated_scene(renderer: &WgpuHeadlessRenderer) -> Scene {
 #[test]
 fn damage_redraw_matches_full_redraw() {
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
-    let scene = animated_scene(&renderer);
+    let scene = animated_scene(&renderer, color(0xffffff), None);
 
     let mut first_frames = Vec::new();
     for (previous, now) in [(0, 125), (125, 250)] {
@@ -220,4 +224,28 @@ fn damage_redraw_matches_full_redraw() {
         differs,
         "the first sprite must change between frames 0 and 1"
     );
+}
+
+// test-category: pure-logic
+#[test]
+fn scene_change_under_glass_matches_full_redraw() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    renderer.set_animation_time_ms(125);
+    let a = animated_scene(&renderer, color(0xffffff), None);
+    renderer
+        .render_scene_to_image(&a, TARGET)
+        .expect("full scene A");
+    let b = animated_scene(&renderer, color(0xffc040), Some(&a));
+    let Some(gpui::DamagePlan::Partial(plan)) = b.damage_plan_over(Some(a.generation())) else {
+        panic!("expected a partial redraw");
+    };
+    assert!(!plan.reblur.is_empty());
+    // This API errors if damage is declined, so success also proves the damage path ran.
+    let damage = renderer
+        .render_animation_frame_to_image(&b, TARGET)
+        .expect("scene B must use the damage path");
+    let full = renderer
+        .render_scene_to_image(&b, TARGET)
+        .expect("full scene B");
+    assert_eq!(damage.as_raw(), full.as_raw());
 }

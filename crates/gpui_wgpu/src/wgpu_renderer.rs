@@ -77,6 +77,7 @@ pub struct WgpuRenderer {
     animation_time_ms: u32,
     /// The scene generation whose complete frame `scene_color` holds, if any.
     retained: Option<u64>,
+    retained_atlas_epoch: u64,
     /// The backdrop-cache keys of the last full frame, with that frame's scene generation.
     frame_keys: (u64, Vec<Option<u64>>),
 }
@@ -139,6 +140,7 @@ impl WgpuRenderer {
             uploaded_globals: None,
             animation_time_ms: 0,
             retained: None,
+            retained_atlas_epoch: 0,
             frame_keys: (0, Vec::new()),
             faults: GpuFaultState {
                 pending_error: last_error,
@@ -454,7 +456,7 @@ mod tests {
             });
         }
 
-        scene.finish();
+        scene.finish(None);
 
         scene
     }
@@ -529,7 +531,7 @@ mod tests {
         scene
             .backdrop_filters
             .resize_with(100, BackdropFilter::default);
-        scene.finish();
+        scene.finish(None);
 
         assert_eq!(
             frame::FrameRequirements::for_commands(
@@ -594,7 +596,7 @@ mod tests {
             thickness: ScaledPixels(1.0),
             wavy: false.into(),
         });
-        scene.finish();
+        scene.finish(None);
 
         let image = renderer.render_to_image(&scene)?;
         let center = image.get_pixel(1, 1).0;
@@ -674,7 +676,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        scene.finish();
+        scene.finish(None);
         let context = WgpuContext::new_headless(None)?;
         let mut renderer =
             WgpuRenderer::new_headless(&context, gpui::size(DevicePixels(4), DevicePixels(4)))?;
@@ -703,7 +705,7 @@ mod tests {
         let render = |quad| -> anyhow::Result<image::RgbaImage> {
             let mut scene = Scene::default();
             scene.insert_primitive(quad);
-            scene.finish();
+            scene.finish(None);
             let mut renderer = WgpuRenderer::new_headless(&context, size)?;
             renderer.render_to_image(&scene)
         };
@@ -788,7 +790,7 @@ mod tests {
             opacity: 1.0,
             ..BackdropFilter::default()
         });
-        scene.finish();
+        scene.finish(None);
 
         renderer.render_to_image(&scene)?;
         renderer.render_to_image(&scene)?;
@@ -835,7 +837,7 @@ mod tests {
             opacity: 1.0,
             ..Default::default()
         });
-        scene.finish();
+        scene.finish(None);
 
         let image = renderer.render_to_image(&scene)?;
         for y in 0..5 {
@@ -894,7 +896,7 @@ mod tests {
                 wavy: false.into(),
             });
         }
-        scene.finish();
+        scene.finish(None);
         assert_eq!(
             scene
                 .render_commands()
@@ -1011,7 +1013,7 @@ mod tests {
         nested.insert_primitive(test_quad(test_bounds(12.0, 0.0, 4.0, 8.0), bounds, green));
 
         for scene in [&mut slider, &mut translucent, &mut nested] {
-            scene.finish();
+            scene.finish(None);
         }
 
         let cases = [
@@ -1081,7 +1083,7 @@ mod tests {
 
         let mut original = Scene::default();
         paint_background(&mut original);
-        original.finish();
+        original.finish(None);
 
         for (renderer_idx, renderer) in test_renderers()?.iter_mut().enumerate() {
             let background = renderer.render_scene_to_image(&original, target_size)?;
@@ -1138,9 +1140,9 @@ mod tests {
                     }
                 });
 
-                reference.finish();
-                grouped.finish();
-                unfiltered.finish();
+                reference.finish(None);
+                grouped.finish(None);
+                unfiltered.finish(None);
 
                 let reference = renderer.render_scene_to_image(&reference, target_size)?;
                 let actual = renderer.render_scene_to_image(&grouped, target_size)?;

@@ -237,7 +237,7 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
             &target.view,
             Some(target.readback_copy()),
         )
-        .ok_or_else(|| anyhow::anyhow!("the animation tick needs a full encode"))?;
+        .ok_or_else(|| anyhow::anyhow!("the scene needs a full encode"))?;
         self.renderer.read_offscreen_target(target, submission)
     }
 
