@@ -124,7 +124,10 @@ impl WgpuRenderer {
     /// Acquires, renders, and presents one native or canvas surface frame.
     pub fn draw(&mut self, scene: &Scene) -> bool {
         self.animation_time_ms = gpui::animation_time_ms();
-        self.present_frame(|renderer, view| renderer.render_to_view(scene, view))
+        self.present_frame(|renderer, view| {
+            damage::render_damage_to_view(renderer, scene, view, None).is_some()
+                || renderer.render_to_view(scene, view)
+        })
     }
 
     /// Presents an animation tick of the scene last passed to [`Self::draw`]: it redraws only the

@@ -44,6 +44,7 @@ struct WgpuAtlasState {
     /// The uploaded bytes of flipbook grids, by (texture, tile id), for the platform compositor.
     frame_grids: FxHashMap<(AtlasTextureId, u32), (Size<DevicePixels>, Arc<[u8]>)>,
     glyph_cache: GlyphAtlasCache,
+    removal_epoch: u64,
     pending_uploads: Vec<PendingUpload>,
     next_texture_identity: u64,
 }
@@ -55,6 +56,10 @@ pub struct WgpuTextureInfo {
 }
 
 impl WgpuAtlas {
+    pub fn removal_epoch(&self) -> u64 {
+        self.0.lock().removal_epoch
+    }
+
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -70,6 +75,7 @@ impl WgpuAtlas {
             tiles_by_key: Default::default(),
             frame_grids: Default::default(),
             glyph_cache: Default::default(),
+            removal_epoch: 0,
             pending_uploads: Vec::new(),
             next_texture_identity: 0,
         }))
@@ -112,6 +118,7 @@ impl WgpuAtlas {
     pub fn clear(&self) {
         let mut lock = self.0.lock();
         lock.storage = WgpuAtlasStorage::default();
+        lock.removal_epoch += lock.tiles_by_key.len() as u64;
         lock.tiles_by_key.clear();
         lock.frame_grids.clear();
         lock.glyph_cache.clear();
@@ -126,6 +133,7 @@ impl WgpuAtlas {
         lock.queue = context.queue.clone();
         lock.color_texture_format = context.color_texture_format();
         lock.storage = WgpuAtlasStorage::default();
+        lock.removal_epoch += lock.tiles_by_key.len() as u64;
         lock.tiles_by_key.clear();
         lock.frame_grids.clear();
         lock.glyph_cache.clear();
@@ -182,6 +190,7 @@ impl PlatformAtlas for WgpuAtlas {
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        lock.removal_epoch += 1;
         lock.frame_grids.remove(&(tile.texture_id, tile.tile_id.0));
         let id = tile.texture_id;
 

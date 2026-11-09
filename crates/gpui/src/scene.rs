@@ -105,6 +105,7 @@ pub struct Scene {
     /// that nothing covers, so `finish` moves them out of the sprite lists.
     pub offload_animations: bool,
     pub scale_factor: f32,
+    pub viewport_size: Size<ScaledPixels>,
     compositor_sprites: Vec<CompositorSprite>,
     compositor_groups: Vec<CompositorGroup>,
     live_layers: Vec<LiveLayer>,
@@ -115,6 +116,7 @@ pub struct Scene {
     is_finished: bool,
     has_animations: bool,
     generation: u64,
+    change: Option<damage::SceneChange>,
 }
 
 #[expect(missing_docs)]
@@ -144,6 +146,7 @@ impl Scene {
         self.is_finished = false;
         self.has_animations = false;
         self.generation = 0;
+        self.change = None;
     }
 
     pub fn len(&self) -> usize {
@@ -452,6 +455,21 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        self.finish_impl();
+    }
+
+    pub fn finish_over(&mut self, previous: &Scene) {
+        self.finish_impl();
+        self.change = (previous.generation() != 0
+            && previous.viewport_size == self.viewport_size
+            && previous.scale_factor == self.scale_factor)
+            .then(|| damage::SceneChange {
+                base: previous.generation(),
+                rect: damage::change_rect(previous, self),
+            });
+    }
+
+    fn finish_impl(&mut self) {
         let layers = std::mem::take(&mut self.live_layers);
         for layer in layers {
             // A layer laid out at zero size has no surface to present to; it paints nothing.
@@ -539,6 +557,7 @@ impl Scene {
                     .is_some_and(|appear| appear.motion.is_animated())
             });
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        self.change = None;
         self.is_finished = true;
     }
 
@@ -643,6 +662,23 @@ impl Scene {
     /// What an animation tick redraws; computed once per finished scene.
     pub fn damage_plan(&self) -> &DamagePlan {
         self.render_plan().damage.get_or_init(|| damage::plan(self))
+    }
+
+    /// What to redraw over a retained scene generation, computed once per finished scene.
+    pub fn damage_plan_over(&self, retained: Option<u64>) -> Option<&DamagePlan> {
+        let retained = retained?;
+        if retained == self.generation() {
+            return Some(self.damage_plan());
+        }
+        let change = self
+            .change
+            .as_ref()
+            .filter(|change| change.base == retained)?;
+        Some(
+            self.render_plan()
+                .change_damage
+                .get_or_init(|| damage::plan_over(self, change.rect)),
+        )
     }
 
     #[cfg_attr(

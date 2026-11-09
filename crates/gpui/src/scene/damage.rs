@@ -1,14 +1,15 @@
-//! What an animation tick redraws when only animated sprites changed.
+//! Partial redraws for animation ticks and changes between finished scenes.
 
 use super::{
-    BackdropFilter, Bounds, DrawOrder, FilterRenderTarget, PaintedBounds, PrimitiveBatch,
-    RenderCommand, ScaledPixels, Scene, ScenePlanRequirements, plan::requirements_for,
+    BackdropFilter, Bounds, DrawOrder, FilterRenderTarget, PaintOperation, PaintedBounds,
+    Primitive, PrimitiveBatch, RenderCommand, ScaledPixels, Scene, ScenePlanRequirements,
+    plan::requirements_for,
 };
 use crate::point;
 use smallvec::SmallVec;
 use std::ops::Range;
 
-/// What an animation tick redraws when only animated primitives changed.
+/// What to redraw over a retained frame.
 #[derive(Debug)]
 pub enum DamagePlan {
     /// Redraw over the retained frame.
@@ -29,6 +30,256 @@ pub struct DamageRedraw {
     pub reblur: SmallVec<[usize; 4]>,
     /// Resource totals for `commands`.
     pub requirements: ScenePlanRequirements,
+}
+
+pub(super) struct SceneChange {
+    pub base: u64,
+    pub rect: Option<Bounds<ScaledPixels>>,
+}
+
+/// Order-independent identities in recorded paint order, with the reach of each changed span.
+pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<ScaledPixels>> {
+    let old = previous
+        .paint_operations
+        .iter()
+        .map(operation_hash)
+        .collect::<Vec<_>>();
+    let new = scene
+        .paint_operations
+        .iter()
+        .map(operation_hash)
+        .collect::<Vec<_>>();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rect: Option<Bounds<ScaledPixels>> = None;
+    for (scene, end) in [(previous, old.len() - suffix), (scene, new.len() - suffix)] {
+        let mut groups = SmallVec::<[(Bounds<ScaledPixels>, bool); 4]>::new();
+        for (index, operation) in scene.paint_operations.iter().enumerate() {
+            let mut reach = None;
+            match operation {
+                PaintOperation::Primitive(Primitive::FilterBoundary(boundary)) => {
+                    if boundary.is_start {
+                        let widened = boundary.motion.is_animated()
+                            || boundary.max_blur_radius() > 0.0
+                            || boundary.scale != 1.0;
+                        let bounds = if boundary.motion.is_animated() {
+                            boundary.motion.sweep(
+                                boundary.bounds,
+                                boundary.scale_origin,
+                                scene.scale_factor,
+                                boundary.motion_bounds,
+                            )
+                        } else {
+                            boundary.bounds
+                        };
+                        let group_reach = bounds
+                            .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
+                            .intersect(&boundary.content_mask.bounds);
+                        groups.push((group_reach, widened));
+                        reach = Some(group_reach);
+                    } else {
+                        reach = groups.pop().map(|(group_reach, _)| group_reach);
+                    }
+                }
+                PaintOperation::Primitive(Primitive::Surface(_)) => return None,
+                PaintOperation::Primitive(primitive) => reach = primitive.painted_bounds(),
+                PaintOperation::LiveLayer(layer) => {
+                    reach = Some(layer.bounds.intersect(&layer.content_mask.bounds))
+                }
+                PaintOperation::StartLayer(_) | PaintOperation::EndLayer => {}
+            }
+            if index >= prefix && index < end {
+                reach = groups
+                    .iter()
+                    .find_map(|(group_reach, widened)| widened.then_some(*group_reach))
+                    .or(reach);
+                if let Some(reach) = reach.filter(|bounds| !bounds.is_empty()) {
+                    rect = Some(rect.map_or(reach, |rect| rect.union(&reach)));
+                }
+            }
+        }
+    }
+    Some(rect.unwrap_or_default())
+}
+
+fn operation_hash(operation: &PaintOperation) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hash = DefaultHasher::new();
+    // These scene-buffer values have explicit, padding-free layouts, as checked by scene::abi.
+    macro_rules! bytes {
+        ($value:expr) => {{
+            let value = &$value;
+            hash.write(unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::from_ref(value).cast::<u8>(),
+                    std::mem::size_of_val(value),
+                )
+            });
+        }};
+    }
+    macro_rules! instance {
+        ($value:expr) => {{
+            let mut value = *$value;
+            value.order = 0;
+            bytes!(value);
+        }};
+    }
+    macro_rules! filters {
+        ($filters:expr) => {{
+            $filters.len().hash(&mut hash);
+            for filter in $filters {
+                match filter {
+                    crate::ScaledFilter::Blur(radius) => bytes!(radius.0),
+                }
+            }
+        }};
+    }
+    macro_rules! motion {
+        ($motion:expr) => {{
+            let motion = &$motion;
+            motion.start_ms.hash(&mut hash);
+            motion.duration_ms.hash(&mut hash);
+            std::mem::discriminant(&motion.repeat).hash(&mut hash);
+            std::mem::discriminant(&motion.easing).hash(&mut hash);
+            match &motion.easing {
+                super::MotionEasing::CubicBezier(points) => bytes!(*points),
+                super::MotionEasing::Linear { points, len } => {
+                    bytes!(*points);
+                    len.hash(&mut hash);
+                }
+                super::MotionEasing::Steps(steps) => steps.hash(&mut hash),
+            }
+            bytes!(motion.opacity);
+            bytes!(motion.offset);
+            bytes!(motion.relative_offset);
+            motion.clip.is_some().hash(&mut hash);
+            if let Some((from, to)) = motion.clip {
+                bytes!(from);
+                bytes!(to);
+            }
+            bytes!(motion.visible);
+            bytes!(motion.scale);
+            bytes!(motion.rotation);
+            bytes!(motion.origin);
+        }};
+    }
+    macro_rules! lens {
+        ($lens:expr) => {{
+            let lens = &$lens;
+            lens.saturation.is_some().hash(&mut hash);
+            if let Some(saturation) = lens.saturation {
+                bytes!(saturation);
+            }
+            for value in [
+                lens.bezel,
+                lens.refraction,
+                lens.specular,
+                lens.dispersion,
+                lens.frost,
+                lens.lift,
+                lens.rim,
+                lens.depth,
+                lens.light_angle,
+                lens.opposite,
+                lens.shade,
+                lens.fresnel,
+                lens.focus,
+                lens.ambient,
+                lens.halo,
+                lens.fold,
+                lens.fold_band,
+                lens.fold_depth,
+                lens.curve,
+                lens.sharp_rim,
+            ] {
+                bytes!(value);
+            }
+            lens.sharp_full.hash(&mut hash);
+            bytes!(lens.tone);
+            bytes!(lens.hairline);
+            lens.exact.hash(&mut hash);
+        }};
+    }
+    std::mem::discriminant(operation).hash(&mut hash);
+    match operation {
+        PaintOperation::Primitive(primitive) => {
+            std::mem::discriminant(primitive).hash(&mut hash);
+            match primitive {
+                Primitive::Shadow(value) => instance!(value),
+                Primitive::Quad(value) => instance!(value),
+                Primitive::Underline(value) => instance!(value),
+                Primitive::MonochromeSprite(value) => instance!(value),
+                Primitive::SubpixelSprite(value) => instance!(value),
+                Primitive::PolychromeSprite(value) => instance!(value),
+                Primitive::Path(path) => {
+                    bytes!(path.clipped_bounds());
+                    bytes!(path.color);
+                    path.vertices.len().hash(&mut hash);
+                    for vertex in &path.vertices {
+                        bytes!(vertex.xy_position);
+                        bytes!(vertex.st_position);
+                    }
+                }
+                Primitive::FilterBoundary(boundary) => {
+                    bytes!(boundary.bounds);
+                    bytes!(boundary.content_mask);
+                    bytes!(boundary.corner_radii);
+                    bytes!(boundary.corner_smoothing);
+                    filters!(&boundary.filters);
+                    bytes!(boundary.opacity);
+                    bytes!(boundary.scale);
+                    bytes!(boundary.scale_origin);
+                    motion!(boundary.motion);
+                    bytes!(boundary.motion_bounds);
+                    boundary.is_start.hash(&mut hash);
+                    boundary.inline.hash(&mut hash);
+                }
+                Primitive::BackdropFilter(filter) => {
+                    bytes!(filter.bounds);
+                    bytes!(filter.content_mask);
+                    bytes!(filter.corner_radii);
+                    bytes!(filter.corner_smoothing);
+                    filters!(&filter.filters);
+                    bytes!(filter.opacity);
+                    lens!(filter.lens);
+                    filter.appear.is_some().hash(&mut hash);
+                    if let Some(appear) = filter.appear {
+                        lens!(appear.lens);
+                        bytes!(appear.blur);
+                        motion!(appear.motion);
+                    }
+                    filter.wallpaper.is_some().hash(&mut hash);
+                    if let Some(wallpaper) = &filter.wallpaper {
+                        wallpaper.key.hash(&mut hash);
+                        wallpaper.generation.hash(&mut hash);
+                        wallpaper.passes.len().hash(&mut hash);
+                        for pass in &wallpaper.passes {
+                            pass.module.hash(&mut hash);
+                            pass.width.hash(&mut hash);
+                            pass.height.hash(&mut hash);
+                            pass.source.hash(&mut hash);
+                            bytes!(pass.uniforms);
+                        }
+                    }
+                }
+                Primitive::Surface(_) => {}
+            }
+        }
+        PaintOperation::StartLayer(bounds) => bytes!(*bounds),
+        PaintOperation::EndLayer => {}
+        PaintOperation::LiveLayer(layer) => {
+            layer.key.hash(&mut hash);
+            layer.start_ms.hash(&mut hash);
+            bytes!(layer.bounds);
+            bytes!(layer.content_mask);
+        }
+    }
+    hash.finish()
 }
 
 fn hits(bounds: Bounds<ScaledPixels>, rect: &Bounds<ScaledPixels>) -> bool {
@@ -67,7 +318,10 @@ fn round_out(bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
 }
 
 /// The damaged area and the glass whose backdrop it changes, or `None` when a lens is hit.
-fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize; 4]>)> {
+fn changed_area(
+    scene: &Scene,
+    seed: Option<Bounds<ScaledPixels>>,
+) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize; 4]>)> {
     let mut changed: Vec<(Bounds<ScaledPixels>, DrawOrder)> = Vec::new();
     for sprite in scene
         .monochrome_sprites
@@ -113,7 +367,9 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
     let mut rect = changed
         .iter()
         .map(|(bounds, _)| *bounds)
-        .reduce(|a, b| a.union(&b))?;
+        .chain(seed.filter(|rect| !rect.is_empty()))
+        .reduce(|a, b| a.union(&b))
+        .or(seed)?;
 
     loop {
         let mut added = false;
@@ -122,9 +378,10 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
                 continue;
             }
             let region = filter.sampling_region();
-            if !changed
-                .iter()
-                .any(|(bounds, order)| *order < filter.order && hits(*bounds, &region))
+            if !seed.is_some_and(|rect| hits(rect, &region))
+                && !changed
+                    .iter()
+                    .any(|(bounds, order)| *order < filter.order && hits(*bounds, &region))
             {
                 continue;
             }
@@ -140,14 +397,35 @@ fn changed_area(scene: &Scene) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize;
             break;
         }
     }
-    Some((round_out(rect), reblur))
+    Some((
+        if rect.is_empty() {
+            rect
+        } else {
+            round_out(rect)
+        },
+        reblur,
+    ))
 }
 
 pub(super) fn plan(scene: &Scene) -> DamagePlan {
-    let Some((rect, reblur)) = changed_area(scene) else {
+    let Some((rect, reblur)) = changed_area(scene, None) else {
         return DamagePlan::Full;
     };
+    select_commands(scene, rect, reblur)
+}
 
+pub(super) fn plan_over(scene: &Scene, rect: Option<Bounds<ScaledPixels>>) -> DamagePlan {
+    let Some((rect, reblur)) = rect.and_then(|rect| changed_area(scene, Some(rect))) else {
+        return DamagePlan::Full;
+    };
+    select_commands(scene, rect, reblur)
+}
+
+fn select_commands(
+    scene: &Scene,
+    rect: Bounds<ScaledPixels>,
+    reblur: SmallVec<[usize; 4]>,
+) -> DamagePlan {
     let mut commands = Vec::new();
     // Open isolated groups that were kept, and nested groups inside a dropped group.
     let mut depth = 0usize;
@@ -276,13 +554,12 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
                     .intersect(&boundary.content_mask.bounds);
                 if !hits(reach, &rect) {
                     skip = 1;
-                } else if !boundary.motion.is_animated()
-                    && (boundary.max_blur_radius() > 0.0 || boundary.scale != 1.0)
-                {
-                    return DamagePlan::Full;
                 } else {
                     depth += 1;
-                    if boundary.motion.is_animated() {
+                    if boundary.motion.is_animated()
+                        || boundary.max_blur_radius() > 0.0
+                        || boundary.scale != 1.0
+                    {
                         motion_depth = Some(depth);
                     }
                     commands.push(command.clone());
@@ -302,7 +579,7 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
         }
     }
 
-    if commands.is_empty() {
+    if commands.is_empty() && !rect.is_empty() {
         return DamagePlan::Full;
     }
     let requirements = requirements_for(scene, &commands);
@@ -389,6 +666,74 @@ mod tests {
         ] {
             assert!((a - e).abs() < 1e-3, "{actual:?} != {expected:?}");
         }
+    }
+
+    #[test]
+    fn scene_change_inside_opacity_group_stays_local() {
+        let changed = rect(20.0, 20.0, 10.0, 10.0);
+        let far = rect(300.0, 300.0, 10.0, 10.0);
+        let build = |color: crate::Hsla, opacity: f32| {
+            let mut scene = Scene::default();
+            let boundary = FilterBoundary {
+                order: 0,
+                bounds: changed.union(&far),
+                content_mask: mask(),
+                corner_radii: Default::default(),
+                corner_smoothing: 0.0,
+                filters: SmallVec::new(),
+                opacity,
+                scale: 1.0,
+                scale_origin: Default::default(),
+                motion_bounds: Bounds::default(),
+                motion: LayerMotion::NONE,
+                is_start: true,
+                inline: false,
+            };
+            scene.insert_primitive(boundary.clone());
+            scene.insert_primitive(Quad {
+                bounds: changed,
+                content_mask: mask(),
+                background: color.into(),
+                ..Default::default()
+            });
+            scene.insert_primitive(Quad {
+                bounds: far,
+                content_mask: mask(),
+                background: crate::white().into(),
+                ..Default::default()
+            });
+            scene.insert_primitive(FilterBoundary {
+                is_start: false,
+                ..boundary
+            });
+            scene.insert_primitive(glass(rect(200.0, 200.0, 20.0, 20.0)));
+            scene.insert_primitive(BackdropFilter {
+                lens: BackdropLens {
+                    bezel: 4.0,
+                    ..Default::default()
+                },
+                ..glass(rect(350.0, 350.0, 20.0, 20.0))
+            });
+            scene
+        };
+        let mut a = build(crate::red(), 0.5);
+        a.finish();
+        let mut b = build(crate::blue(), 0.5);
+        b.finish_over(&a);
+        let Some(DamagePlan::Partial(plan)) = b.damage_plan_over(Some(a.generation())) else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&changed), changed);
+        assert!(!plan.rect.intersects(&far));
+        assert!(plan.reblur.is_empty());
+
+        let mut c = build(crate::blue(), 0.6);
+        c.finish_over(&b);
+        assert!(matches!(
+            c.damage_plan_over(Some(b.generation())),
+            Some(DamagePlan::Partial(plan))
+                if plan.rect.intersect(&changed) == changed && plan.rect.intersect(&far) == far
+        ));
     }
 
     #[test]

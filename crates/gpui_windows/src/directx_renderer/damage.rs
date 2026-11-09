@@ -27,27 +27,42 @@ impl DirectXRenderer {
     }
 
     /// Encodes the scene's damage plan over the retained frame and blits it to the swapchain;
-    /// `false` when this tick needs a full encode (no retained frame for this scene, a `Full`
+    /// `false` when this frame needs a full encode (no retained frame for this scene, a `Full`
     /// plan, or a missing cache entry).
-    fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
-        let DamagePlan::Partial(plan) = scene.damage_plan() else {
+    pub(super) fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
+        let Some(DamagePlan::Partial(plan)) = scene.damage_plan_over(self.retained) else {
             return Ok(false);
         };
         let generation = scene.generation();
-        if self.retained != Some(generation)
-            || self.frame_keys.0 != generation
-            || !self.backdrops_cached(scene, plan)
-        {
+        if self.retained_atlas_epoch != self.atlas.removal_epoch() {
             return Ok(false);
         }
         let Some(scissor) = self.clamped_scissor(plan.rect) else {
             return Ok(false);
         };
 
+        let target = size(
+            DevicePixels(self.width as i32),
+            DevicePixels(self.height as i32),
+        );
+        if !gpui_render::damage_fits(scissor, target) {
+            return Ok(false);
+        }
+        if self.frame_keys.0 != generation {
+            self.frame_keys = (
+                generation,
+                gpui_render::backdrop_key::backdrop_keys(scene, target),
+            );
+        }
+        if !self.backdrops_cached(scene, plan) {
+            return Ok(false);
+        }
+        if self.uploaded_generation != Some(generation) {
+            self.upload_scene_buffers(scene)?;
+        }
         self.upload_globals()?;
 
-        // The fill needs a scratch target; the scene buffers still hold this generation's arrays,
-        // so the commands' sub-ranges index them directly.
+        // The fill needs a scratch target.
         let mut requirements = plan.requirements;
         requirements.uses_offscreen_target = true;
         requirements.uses_blur_target = true;
@@ -119,6 +134,7 @@ impl DirectXRenderer {
             return Err(error);
         }
         self.dx_blit(&scene_srv, &swapchain_rtv)?;
+        self.retained = Some(generation);
         Ok(true)
     }
 

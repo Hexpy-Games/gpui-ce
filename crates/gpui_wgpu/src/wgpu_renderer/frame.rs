@@ -53,14 +53,14 @@ pub(super) fn render_to_view(
     let submission = submit(renderer, encoder, readback);
     renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
     renderer.frame_keys = (scene.generation(), keys);
+    renderer.retained_atlas_epoch = renderer.atlas.removal_epoch();
     if submission.is_some() && release_unused {
         renderer.resources_mut().release_unused(&planned);
     }
     submission
 }
 
-/// Renders `scene` into `view` for an offscreen copy, leaving the window's retained frame,
-/// backdrop keys and surface cache as they are.
+/// Renders `scene` into `view` for an offscreen copy, invalidating any reused scene target.
 pub(super) fn render_offscreen(
     renderer: &mut WgpuRenderer,
     scene: &Scene,
@@ -72,6 +72,9 @@ pub(super) fn render_offscreen(
     let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view, size) else {
         return false;
     };
+    if targets.offscreen.is_some() {
+        renderer.retained = None;
+    }
     let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
     submit(renderer, encoder, None).is_some()
 }
@@ -416,8 +419,8 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
-        let backdrop_keys = if damage.is_some() {
-            // Damage ticks reuse the keys of the full frame they patch.
+        let backdrop_keys = if damage.is_some() && renderer.frame_keys.0 == scene.generation() {
+            // Reuse keys only for the same generation.
             renderer.frame_keys.1.clone()
         } else if scene.backdrop_filters.is_empty() {
             Vec::new()
@@ -558,20 +561,21 @@ impl<'a> FrameEncoder<'a> {
                             height,
                         );
                         let reblur = damage.is_some_and(|plan| plan.reblur.contains(&index));
-                        let key = if self.targets.inherits_backdrop() || reblur {
+                        let key = if self.targets.inherits_backdrop() {
                             None
                         } else {
                             self.backdrop_keys.get(index).copied().flatten()
                         };
-                        let hit = key.is_some_and(|key| {
-                            let resources = self.renderer.resources();
-                            resources.backdrop_cache.borrow_mut().restore(
-                                key,
-                                &mut self.encoder,
-                                resources.blur_ping_texture.as_ref(),
-                                resources.backdrop_snapshot_texture.as_ref(),
-                            )
-                        });
+                        let hit = !reblur
+                            && key.is_some_and(|key| {
+                                let resources = self.renderer.resources();
+                                resources.backdrop_cache.borrow_mut().restore(
+                                    key,
+                                    &mut self.encoder,
+                                    resources.blur_ping_texture.as_ref(),
+                                    resources.backdrop_snapshot_texture.as_ref(),
+                                )
+                            });
                         if damage.is_some() && !reblur && !hit && uses_blurred_backdrop(filter) {
                             // The plan promised a cache entry for every glass it does not re-blur.
                             return Err(DrawError::MissingIntermediateTarget);
@@ -684,9 +688,12 @@ impl<'a> FrameEncoder<'a> {
                     let target =
                         self.renderer.resources().filter_group_views[index.as_usize()].clone();
                     if motion_target.is_none()
-                        && self.scene.filter_boundaries[*boundary_index]
+                        && (self.scene.filter_boundaries[*boundary_index]
                             .motion
                             .is_animated()
+                            || self.scene.filter_boundaries[*boundary_index].max_blur_radius()
+                                > 0.0
+                            || self.scene.filter_boundaries[*boundary_index].scale != 1.0)
                     {
                         motion_target = Some(*index);
                         scissor = None;

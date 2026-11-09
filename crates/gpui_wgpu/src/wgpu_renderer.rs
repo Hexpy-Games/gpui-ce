@@ -77,6 +77,7 @@ pub struct WgpuRenderer {
     animation_time_ms: u32,
     /// The scene generation whose complete frame `scene_color` holds, if any.
     retained: Option<u64>,
+    retained_atlas_epoch: u64,
     /// The backdrop-cache keys of the last full frame, with that frame's scene generation.
     frame_keys: (u64, Vec<Option<u64>>),
 }
@@ -139,6 +140,7 @@ impl WgpuRenderer {
             uploaded_globals: None,
             animation_time_ms: 0,
             retained: None,
+            retained_atlas_epoch: 0,
             frame_keys: (0, Vec::new()),
             faults: GpuFaultState {
                 pending_error: last_error,

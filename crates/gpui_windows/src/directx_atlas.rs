@@ -29,6 +29,7 @@ struct DirectXAtlasState {
     /// The uploaded bytes of flipbook grids, by (texture, tile id), for the platform compositor.
     frame_grids: FxHashMap<(AtlasTextureId, u32), (Size<DevicePixels>, Arc<[u8]>)>,
     glyph_cache: GlyphAtlasCache,
+    removal_epoch: u64,
 }
 
 struct DirectXAtlasTexture {
@@ -41,6 +42,10 @@ struct DirectXAtlasTexture {
 }
 
 impl DirectXAtlas {
+    pub(crate) fn removal_epoch(&self) -> u64 {
+        self.0.lock().removal_epoch
+    }
+
     pub(crate) fn new(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Self {
         DirectXAtlas(Mutex::new(DirectXAtlasState {
             device: device.clone(),
@@ -51,6 +56,7 @@ impl DirectXAtlas {
             tiles_by_key: Default::default(),
             frame_grids: Default::default(),
             glyph_cache: Default::default(),
+            removal_epoch: 0,
         }))
     }
 
@@ -84,6 +90,7 @@ impl DirectXAtlas {
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
+        lock.removal_epoch += lock.tiles_by_key.len() as u64;
         lock.tiles_by_key.clear();
         lock.frame_grids.clear();
         lock.glyph_cache.clear();
@@ -142,6 +149,7 @@ impl PlatformAtlas for DirectXAtlas {
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        lock.removal_epoch += 1;
         lock.frame_grids.remove(&(tile.texture_id, tile.tile_id.0));
         let id = tile.texture_id;
 
