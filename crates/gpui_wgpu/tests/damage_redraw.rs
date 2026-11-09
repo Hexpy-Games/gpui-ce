@@ -93,11 +93,7 @@ fn glass(glass_bounds: Bounds<ScaledPixels>) -> BackdropFilter {
     }
 }
 
-fn animated_scene(
-    renderer: &WgpuHeadlessRenderer,
-    under_glass: Hsla,
-    previous: Option<&Scene>,
-) -> Scene {
+fn animated_scene(renderer: &WgpuHeadlessRenderer, under_glass: Hsla) -> Scene {
     // Frame k of the mask lights the vertical stripe x in [4k, 4k + 4).
     let mono = flipbook_tile(
         renderer,
@@ -182,7 +178,6 @@ fn animated_scene(
         background: solid_background(color(0x00ff00)),
         ..Default::default()
     });
-    scene.finish(previous);
     scene
 }
 
@@ -190,7 +185,8 @@ fn animated_scene(
 #[test]
 fn damage_redraw_matches_full_redraw() {
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
-    let scene = animated_scene(&renderer, color(0xffffff), None);
+    let mut scene = animated_scene(&renderer, color(0xffffff));
+    scene.finish();
 
     let mut first_frames = Vec::new();
     for (previous, now) in [(0, 125), (125, 250)] {
@@ -231,11 +227,13 @@ fn damage_redraw_matches_full_redraw() {
 fn scene_change_under_glass_matches_full_redraw() {
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
     renderer.set_animation_time_ms(125);
-    let a = animated_scene(&renderer, color(0xffffff), None);
+    let mut a = animated_scene(&renderer, color(0xffffff));
+    a.finish();
     renderer
         .render_scene_to_image(&a, TARGET)
         .expect("full scene A");
-    let b = animated_scene(&renderer, color(0xffc040), Some(&a));
+    let mut b = animated_scene(&renderer, color(0xffc040));
+    b.finish_over(&a);
     let Some(gpui::DamagePlan::Partial(plan)) = b.damage_plan_over(Some(a.generation())) else {
         panic!("expected a partial redraw");
     };

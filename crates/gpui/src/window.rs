@@ -1296,7 +1296,7 @@ impl Frame {
             }
         }
 
-        self.scene.finish(Some(&prev_frame.scene));
+        self.scene.finish_over(&prev_frame.scene);
     }
 }
 

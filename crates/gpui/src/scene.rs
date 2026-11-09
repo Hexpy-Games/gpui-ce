@@ -454,7 +454,22 @@ impl Scene {
         }
     }
 
-    pub fn finish(&mut self, previous: Option<&Scene>) {
+    pub fn finish(&mut self) {
+        self.finish_impl();
+    }
+
+    pub fn finish_over(&mut self, previous: &Scene) {
+        self.finish_impl();
+        self.change = (previous.generation() != 0
+            && previous.viewport_size == self.viewport_size
+            && previous.scale_factor == self.scale_factor)
+            .then(|| damage::SceneChange {
+                base: previous.generation(),
+                rect: damage::change_rect(previous, self),
+            });
+    }
+
+    fn finish_impl(&mut self) {
         let layers = std::mem::take(&mut self.live_layers);
         for layer in layers {
             // A layer laid out at zero size has no surface to present to; it paints nothing.
@@ -542,16 +557,7 @@ impl Scene {
                     .is_some_and(|appear| appear.motion.is_animated())
             });
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        self.change = previous
-            .filter(|previous| {
-                previous.generation() != 0
-                    && previous.viewport_size == self.viewport_size
-                    && previous.scale_factor == self.scale_factor
-            })
-            .map(|previous| damage::SceneChange {
-                base: previous.generation(),
-                rect: damage::change_rect(previous, self),
-            });
+        self.change = None;
         self.is_finished = true;
     }
 
@@ -1995,7 +2001,7 @@ mod tests {
     }
 
     fn batches(scene: &mut Scene) -> Vec<PrimitiveBatch> {
-        scene.finish(None);
+        scene.finish();
         scene.batches().collect()
     }
 
@@ -2154,7 +2160,7 @@ mod tests {
                 scene.pop_layer();
             }
 
-            scene.finish(None);
+            scene.finish();
             assert_eq!(scene.render_plan().requirements().isolated_target_count, 3);
 
             let commands: Vec<_> = scene
@@ -2195,7 +2201,7 @@ mod tests {
 
             let mut replay = Scene::default();
             replay.replay(0..scene.len(), &scene);
-            replay.finish(None);
+            replay.finish();
             assert_eq!(replay.render_commands(), scene.render_commands());
             assert_eq!(replay.surface_opacities(), &[1.0]);
             assert!(replay.layer_stack.is_empty());
@@ -2208,7 +2214,7 @@ mod tests {
         let mut scene = Scene::default();
         scene.insert_primitive(boundary(true));
         scene.insert_primitive(quad());
-        scene.finish(None);
+        scene.finish();
 
         let mut commands = scene.render_commands().iter();
         assert!(matches!(
@@ -2230,12 +2236,12 @@ mod tests {
     fn finish_rebuilds_the_plan_after_direct_primitive_mutation() {
         let mut scene = Scene::default();
         scene.insert_primitive(quad());
-        scene.finish(None);
+        scene.finish();
         let commands = scene.render_commands().to_vec();
 
         // Primitive storage is public, so direct mutation must change the compiled plan.
         scene.quads.push(quad());
-        scene.finish(None);
+        scene.finish();
         assert_ne!(scene.render_commands(), commands);
         assert_eq!(scene.render_plan().requirements().instance_batch_count, 1);
     }
@@ -2246,14 +2252,14 @@ mod tests {
         for _ in 0..32 {
             scene.insert_primitive(quad());
         }
-        scene.finish(None);
+        scene.finish();
         let capacity = scene.render_plan.commands.capacity();
         assert!(capacity >= 32);
 
         scene.clear();
         assert_eq!(scene.render_plan.commands.capacity(), capacity);
         scene.insert_primitive(quad());
-        scene.finish(None);
+        scene.finish();
         assert_eq!(scene.render_plan.commands.capacity(), capacity);
     }
 
@@ -2263,7 +2269,7 @@ mod tests {
         let mut quad = quad();
         quad.order = DrawOrder::MAX;
         scene.quads.push(quad);
-        scene.finish(None);
+        scene.finish();
 
         assert!(matches!(
             scene.render_commands(),
@@ -2308,7 +2314,7 @@ mod tests {
                 });
             }
 
-            scene.finish(None);
+            scene.finish();
 
             let requirements = scene.render_plan().requirements();
             assert_eq!(
@@ -2336,7 +2342,7 @@ mod tests {
             is_start: false,
             ..start
         });
-        scene.finish(None);
+        scene.finish();
         scene
     }
 

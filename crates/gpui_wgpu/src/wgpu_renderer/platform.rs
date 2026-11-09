@@ -520,7 +520,7 @@ mod tests {
             background: gpui::solid_background(gpui::red()),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
         scene
     }
 

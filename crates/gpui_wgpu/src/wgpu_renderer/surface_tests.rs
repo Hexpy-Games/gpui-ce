@@ -125,7 +125,7 @@ fn failed_frames_release_surface_images() {
     )
     .unwrap();
     let mut scene = Scene::default();
-    scene.finish(None);
+    scene.finish();
     assert!(renderer.draw(&scene), "initial frame must present");
     events.roundtrip(&mut state).unwrap();
 

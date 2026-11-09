@@ -331,7 +331,7 @@ mod tests {
                 source,
             });
         }
-        scene.finish(None);
+        scene.finish();
         scene
     }
 

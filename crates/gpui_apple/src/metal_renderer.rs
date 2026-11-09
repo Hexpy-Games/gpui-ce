@@ -2212,7 +2212,7 @@ mod tests {
         let mut renderer = MetalRenderer::new_headless(pool);
         let target_size = size(DevicePixels(5), DevicePixels(5));
         let mut empty_scene = Scene::default();
-        empty_scene.finish(None);
+        empty_scene.finish();
 
         renderer.prepare_intermediate_textures(&empty_scene, target_size);
         assert!(renderer.path_intermediate_texture.is_none());
@@ -2235,7 +2235,7 @@ mod tests {
             opacity: 1.0,
             ..Default::default()
         });
-        filtered_scene.finish(None);
+        filtered_scene.finish();
 
         renderer.prepare_intermediate_textures(&filtered_scene, target_size);
         assert!(renderer.path_intermediate_texture.is_none());
@@ -2285,7 +2285,7 @@ mod tests {
             transformation: TransformationMatrix::unit(),
             frames: gpui::FrameLoop::NONE,
         });
-        scene.finish(None);
+        scene.finish();
 
         let image = renderer
             .render_scene_to_image(
@@ -2395,7 +2395,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        quads.finish(None);
+        quads.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &quads,
@@ -2518,7 +2518,7 @@ mod tests {
             thickness: ScaledPixels(1.0),
             wavy: gpui::ShaderBool::Disabled,
         });
-        underline.finish(None);
+        underline.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &underline,
@@ -2547,7 +2547,7 @@ mod tests {
             thickness: ScaledPixels(1.0),
             wavy: gpui::ShaderBool::Enabled,
         });
-        wavy.finish(None);
+        wavy.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &wavy,
@@ -2613,7 +2613,7 @@ mod tests {
             border_widths: Edges::all(ScaledPixels(1.0)),
             ..Default::default()
         });
-        border.finish(None);
+        border.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &border,
@@ -2663,7 +2663,7 @@ mod tests {
             ..Default::default()
         });
 
-        custom_border.finish(None);
+        custom_border.finish();
         let Some(custom_image) = render_for_contracts(
             &mut renderer,
             &custom_border,
@@ -2717,7 +2717,7 @@ mod tests {
             clip_outside: gpui::ShaderBool::Disabled,
             padding: 0,
         });
-        shadow.finish(None);
+        shadow.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &shadow,
@@ -2785,7 +2785,7 @@ mod tests {
             opacity: 0.8,
             ..Default::default()
         });
-        filter.finish(None);
+        filter.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &filter,
@@ -2863,7 +2863,7 @@ mod tests {
             tile,
             frames: gpui::FrameLoop::NONE,
         });
-        sprite.finish(None);
+        sprite.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &sprite,
@@ -2948,7 +2948,7 @@ mod tests {
         path.color = solid_background(hsla(0.45, 0.9, 0.45, 1.0));
         let mut path_scene = Scene::default();
         path_scene.insert_primitive(path.scale(1.0));
-        path_scene.finish(None);
+        path_scene.finish();
         let Some(image) = render_for_contracts(
             &mut renderer,
             &path_scene,

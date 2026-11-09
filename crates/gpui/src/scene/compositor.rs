@@ -214,7 +214,7 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
                 ScaledPixels(rect.bottom().0.ceil()),
             ),
         );
-        content.finish(None);
+        content.finish();
         let mut hash = DefaultHasher::new();
         format!(
             "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{rect:?}{:?}",

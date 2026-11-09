@@ -39,7 +39,7 @@ fn filled_path_resolves_without_invalidating_the_frame() {
     path.content_mask = full_mask();
     path.color = solid_background(gpui::white());
     scene.insert_primitive(path);
-    scene.finish(None);
+    scene.finish();
 
     // The path uses an MSAA attachment when supported. Storing that transient
     // attachment invalidates the command buffer, including the background quad.
@@ -242,7 +242,7 @@ fn every_primitive_kind_renders() {
         clip_outside: ShaderBool::Disabled,
         padding: 0,
     });
-    scene.finish(None);
+    scene.finish();
     let quad_batches: Vec<_> = scene
         .render_commands()
         .iter()
@@ -464,13 +464,13 @@ fn smoothed_primitives_share_one_contour() {
         wallpaper: None,
     });
 
-    scene.finish(None);
+    scene.finish();
     let image = renderer
         .render_scene_to_image(&scene, target)
         .expect("render must succeed");
     let mut unfiltered_scene = Scene::default();
     unfiltered_scene.insert_primitive(backdrop);
-    unfiltered_scene.finish(None);
+    unfiltered_scene.finish();
     let unfiltered = renderer
         .render_scene_to_image(&unfiltered_scene, target)
         .expect("reference render must succeed");
@@ -575,7 +575,7 @@ fn content_mask_fades_quad_edges() {
         background: solid_background(red),
         ..Default::default()
     });
-    scene.finish(None);
+    scene.finish();
     let image = renderer
         .render_scene_to_image(&scene, TARGET)
         .expect("render must succeed");

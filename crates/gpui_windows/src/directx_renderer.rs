@@ -3615,7 +3615,7 @@ mod tests {
             });
         }
 
-        scene.finish(None);
+        scene.finish();
 
         scene
     }
@@ -3778,7 +3778,7 @@ mod tests {
             background: solid_background(blue),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
         let quad_batches: Vec<_> = scene
             .render_commands()
             .iter()
@@ -3839,7 +3839,7 @@ mod tests {
             background: solid_background(white()),
             ..Default::default()
         });
-        ordinary.finish(None);
+        ordinary.finish();
         renderer.render(&ordinary, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), None);
 
@@ -3853,7 +3853,7 @@ mod tests {
                 });
             });
         });
-        nested.finish(None);
+        nested.finish();
         renderer.render(&nested, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), Some((3, false, false)));
 
@@ -3872,7 +3872,7 @@ mod tests {
             // A second primitive keeps the group isolated (a single one is drawn inline).
             scene.insert_primitive(ordinary.quads[0]);
         });
-        filtered.finish(None);
+        filtered.finish();
         renderer.render(&filtered, WindowBackgroundAppearance::Opaque)?;
         assert_eq!(allocations(&renderer), Some((3, true, true)));
 

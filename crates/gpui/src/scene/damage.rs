@@ -58,7 +58,7 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
         .count();
     let mut rect: Option<Bounds<ScaledPixels>> = None;
     for (scene, end) in [(previous, old.len() - suffix), (scene, new.len() - suffix)] {
-        let mut groups = SmallVec::<[Option<Bounds<ScaledPixels>>; 4]>::new();
+        let mut groups = SmallVec::<[(Bounds<ScaledPixels>, bool); 4]>::new();
         for (index, operation) in scene.paint_operations.iter().enumerate() {
             let mut reach = None;
             match operation {
@@ -77,22 +77,16 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
                         } else {
                             boundary.bounds
                         };
-                        reach = widened.then(|| {
-                            bounds
-                                .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
-                                .intersect(&boundary.content_mask.bounds)
-                        });
-                        groups.push(reach);
+                        let group_reach = bounds
+                            .dilate(ScaledPixels(3.0 * boundary.max_blur_radius()))
+                            .intersect(&boundary.content_mask.bounds);
+                        groups.push((group_reach, widened));
+                        reach = Some(group_reach);
                     } else {
-                        reach = groups.pop().flatten();
+                        reach = groups.pop().map(|(group_reach, _)| group_reach);
                     }
                 }
                 PaintOperation::Primitive(Primitive::Surface(_)) => return None,
-                PaintOperation::Primitive(Primitive::BackdropFilter(filter))
-                    if filter.lens.is_active() =>
-                {
-                    return None;
-                }
                 PaintOperation::Primitive(primitive) => reach = primitive.painted_bounds(),
                 PaintOperation::LiveLayer(layer) => {
                     reach = Some(layer.bounds.intersect(&layer.content_mask.bounds))
@@ -100,7 +94,10 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
                 PaintOperation::StartLayer(_) | PaintOperation::EndLayer => {}
             }
             if index >= prefix && index < end {
-                reach = groups.iter().find_map(|reach| *reach).or(reach);
+                reach = groups
+                    .iter()
+                    .find_map(|(group_reach, widened)| widened.then_some(*group_reach))
+                    .or(reach);
                 if let Some(reach) = reach.filter(|bounds| !bounds.is_empty()) {
                     rect = Some(rect.map_or(reach, |rect| rect.union(&reach)));
                 }
@@ -675,16 +672,16 @@ mod tests {
     fn scene_change_inside_opacity_group_stays_local() {
         let changed = rect(20.0, 20.0, 10.0, 10.0);
         let far = rect(300.0, 300.0, 10.0, 10.0);
-        let build = |color: crate::Hsla, previous: Option<&Scene>| {
+        let build = |color: crate::Hsla, opacity: f32| {
             let mut scene = Scene::default();
             let boundary = FilterBoundary {
                 order: 0,
-                bounds: mask().bounds,
+                bounds: changed.union(&far),
                 content_mask: mask(),
                 corner_radii: Default::default(),
                 corner_smoothing: 0.0,
                 filters: SmallVec::new(),
-                opacity: 0.5,
+                opacity,
                 scale: 1.0,
                 scale_origin: Default::default(),
                 motion_bounds: Bounds::default(),
@@ -710,17 +707,33 @@ mod tests {
                 ..boundary
             });
             scene.insert_primitive(glass(rect(200.0, 200.0, 20.0, 20.0)));
-            scene.finish(previous);
+            scene.insert_primitive(BackdropFilter {
+                lens: BackdropLens {
+                    bezel: 4.0,
+                    ..Default::default()
+                },
+                ..glass(rect(350.0, 350.0, 20.0, 20.0))
+            });
             scene
         };
-        let a = build(crate::red(), None);
-        let b = build(crate::blue(), Some(&a));
+        let mut a = build(crate::red(), 0.5);
+        a.finish();
+        let mut b = build(crate::blue(), 0.5);
+        b.finish_over(&a);
         let Some(DamagePlan::Partial(plan)) = b.damage_plan_over(Some(a.generation())) else {
             panic!("expected a partial redraw");
         };
         assert_eq!(plan.rect.intersect(&changed), changed);
         assert!(!plan.rect.intersects(&far));
         assert!(plan.reblur.is_empty());
+
+        let mut c = build(crate::blue(), 0.6);
+        c.finish_over(&b);
+        assert!(matches!(
+            c.damage_plan_over(Some(b.generation())),
+            Some(DamagePlan::Partial(plan))
+                if plan.rect.intersect(&changed) == changed && plan.rect.intersect(&far) == far
+        ));
     }
 
     #[test]
@@ -745,7 +758,7 @@ mod tests {
             }),
             ..glass(rect(100.0, 100.0, 40.0, 40.0))
         });
-        scene.finish(None);
+        scene.finish();
 
         assert!(scene.has_animations());
         let DamagePlan::Partial(damage) = scene.damage_plan() else {
@@ -783,7 +796,7 @@ mod tests {
             background: crate::red().into(),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
         assert_eq!(scene.live_layers().len(), 1);
         assert_eq!(scene.live_layers()[0].key, 1);
         assert!(scene.covered_live_keys().contains(&2));
@@ -801,7 +814,7 @@ mod tests {
 
         let mut scene = Scene::default();
         scene.insert_primitive(sprite);
-        scene.finish(None);
+        scene.finish();
         assert!(scene.has_animations());
 
         let centered = rect(40.0, 40.0, 20.0, 20.0);
@@ -820,7 +833,7 @@ mod tests {
 
         let mut still = Scene::default();
         still.insert_primitive(flipbook(centered, FrameLoop::NONE));
-        still.finish(None);
+        still.finish();
         assert!(!still.has_animations());
     }
 
@@ -843,7 +856,7 @@ mod tests {
             content_mask: mask(),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
 
         let DamagePlan::Partial(damage) = scene.damage_plan() else {
             panic!("expected a partial redraw");
@@ -893,7 +906,7 @@ mod tests {
                     ..Default::default()
                 });
             }
-            scene.finish(None);
+            scene.finish();
             scene
         };
 
@@ -947,7 +960,7 @@ mod tests {
             is_start: false,
             ..boundary.clone()
         });
-        scene.finish(None);
+        scene.finish();
         assert_eq!(scene.compositor_groups().len(), 1);
         assert_eq!(scene.compositor_groups()[0].scene.quads.len(), 2);
         assert!(scene.quads.is_empty());
@@ -967,7 +980,7 @@ mod tests {
             content_mask: mask(),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
         assert_eq!(scene.compositor_groups().len(), 1);
         assert_eq!(scene.filter_boundaries.len(), 2);
     }
@@ -1020,7 +1033,7 @@ mod tests {
             content_mask: mask(),
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
         assert!(scene.has_animations());
         let DamagePlan::Partial(damage) = scene.damage_plan() else {
             panic!("expected a partial redraw");
@@ -1142,7 +1155,7 @@ mod tests {
             is_start: false,
             ..boundary
         });
-        scene.finish(None);
+        scene.finish();
         assert!(scene.filter_boundaries.is_empty());
         assert_eq!(scene.quads.len(), 1);
         assert_eq!(scene.quads[0].bounds, rect(10.0, 10.0, 20.0, 20.0));

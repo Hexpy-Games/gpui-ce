@@ -456,7 +456,7 @@ mod tests {
             });
         }
 
-        scene.finish(None);
+        scene.finish();
 
         scene
     }
@@ -531,7 +531,7 @@ mod tests {
         scene
             .backdrop_filters
             .resize_with(100, BackdropFilter::default);
-        scene.finish(None);
+        scene.finish();
 
         assert_eq!(
             frame::FrameRequirements::for_commands(
@@ -596,7 +596,7 @@ mod tests {
             thickness: ScaledPixels(1.0),
             wavy: false.into(),
         });
-        scene.finish(None);
+        scene.finish();
 
         let image = renderer.render_to_image(&scene)?;
         let center = image.get_pixel(1, 1).0;
@@ -676,7 +676,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        scene.finish(None);
+        scene.finish();
         let context = WgpuContext::new_headless(None)?;
         let mut renderer =
             WgpuRenderer::new_headless(&context, gpui::size(DevicePixels(4), DevicePixels(4)))?;
@@ -705,7 +705,7 @@ mod tests {
         let render = |quad| -> anyhow::Result<image::RgbaImage> {
             let mut scene = Scene::default();
             scene.insert_primitive(quad);
-            scene.finish(None);
+            scene.finish();
             let mut renderer = WgpuRenderer::new_headless(&context, size)?;
             renderer.render_to_image(&scene)
         };
@@ -790,7 +790,7 @@ mod tests {
             opacity: 1.0,
             ..BackdropFilter::default()
         });
-        scene.finish(None);
+        scene.finish();
 
         renderer.render_to_image(&scene)?;
         renderer.render_to_image(&scene)?;
@@ -837,7 +837,7 @@ mod tests {
             opacity: 1.0,
             ..Default::default()
         });
-        scene.finish(None);
+        scene.finish();
 
         let image = renderer.render_to_image(&scene)?;
         for y in 0..5 {
@@ -896,7 +896,7 @@ mod tests {
                 wavy: false.into(),
             });
         }
-        scene.finish(None);
+        scene.finish();
         assert_eq!(
             scene
                 .render_commands()
@@ -1013,7 +1013,7 @@ mod tests {
         nested.insert_primitive(test_quad(test_bounds(12.0, 0.0, 4.0, 8.0), bounds, green));
 
         for scene in [&mut slider, &mut translucent, &mut nested] {
-            scene.finish(None);
+            scene.finish();
         }
 
         let cases = [
@@ -1083,7 +1083,7 @@ mod tests {
 
         let mut original = Scene::default();
         paint_background(&mut original);
-        original.finish(None);
+        original.finish();
 
         for (renderer_idx, renderer) in test_renderers()?.iter_mut().enumerate() {
             let background = renderer.render_scene_to_image(&original, target_size)?;
@@ -1140,9 +1140,9 @@ mod tests {
                     }
                 });
 
-                reference.finish(None);
-                grouped.finish(None);
-                unfiltered.finish(None);
+                reference.finish();
+                grouped.finish();
+                unfiltered.finish();
 
                 let reference = renderer.render_scene_to_image(&reference, target_size)?;
                 let actual = renderer.render_scene_to_image(&grouped, target_size)?;
