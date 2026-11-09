@@ -29,7 +29,7 @@ impl DirectXRenderer {
     /// Encodes the scene's damage plan over the retained frame and blits it to the swapchain;
     /// `false` when this frame needs a full encode (no retained frame for this scene, a `Full`
     /// plan, or a missing cache entry).
-    fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
+    pub(super) fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
         let Some(DamagePlan::Partial(plan)) = scene.damage_plan_over(self.retained) else {
             return Ok(false);
         };
