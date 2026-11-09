@@ -481,7 +481,7 @@ impl<'a> FrameEncoder<'a> {
         let mut scissor = self.scissor;
         let mut motion_target = None;
         let damage = self.damage;
-        let load = if let Some(scissor) = scissor.filter(|_| damage.is_some()) {
+        let mut pending_load = if let Some(scissor) = scissor.filter(|_| damage.is_some()) {
             // A clear ignores the scissor, so the damage rectangle is overwritten with the
             // frame's clear colour by a scissored draw instead.
             let renderer = self.renderer;
@@ -511,15 +511,8 @@ impl<'a> FrameEncoder<'a> {
         } else {
             wgpu::LoadOp::Clear(self.renderer.target.clear_color())
         };
-        let mut pass = begin_scene_render_pass(
-            self.renderer,
-            &mut self.encoder,
-            "main_pass",
-            self.targets.current(),
-            load,
-            self.extent,
-            scissor,
-        );
+        let mut pass = None;
+        let mut parent_loads = smallvec::SmallVec::<[_; gpui::MAX_FILTER_GROUP_DEPTH]>::new();
 
         for command in self.commands {
             match command {
@@ -532,31 +525,20 @@ impl<'a> FrameEncoder<'a> {
                         continue;
                     }
                     let paths = &self.scene.paths[range.clone()];
-                    drop(pass);
-                    let rasterized = self.renderer.draw_paths_to_intermediate(
+                    drop(pass.take());
+                    self.renderer.draw_paths_to_intermediate(
                         &mut self.encoder,
                         paths,
                         &mut self.instances,
                         self.extent,
-                    );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_paths",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                        self.extent,
-                        scissor,
-                    );
-                    rasterized?;
-                    self.renderer.draw_paths_from_intermediate(
-                        paths,
-                        &mut self.instances,
-                        &mut pass,
                     )?;
+                    let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    self.renderer
+                        .draw_paths_from_intermediate(paths, &mut self.instances, pass)?;
                 }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
-                    drop(pass);
+                    self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    drop(pass.take());
                     for index in range.clone() {
                         let filter = &self.scene.backdrop_filters[index];
                         if let Some(paint) = &filter.wallpaper {
@@ -645,6 +627,7 @@ impl<'a> FrameEncoder<'a> {
                                 lens,
                             },
                             hit,
+                            wgpu::LoadOp::Load,
                             self.extent,
                             scissor,
                         );
@@ -687,31 +670,26 @@ impl<'a> FrameEncoder<'a> {
                             );
                         }
                     }
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_backdrop_filter",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                        self.extent,
-                        scissor,
-                    );
                 }
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries must be compiled into render commands")
                 }
-                RenderCommand::Batch(batch) => encode_inline_batch(
-                    self.renderer,
-                    self.scene,
-                    batch,
-                    &mut self.instances,
-                    &mut pass,
-                )?,
+                RenderCommand::Batch(batch) => {
+                    let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    encode_inline_batch(
+                        self.renderer,
+                        self.scene,
+                        batch,
+                        &mut self.instances,
+                        pass,
+                    )?;
+                }
                 RenderCommand::BeginFilter {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(index),
                 } => {
-                    drop(pass);
+                    drop(pass.take());
+                    parent_loads.push(pending_load);
                     let target =
                         self.renderer.resources().filter_group_views[index.as_usize()].clone();
                     if motion_target.is_none()
@@ -728,23 +706,19 @@ impl<'a> FrameEncoder<'a> {
                             .filters
                             .is_empty(),
                     );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "filter_group",
-                        self.targets.current(),
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        self.extent,
-                        scissor,
-                    );
+                    pending_load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
                     target: FilterRenderTarget::Isolated(index),
                     ..
                 } => {
-                    drop(pass);
+                    if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+                        self.scene_pass(&mut pass, &mut pending_load, scissor);
+                    }
+                    drop(pass.take());
                     let (filtered, parent) = self.targets.exit();
+                    pending_load = parent_loads.pop().expect("filter parent load must exist");
                     if motion_target == Some(*index) {
                         motion_target = None;
                         scissor = self.scissor;
@@ -777,18 +751,11 @@ impl<'a> FrameEncoder<'a> {
                             lens: Default::default(),
                         },
                         false,
+                        pending_load,
                         self.extent,
                         scissor,
                     );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_content_filter",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                        self.extent,
-                        scissor,
-                    );
+                    pending_load = wgpu::LoadOp::Load;
                 }
                 RenderCommand::BeginFilter {
                     target: FilterRenderTarget::Inline,
@@ -800,9 +767,34 @@ impl<'a> FrameEncoder<'a> {
                 } => {}
             }
         }
+        if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+            self.scene_pass(&mut pass, &mut pending_load, scissor);
+        }
         drop(pass);
         self.targets.assert_balanced();
         Ok(())
+    }
+
+    fn scene_pass<'pass>(
+        &mut self,
+        pass: &'pass mut Option<wgpu::RenderPass<'static>>,
+        pending_load: &mut wgpu::LoadOp<wgpu::Color>,
+        scissor: Option<ScissorRectangle>,
+    ) -> &'pass mut wgpu::RenderPass<'static> {
+        pass.get_or_insert_with(|| {
+            let pass = begin_scene_render_pass(
+                self.renderer,
+                &mut self.encoder,
+                "scene_pass",
+                self.targets.current(),
+                *pending_load,
+                self.extent,
+                scissor,
+            )
+            .forget_lifetime();
+            *pending_load = wgpu::LoadOp::Load;
+            pass
+        })
     }
 }
 

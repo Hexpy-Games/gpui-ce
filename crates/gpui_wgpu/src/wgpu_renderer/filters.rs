@@ -61,6 +61,7 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         blurred_ready: bool,
+        target_load: wgpu::LoadOp<wgpu::Color>,
         extent: Option<Size<DevicePixels>>,
         target_scissor: Option<ScissorRectangle>,
     ) {
@@ -80,6 +81,7 @@ impl WgpuRenderer {
                 target,
                 parameters,
                 full_size,
+                target_load,
                 extent,
                 target_scissor,
             );
@@ -165,6 +167,7 @@ impl WgpuRenderer {
             target,
             parameters,
             full_size,
+            target_load,
             extent,
             target_scissor,
         );
@@ -176,6 +179,7 @@ impl WgpuRenderer {
                 parameters,
                 full_size,
                 parameters.lens.sharp_rim,
+                wgpu::LoadOp::Load,
                 extent,
                 target_scissor,
             );
@@ -189,6 +193,7 @@ impl WgpuRenderer {
         target: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
+        load: wgpu::LoadOp<wgpu::Color>,
         extent: Option<Size<DevicePixels>>,
         scissor: Option<ScissorRectangle>,
     ) {
@@ -199,6 +204,7 @@ impl WgpuRenderer {
             parameters,
             source_size,
             0.0,
+            load,
             extent,
             scissor,
         );
@@ -214,6 +220,7 @@ impl WgpuRenderer {
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
         sharp_rim: f32,
+        load: wgpu::LoadOp<wgpu::Color>,
         extent: Option<Size<DevicePixels>>,
         scissor: Option<ScissorRectangle>,
     ) {
@@ -260,7 +267,7 @@ impl WgpuRenderer {
             target,
             source,
             uniforms,
-            wgpu::LoadOp::Load,
+            load,
             extent,
             scissor,
         );
@@ -330,6 +337,7 @@ impl WgpuRenderer {
                     lens: Default::default(),
                 },
                 full_size,
+                wgpu::LoadOp::Load,
                 extent,
                 None,
             );
