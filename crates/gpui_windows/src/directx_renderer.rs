@@ -3860,6 +3860,8 @@ mod tests {
                 opacity: 1.0,
                 ..Default::default()
             });
+            // A second primitive keeps the group isolated (a single one is drawn inline).
+            scene.insert_primitive(ordinary.quads[0]);
         });
         filtered.finish();
         renderer.render(&filtered, WindowBackgroundAppearance::Opaque)?;
