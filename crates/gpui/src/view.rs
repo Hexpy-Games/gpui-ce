@@ -396,7 +396,7 @@ impl<V: View> Element for ViewElement<V> {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let entity_id = self.entity_id;
         let request_layout = |window: &mut Window| {
-            let caching_disabled = window.is_inspector_picking(cx);
+            let caching_disabled = window.view_caching_disabled(cx);
 
             if let (Some(entity_id), Some(style)) = (
                 entity_id,
@@ -593,7 +593,7 @@ impl<V: View> Element for ViewElement<V> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
             window.with_rendered_view(entity_id, |window| {
-                let caching_disabled = window.is_inspector_picking(cx);
+                let caching_disabled = window.view_caching_disabled(cx);
                 if self.cached_style.is_some() && !caching_disabled {
                     window.with_element_state::<ViewElementState, _>(
                         global_id.unwrap(),

@@ -1119,6 +1119,7 @@ pub(crate) struct TooltipRequest {
 
 pub(crate) struct DeferredDraw {
     current_view: EntityId,
+    refreshing: bool,
     priority: usize,
     parent_node: DispatchNodeId,
     element_id_stack: SmallVec<[ElementId; 32]>,
@@ -1171,6 +1172,7 @@ pub(crate) struct PrepaintStateIndex {
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
     scene_index: usize,
+    window_control_hitboxes_index: usize,
     mouse_listeners_index: usize,
     pointer_observers_index: usize,
     input_handlers_index: usize,
@@ -1406,6 +1408,7 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
+    a11y_was_active: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2203,6 +2206,7 @@ impl Window {
                 accessibility_forced,
                 initial_window_title,
             ),
+            a11y_was_active: false,
         })
     }
 
@@ -3563,6 +3567,11 @@ impl Window {
         self.tooltip_bounds.take();
 
         self.a11y.sync_active_flag();
+        let a11y_active = self.a11y.is_active();
+        if a11y_active != self.a11y_was_active {
+            self.refreshing = true;
+        }
+        self.a11y_was_active = a11y_active;
         if self.a11y.is_active() {
             self.a11y.begin_frame();
         }
@@ -3776,6 +3785,7 @@ impl Window {
                 let (
                     priority,
                     element,
+                    refreshing,
                     parent_node,
                     current_view,
                     rem_size,
@@ -3790,6 +3800,7 @@ impl Window {
                     (
                         deferred_draw.priority,
                         deferred_draw.element.take(),
+                        deferred_draw.refreshing,
                         deferred_draw.parent_node,
                         deferred_draw.current_view,
                         deferred_draw.rem_size,
@@ -3801,6 +3812,7 @@ impl Window {
 
                 let prepaint_start = self.prepaint_index();
                 if let Some(mut element) = element {
+                    let refreshing = mem::replace(&mut self.refreshing, refreshing);
                     self.with_rendered_view(current_view, |window| {
                         window.with_rem_size(Some(rem_size), |window| {
                             window.with_absolute_element_offset(absolute_offset, |window| {
@@ -3810,6 +3822,7 @@ impl Window {
                             });
                         });
                     });
+                    self.refreshing = refreshing;
                     self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
                 } else {
                     self.reuse_prepaint(prepaint_range);
@@ -3852,13 +3865,15 @@ impl Window {
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
             if let Some(element) = deferred_draw.element.as_mut() {
+                let refreshing = mem::replace(&mut self.refreshing, deferred_draw.refreshing);
                 self.with_rendered_view(deferred_draw.current_view, |window| {
                     window.with_content_mask(content_mask, |window| {
                         window.with_rem_size(Some(deferred_draw.rem_size), |window| {
                             element.paint(window, cx);
                         });
                     })
-                })
+                });
+                self.refreshing = refreshing;
             } else {
                 self.reuse_paint(deferred_draw.paint_range.clone());
             }
@@ -3939,6 +3954,7 @@ impl Window {
                 .iter()
                 .map(|deferred_draw| DeferredDraw {
                     current_view: deferred_draw.current_view,
+                    refreshing: deferred_draw.refreshing,
                     parent_node: reused_subtree.refresh_node_id(deferred_draw.parent_node),
                     element_id_stack: deferred_draw.element_id_stack.clone(),
                     text_style_stack: deferred_draw.text_style_stack.clone(),
@@ -3956,6 +3972,7 @@ impl Window {
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
+            window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
             pointer_observers_index: self.next_frame.pointer_observers.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
@@ -3969,6 +3986,12 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        self.next_frame.window_control_hitboxes.extend(
+            self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
+                ..range.end.window_control_hitboxes_index]
+                .iter()
+                .cloned(),
+        );
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_history
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
@@ -4702,6 +4725,7 @@ impl Window {
         let parent_node = self.next_frame.dispatch_tree.active_node_id().unwrap();
         self.next_frame.deferred_draws.push(DeferredDraw {
             current_view: self.current_view(),
+            refreshing: self.refreshing,
             parent_node,
             element_id_stack: self.element_id_stack.clone(),
             text_style_stack: self.text_style_stack.clone(),
@@ -7930,6 +7954,10 @@ impl Window {
         false
     }
 
+    pub(crate) fn view_caching_disabled(&self, cx: &App) -> bool {
+        self.is_inspector_picking(cx) || self.a11y.is_active()
+    }
+
     /// Executes the provided function with mutable access to an inspector state.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn with_inspector_state<T: 'static, R>(
@@ -10287,5 +10315,204 @@ mod tests {
         let seen = seen.borrow();
         assert!(seen.len() >= 2, "the child rendered {} times", seen.len());
         assert!(seen.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[gpui::test]
+    fn cached_replay_preserves_window_controls(cx: &mut TestAppContext) {
+        struct ControlChild;
+
+        impl Render for ControlChild {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size(px(20.))
+                    .window_control_area(WindowControlArea::Drag)
+            }
+        }
+
+        struct ControlRoot {
+            child: Entity<ControlChild>,
+        }
+
+        impl Render for ControlRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(
+                    self.child
+                        .clone()
+                        .cached(crate::StyleRefinement::default().size(px(20.))),
+                )
+            }
+        }
+
+        let window = cx.add_window(|_, cx| ControlRoot {
+            child: cx.new(|_| ControlChild),
+        });
+        let hitbox_id = window
+            .update(cx, |_, window, _| {
+                assert_eq!(window.rendered_frame.window_control_hitboxes.len(), 1);
+                window.rendered_frame.window_control_hitboxes[0].1.id
+            })
+            .unwrap();
+
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let controls = &window.rendered_frame.window_control_hitboxes;
+            assert_eq!(controls.len(), 1);
+            assert_eq!(controls[0].0, WindowControlArea::Drag);
+            assert_eq!(controls[0].1.id, hitbox_id);
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn cached_replay_preserves_a11y_nodes(cx: &mut TestAppContext) {
+        struct AccessibleChild;
+
+        impl Render for AccessibleChild {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("accessible-child")
+                    .size(px(20.))
+                    .role(accesskit::Role::Button)
+                    .aria_label("Cached child")
+            }
+        }
+
+        struct AccessibleRoot {
+            child: Entity<AccessibleChild>,
+        }
+
+        impl Render for AccessibleRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(
+                    self.child
+                        .clone()
+                        .cached(crate::StyleRefinement::default().size(px(20.))),
+                )
+            }
+        }
+
+        let window = cx.add_window(|window, cx| {
+            window.a11y.set_forced(true);
+            AccessibleRoot {
+                child: cx.new(|_| AccessibleChild),
+            }
+        });
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                window
+                    .a11y
+                    .last_tree_update()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.role() == accesskit::Role::Button
+                        && node.label() == Some("Cached child"))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn cached_replay_preserves_deferred_refreshing(cx: &mut TestAppContext) {
+        struct QuadView;
+
+        impl Render for QuadView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size(px(20.))
+                    .bg(crate::red())
+                    .debug_selector(|| "deferred-cached-quad".into())
+            }
+        }
+
+        struct DeferredParent {
+            child: Entity<QuadView>,
+        }
+
+        impl Render for DeferredParent {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::deferred(
+                    self.child
+                        .clone()
+                        .cached(crate::StyleRefinement::default().size(px(20.))),
+                )
+            }
+        }
+
+        struct DeferredRoot {
+            parent: Entity<DeferredParent>,
+            show_outside: bool,
+        }
+
+        impl Render for DeferredRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .when(self.show_outside, |root| {
+                        root.child(
+                            div()
+                                .absolute()
+                                .left(px(40.))
+                                .size(px(10.))
+                                .bg(crate::blue())
+                                .debug_selector(|| "outside".into()),
+                        )
+                    })
+                    .child(
+                        self.parent
+                            .clone()
+                            .cached(crate::StyleRefinement::default().size(px(20.))),
+                    )
+            }
+        }
+
+        let window = cx.add_window(|_, cx| DeferredRoot {
+            parent: cx.new(|cx| DeferredParent {
+                child: cx.new(|_| QuadView),
+            }),
+            show_outside: false,
+        });
+        let bounds = window
+            .update(
+                cx,
+                |_, window, _| window.rendered_frame.debug_bounds["deferred-cached-quad"],
+            )
+            .unwrap();
+
+        // Shift the paint ranges outside P while P and its deferred draw replay.
+        window
+            .update(cx, |root, _, cx| {
+                root.show_outside = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.rendered_frame.deferred_draws[0].element.is_none());
+        })
+        .unwrap();
+
+        window
+            .update(cx, |root, _, cx| {
+                root.parent.update(cx, |_, cx| cx.notify());
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                window
+                    .rendered_frame
+                    .debug_bounds
+                    .get("deferred-cached-quad"),
+                Some(&bounds)
+            );
+            assert!(window.rendered_frame.scene.quads.iter().any(|quad| {
+                quad.bounds == bounds.scale(window.scale_factor())
+                    && quad.background == crate::red().into()
+            }));
+        })
+        .unwrap();
     }
 }
