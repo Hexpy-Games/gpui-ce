@@ -1,8 +1,8 @@
 //! Time-driven transforms of retained painted subtrees.
 
 use crate::{
-    Background, Bounds, ContentMask, Edges, FilterBoundary, PaintQuad, Path, Pixels, Point, Quad,
-    ScaledPixels, Scene, Size, point,
+    Bounds, ContentMask, Corners, Edges, FilterBoundary, Hsla, PaintQuad, Pixels, Point, Rgba,
+    ScaledPixels, Size, hsla_to_rgba, point,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -373,10 +373,29 @@ pub fn motion_composite_parameters(
     }
 }
 
-/// A canvas-local scene painted independently of the window's views.
+/// A canvas-local drawing operation in device pixels.
+#[expect(missing_docs)]
+pub enum LiveOp {
+    Quad {
+        bounds: Bounds<ScaledPixels>,
+        radii: Corners<ScaledPixels>,
+        color: Rgba,
+    },
+    Fill {
+        contours: Vec<Vec<Point<ScaledPixels>>>,
+        even_odd: bool,
+        color: Rgba,
+    },
+    Group {
+        alpha: f32,
+        ops: Vec<LiveOp>,
+    },
+}
+
+/// A canvas-local display list painted independently of the window's views.
 pub struct LiveCanvas {
-    /// The scene being built.
-    pub scene: Scene,
+    /// Drawing operations in device pixels.
+    pub ops: Vec<LiveOp>,
     /// Device pixels per logical pixel.
     pub scale_factor: f32,
     /// Logical canvas dimensions.
@@ -389,34 +408,49 @@ impl LiveCanvas {
         self.size
     }
 
-    /// Paints a quad in canvas-local coordinates.
+    /// Paints a quad's background fill in canvas-local coordinates. Borders are not supported.
     pub fn paint_quad(&mut self, quad: PaintQuad) {
-        self.scene.insert_primitive(Quad {
+        self.ops.push(LiveOp::Quad {
             bounds: quad.bounds.scale(self.scale_factor),
-            content_mask: ContentMask {
-                bounds: Bounds::new(Point::default(), self.size).scale(self.scale_factor),
-                ..Default::default()
-            },
-            background: quad.background,
-            border_color: quad.border_color,
-            corner_radii: quad.corner_radii.scale(self.scale_factor),
-            border_widths: quad.border_widths.scale(self.scale_factor),
-            border_style: quad.border_style,
-            border_dashed_length: quad.border_dashed_length,
-            border_dashed_gap: quad.border_dashed_gap,
-            corner_smoothing: quad.corner_smoothing,
-            ..Default::default()
+            radii: quad.corner_radii.scale(self.scale_factor),
+            color: hsla_to_rgba(quad.background.solid.into()),
         });
     }
 
-    /// Paints a path in canvas-local coordinates.
-    pub fn paint_path(&mut self, mut path: Path<Pixels>, color: impl Into<Background>) {
-        path.content_mask = ContentMask {
-            bounds: Bounds::new(Point::default(), self.size),
-            ..Default::default()
+    /// Fills closed contours in canvas-local coordinates.
+    pub fn fill(
+        &mut self,
+        contours: Vec<Vec<Point<Pixels>>>,
+        even_odd: bool,
+        color: impl Into<Hsla>,
+    ) {
+        self.ops.push(LiveOp::Fill {
+            contours: contours
+                .into_iter()
+                .map(|contour| {
+                    contour
+                        .into_iter()
+                        .map(|point| point.scale(self.scale_factor))
+                        .collect()
+                })
+                .collect(),
+            even_odd,
+            color: hsla_to_rgba(color.into()),
+        });
+    }
+
+    /// Paints an isolated group composited at the given opacity.
+    pub fn group(&mut self, alpha: f32, f: impl FnOnce(&mut LiveCanvas)) {
+        let mut canvas = LiveCanvas {
+            ops: Vec::new(),
+            scale_factor: self.scale_factor,
+            size: self.size,
         };
-        path.color = color.into();
-        self.scene.insert_primitive(path.scale(self.scale_factor));
+        f(&mut canvas);
+        self.ops.push(LiveOp::Group {
+            alpha,
+            ops: canvas.ops,
+        });
     }
 }
 

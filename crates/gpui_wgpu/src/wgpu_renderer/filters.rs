@@ -1,5 +1,5 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
-use gpui::{Bounds, Corners, DevicePixels, Point, ScaledPixels, Size};
+use gpui::{Bounds, Corners, Point, ScaledPixels};
 use gpui_render::shaders::interface as shader_interface;
 use gpui_render::{
     blur::{
@@ -32,13 +32,12 @@ impl WgpuRenderer {
         source: &wgpu::TextureView,
         uniforms: BlurUniforms,
         load: wgpu::LoadOp<wgpu::Color>,
-        extent: Option<Size<DevicePixels>>,
         scissor: Option<ScissorRectangle>,
     ) {
         let resources = self.resources();
         let uniform_offset = resources.filter_uniforms.write(&uniforms);
         let bind_group = resources.blur_bind_group(source);
-        let mut pass = begin_color_render_pass(encoder, label, target, load, extent, scissor);
+        let mut pass = begin_color_render_pass(encoder, label, target, load, scissor);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(
             shader_interface::GLOBAL_BIND_GROUP,
@@ -62,7 +61,6 @@ impl WgpuRenderer {
         parameters: FilterCompositeParameters,
         blurred_ready: bool,
         target_load: wgpu::LoadOp<wgpu::Color>,
-        extent: Option<Size<DevicePixels>>,
         target_scissor: Option<ScissorRectangle>,
     ) {
         if parameters.blur_radius <= 0.0
@@ -82,7 +80,6 @@ impl WgpuRenderer {
                 parameters,
                 full_size,
                 target_load,
-                extent,
                 target_scissor,
             );
 
@@ -134,7 +131,6 @@ impl WgpuRenderer {
                 // per lens cost more than the passes. Content blurs composite out to the scissor's
                 // edge, so they keep the clear (transparent outside).
                 load,
-                None,
                 Some(scissor),
             );
             self.draw_filter_pass(
@@ -145,7 +141,6 @@ impl WgpuRenderer {
                 &horizontal_target,
                 BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
                 load,
-                None,
                 Some(scissor),
             );
             self.draw_filter_pass(
@@ -156,7 +151,6 @@ impl WgpuRenderer {
                 &vertical_target,
                 BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
                 load,
-                None,
                 Some(scissor),
             );
         }
@@ -168,7 +162,6 @@ impl WgpuRenderer {
             parameters,
             full_size,
             target_load,
-            extent,
             target_scissor,
         );
         if parameters.lens.is_active() && parameters.lens.sharp_rim > 0.0 {
@@ -180,7 +173,6 @@ impl WgpuRenderer {
                 full_size,
                 parameters.lens.sharp_rim,
                 wgpu::LoadOp::Load,
-                extent,
                 target_scissor,
             );
         }
@@ -194,7 +186,6 @@ impl WgpuRenderer {
         parameters: FilterCompositeParameters,
         source_size: [f32; 2],
         load: wgpu::LoadOp<wgpu::Color>,
-        extent: Option<Size<DevicePixels>>,
         scissor: Option<ScissorRectangle>,
     ) {
         self.composite_texture_with(
@@ -205,7 +196,6 @@ impl WgpuRenderer {
             source_size,
             0.0,
             load,
-            extent,
             scissor,
         );
     }
@@ -221,7 +211,6 @@ impl WgpuRenderer {
         source_size: [f32; 2],
         sharp_rim: f32,
         load: wgpu::LoadOp<wgpu::Color>,
-        extent: Option<Size<DevicePixels>>,
         scissor: Option<ScissorRectangle>,
     ) {
         let clips_to_bounds = matches!(parameters.clip, FilterCompositeClip::RoundedBounds);
@@ -241,7 +230,7 @@ impl WgpuRenderer {
             parameters.clip,
             source_size,
             {
-                let size = extent.unwrap_or_else(|| self.target.viewport_size());
+                let size = self.target.viewport_size();
                 [size.width.0 as f32, size.height.0 as f32]
             },
         )
@@ -268,7 +257,6 @@ impl WgpuRenderer {
             source,
             uniforms,
             load,
-            extent,
             scissor,
         );
     }
@@ -283,7 +271,6 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         sources: impl Iterator<Item = &'a wgpu::TextureView>,
         region: Bounds<ScaledPixels>,
-        extent: Option<Size<DevicePixels>>,
     ) -> wgpu::TextureView {
         let target = self
             .resources()
@@ -313,7 +300,6 @@ impl WgpuRenderer {
                     source,
                     BlurUniforms::copy(full_size),
                     wgpu::LoadOp::Load,
-                    extent,
                     Some(scissor),
                 );
                 continue;
@@ -338,7 +324,6 @@ impl WgpuRenderer {
                 },
                 full_size,
                 wgpu::LoadOp::Load,
-                extent,
                 None,
             );
         }
@@ -351,7 +336,6 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
         frame_view: &wgpu::TextureView,
-        extent: Option<Size<DevicePixels>>,
     ) {
         let size = [self.target.width() as f32, self.target.height() as f32];
 
@@ -363,7 +347,6 @@ impl WgpuRenderer {
             source,
             BlurUniforms::copy(size),
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            extent,
             None,
         );
     }

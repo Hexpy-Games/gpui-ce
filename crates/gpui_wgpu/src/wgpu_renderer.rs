@@ -278,28 +278,6 @@ impl WgpuRenderer {
         self.animation_time_ms = ms;
     }
 
-    /// Renders a canvas into a separate premultiplied BGRA surface without changing the
-    /// window's retained frame, backdrop keys or surface cache.
-    /// The window target format and alpha mode, which separate surfaces the renderer draws into
-    /// (live layers) must use so its pipelines match.
-    pub fn surface_format(&self) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
-        (self.target.config.format, self.target.config.alpha_mode)
-    }
-
-    pub fn render_sized(
-        &mut self,
-        scene: &Scene,
-        view: &wgpu::TextureView,
-        size: Size<DevicePixels>,
-    ) -> bool {
-        let clear = self.target.clear_color;
-        self.target.clear_color = wgpu::Color::TRANSPARENT;
-        let rendered = frame::render_offscreen(self, scene, view, size, Some(size));
-        self.target.clear_color = clear;
-        frame::write_shader_globals(self, self.target.viewport_size());
-        rendered
-    }
-
     /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
     pub fn rasterize(
         &mut self,
@@ -334,8 +312,7 @@ impl WgpuRenderer {
         });
         let clear = self.target.clear_color;
         self.target.clear_color = wgpu::Color::TRANSPARENT;
-        let rendered =
-            frame::render_offscreen(self, scene, &view, self.target.viewport_size(), None);
+        let rendered = frame::render_offscreen(self, scene, &view, self.target.viewport_size());
         self.target.clear_color = clear;
         if !rendered {
             return None;
@@ -421,8 +398,7 @@ fn begin_color_render_pass<'encoder>(
     label: &'encoder str,
     target: &'encoder wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
-    extent: Option<Size<DevicePixels>>,
-    mut scissor: Option<gpui_render::blur::ScissorRectangle>,
+    scissor: Option<gpui_render::blur::ScissorRectangle>,
 ) -> wgpu::RenderPass<'encoder> {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
@@ -438,29 +414,6 @@ fn begin_color_render_pass<'encoder>(
         depth_stencil_attachment: None,
         ..Default::default()
     });
-    if let Some(extent) = extent {
-        let width = extent.width.0 as u32;
-        let height = extent.height.0 as u32;
-        pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
-        scissor = Some(scissor.map_or(
-            gpui_render::blur::ScissorRectangle {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
-            |scissor| {
-                let x = scissor.x.min(width);
-                let y = scissor.y.min(height);
-                gpui_render::blur::ScissorRectangle {
-                    x,
-                    y,
-                    width: (scissor.x + scissor.width).min(width) - x,
-                    height: (scissor.y + scissor.height).min(height) - y,
-                }
-            },
-        ));
-    }
     if let Some(scissor) = scissor {
         pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
     }

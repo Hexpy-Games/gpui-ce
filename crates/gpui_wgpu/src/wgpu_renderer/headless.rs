@@ -165,37 +165,6 @@ impl WgpuHeadlessRenderer {
         })
     }
 
-    /// Renders a separate drawable with the current window's larger intermediate targets.
-    pub fn render_sized_to_image(
-        &mut self,
-        scene: &Scene,
-        size: Size<DevicePixels>,
-    ) -> anyhow::Result<image::RgbaImage> {
-        let target = self.renderer.create_offscreen_target(size);
-        anyhow::ensure!(
-            self.renderer.render_sized(scene, &target.view, size),
-            "failed to render sized headless scene"
-        );
-        let resources = self.renderer.resources();
-        let mut encoder = resources
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_texture_to_buffer(
-            target.texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &target.readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(target.padded_bytes_per_row),
-                    rows_per_image: Some(size.height.0 as u32),
-                },
-            },
-            target.texture.size(),
-        );
-        let submission = resources.queue.submit([encoder.finish()]);
-        self.renderer.read_offscreen_target(&target, submission)
-    }
-
     fn ensure_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,

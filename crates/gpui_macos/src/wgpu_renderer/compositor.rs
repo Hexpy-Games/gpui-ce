@@ -119,17 +119,10 @@ impl CompositorLayers {
                         cells
                     }
                     SpriteContents::Pixels { size, bytes } => {
-                        pixels = vec![CGImage::new(
+                        pixels = vec![image_from_bgra(
                             size.width.0 as usize,
                             size.height.0 as usize,
-                            8,
-                            32,
-                            size.width.0 as usize * 4,
-                            &CGColorSpace::create_device_rgb(),
-                            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
-                            &CGDataProvider::from_buffer(Arc::new(bytes.clone())),
-                            false,
-                            kCGRenderingIntentDefault,
+                            bytes.clone(),
                         )];
                         &pixels
                     }
@@ -251,20 +244,25 @@ fn crop_cells(
                         }
                     }
                 }
-                CGImage::new(
-                    width,
-                    height,
-                    8,
-                    32,
-                    width * 4,
-                    &CGColorSpace::create_device_rgb(),
-                    kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
-                    &CGDataProvider::from_buffer(Arc::new(pixels)),
-                    false,
-                    kCGRenderingIntentDefault,
-                )
+                image_from_bgra(width, height, pixels.into())
             })
             .collect(),
+    )
+}
+
+/// Creates a Core Graphics image backed by premultiplied BGRA rows.
+pub(super) fn image_from_bgra(width: usize, height: usize, bytes: Arc<[u8]>) -> CGImage {
+    CGImage::new(
+        width,
+        height,
+        8,
+        32,
+        width * 4,
+        &CGColorSpace::create_device_rgb(),
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        &CGDataProvider::from_buffer(Arc::new(bytes)),
+        false,
+        kCGRenderingIntentDefault,
     )
 }
 

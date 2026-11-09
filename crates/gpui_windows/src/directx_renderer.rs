@@ -260,14 +260,10 @@ impl Drop for Annotation<'_> {
 }
 
 struct LiveSurface {
-    swap_chain: IDXGISwapChain1,
+    surface: IDCompositionSurface,
     clip: IDCompositionVisual,
     visual: IDCompositionVisual,
     size: Size<DevicePixels>,
-    quad_buffer: ID3D11Buffer,
-    quad_view: Option<ID3D11ShaderResourceView>,
-    quad_capacity: usize,
-    path: Option<PathResources>,
 }
 
 struct DirectComposition {
@@ -600,7 +596,6 @@ impl DirectXRenderer {
         self.render(scene, background_appearance)?;
         self.present()?;
         let live_changed = self.sync_live_layers(scene)?;
-        self.draw_live_layers(scene)?;
         if let Some(composition) = &self.direct_composition {
             let device_context = &self
                 .devices
@@ -612,9 +607,11 @@ impl DirectXRenderer {
                 .update(composition, device_context, &sprites, &keys, &self.atlas)?
                 || live_changed
             {
-                unsafe { composition.comp_device.Commit()? };
+                // Include visual changes in the commit after live surface uploads.
+                self.last_live_frame_ms = self.animation_time_ms.wrapping_sub(16);
             }
         }
+        self.draw_live_layers(scene)?;
         Ok(())
     }
 
@@ -622,7 +619,6 @@ impl DirectXRenderer {
         let Some(composition) = &self.direct_composition else {
             return Ok(false);
         };
-        let devices = self.devices.as_ref().context("devices missing")?;
         let mut changed = false;
         let stale: Vec<_> = self
             .live
@@ -643,31 +639,23 @@ impl DirectXRenderer {
                 .size
                 .map(|value| DevicePixels(value.0.ceil() as i32));
             if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {
-                let swap_chain = create_swap_chain_for_composition(
-                    &devices.dxgi_factory,
-                    &devices.device,
-                    size.width.0 as u32,
-                    size.height.0 as u32,
-                    2,
-                )?;
                 unsafe {
+                    let surface = composition.comp_device.CreateSurface(
+                        size.width.0 as u32,
+                        size.height.0 as u32,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    )?;
                     let clip = composition.comp_device.CreateVisual()?;
                     let visual = composition.comp_device.CreateVisual()?;
-                    visual.SetContent(&swap_chain)?;
+                    visual.SetContent(&surface)?;
                     clip.AddVisual(&visual, true, None)?;
                     composition.comp_visual.AddVisual(&clip, true, None)?;
-                    let quad_buffer =
-                        create_buffer(&devices.device, std::mem::size_of::<Quad>(), 1)?;
-                    let quad_view = create_buffer_view(&devices.device, &quad_buffer)?;
                     entry.insert(LiveSurface {
-                        swap_chain,
+                        surface,
                         clip,
                         visual,
                         size,
-                        quad_buffer,
-                        quad_view,
-                        quad_capacity: 1,
-                        path: None,
                     });
                 }
                 changed = true;
@@ -675,16 +663,15 @@ impl DirectXRenderer {
             let live = self.live.get_mut(&layer.key).unwrap();
             if live.size != size {
                 unsafe {
-                    live.swap_chain.ResizeBuffers(
-                        2,
+                    live.surface = composition.comp_device.CreateSurface(
                         size.width.0 as u32,
                         size.height.0 as u32,
-                        RENDER_TARGET_FORMAT,
-                        DXGI_SWAP_CHAIN_FLAG(0),
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
                     )?;
+                    live.visual.SetContent(&live.surface)?;
                 }
                 live.size = size;
-                live.path = None;
             }
             let clip = layer.content_mask.bounds;
             unsafe {
@@ -711,81 +698,48 @@ impl DirectXRenderer {
             return Ok(());
         }
         self.last_live_frame_ms = now;
+        let Some(composition) = &self.direct_composition else {
+            return Ok(());
+        };
+        let devices = self.devices.as_ref().context("devices missing")?;
         for layer in scene.live_layers() {
-            let live = self
-                .live
-                .get_mut(&layer.key)
-                .context("live surface missing")?;
-            let swap_chain = live.swap_chain.clone();
-            let size = live.size;
+            let live = self.live.get(&layer.key).context("live surface missing")?;
             let mut canvas = LiveCanvas {
-                scene: Scene::default(),
+                ops: Vec::new(),
                 scale_factor: scene.scale_factor,
                 size: layer
                     .bounds
                     .size
-                    .map(|value| px(value.0 / scene.scale_factor)),
+                    .map(|value| px(f32::from(value) / scene.scale_factor)),
             };
-            canvas.scene.scale_factor = scene.scale_factor;
             (layer.paint)(
                 now.wrapping_sub(layer.start_ms) as f32 / 1000.0,
                 &mut canvas,
             );
-            canvas.scene.finish();
-            let devices = self.devices.as_ref().context("devices missing")?;
-            let context = devices.device_context.clone();
-            let (texture, view) = create_render_target_and_its_view(&swap_chain, &devices.device)?;
-            let resources = self.resources.as_mut().context("resources missing")?;
-            let previous_texture = resources.render_target.replace(texture);
-            let previous_view = std::mem::replace(&mut resources.render_target_view, view);
-            let previous_viewport = std::mem::replace(
-                &mut resources.viewport,
-                set_viewport(&context, size.width.0 as f32, size.height.0 as f32),
-            );
-            std::mem::swap(&mut resources.path, &mut live.path);
-            std::mem::swap(
-                &mut self.pipelines.quad_pipeline.buffer,
-                &mut live.quad_buffer,
-            );
-            std::mem::swap(&mut self.pipelines.quad_pipeline.view, &mut live.quad_view);
-            std::mem::swap(
-                &mut self.pipelines.quad_pipeline.buffer_size,
-                &mut live.quad_capacity,
-            );
-            let previous_surfaces = std::mem::take(&mut resources.surface_views);
-            let (retained, frame_keys) = (self.retained, self.frame_keys.clone());
-            let rendered = self.render(&canvas.scene, WindowBackgroundAppearance::Transparent);
-            (self.retained, self.frame_keys) = (retained, frame_keys);
-            let resources = self.resources.as_mut().context("resources missing")?;
-            resources.render_target = previous_texture;
-            resources.render_target_view = previous_view;
-            resources.viewport = previous_viewport;
-            let live = self
-                .live
-                .get_mut(&layer.key)
-                .context("live surface missing")?;
-            std::mem::swap(&mut resources.path, &mut live.path);
-            std::mem::swap(
-                &mut self.pipelines.quad_pipeline.buffer,
-                &mut live.quad_buffer,
-            );
-            std::mem::swap(&mut self.pipelines.quad_pipeline.view, &mut live.quad_view);
-            std::mem::swap(
-                &mut self.pipelines.quad_pipeline.buffer_size,
-                &mut live.quad_capacity,
-            );
-            resources.surface_views = previous_surfaces;
+            let (width, height) = (live.size.width.0 as u32, live.size.height.0 as u32);
+            let pixels = rasterize_live(&canvas.ops, width, height);
+            let mut offset = POINT::default();
+            let texture: ID3D11Texture2D = unsafe { live.surface.BeginDraw(None, &mut offset)? };
             unsafe {
-                context.RSSetViewports(Some(slice::from_ref(&previous_viewport)));
-                context
-                    .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
-            }
-            self.upload_globals()?;
-            rendered?;
-            unsafe {
-                swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+                devices.device_context.UpdateSubresource(
+                    &texture,
+                    0,
+                    Some(&D3D11_BOX {
+                        left: offset.x as u32,
+                        top: offset.y as u32,
+                        front: 0,
+                        right: offset.x as u32 + width,
+                        bottom: offset.y as u32 + height,
+                        back: 1,
+                    }),
+                    pixels.as_ptr() as _,
+                    width * 4,
+                    0,
+                );
+                live.surface.EndDraw()?;
             }
         }
+        unsafe { composition.comp_device.Commit()? };
         Ok(())
     }
 

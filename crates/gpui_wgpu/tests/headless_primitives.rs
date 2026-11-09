@@ -50,60 +50,6 @@ fn filled_path_resolves_without_invalidating_the_frame() {
     assert_eq!(image.get_pixel(150, 40).0, [0, 0, 0, 255]);
 }
 
-#[test]
-fn render_sized_preserves_opacity_group_pixels() {
-    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
-    let mut scene = Scene::default();
-    let boundary = FilterBoundary {
-        bounds: bounds(0.0, 0.0, 32.0, 32.0),
-        content_mask: mask(32.0, 32.0),
-        order: 0,
-        corner_radii: Corners::default(),
-        corner_smoothing: 0.0,
-        filters: smallvec![],
-        opacity: 0.5,
-        scale: 1.0,
-        scale_origin: Point::default(),
-        motion: gpui::LayerMotion::NONE,
-        motion_bounds: Bounds::default(),
-        is_start: true,
-        inline: false,
-    };
-    scene.insert_primitive(boundary.clone());
-    // Keep the single quad isolated instead of folding the group's opacity into its alpha.
-    scene.push_layer(boundary.bounds);
-    scene.insert_primitive(Quad {
-        bounds: bounds(4.0, 4.0, 24.0, 24.0),
-        content_mask: mask(32.0, 32.0),
-        background: solid_background(gpui::red()),
-        ..Default::default()
-    });
-    scene.pop_layer();
-    scene.insert_primitive(FilterBoundary {
-        is_start: false,
-        ..boundary
-    });
-    scene.finish();
-
-    renderer
-        .render_scene_to_image(&scene, TARGET)
-        .expect("larger window target");
-    let image = renderer
-        .render_sized_to_image(
-            &scene,
-            Size {
-                width: DevicePixels(32),
-                height: DevicePixels(32),
-            },
-        )
-        .expect("sized opacity group");
-    let pixel = image.get_pixel(16, 16).0;
-    let alpha = f32::from(pixel[3]) / 255.0;
-    let red = f32::from(pixel[0]) / 255.0;
-    assert!((alpha - 0.5).abs() <= 0.02, "alpha: {alpha}");
-    assert!((red - 0.5).abs() <= 0.02, "premultiplied red: {red}");
-}
-
 fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
     Bounds {
         origin: Point {

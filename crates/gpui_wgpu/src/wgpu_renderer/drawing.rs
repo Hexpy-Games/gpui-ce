@@ -1,6 +1,6 @@
 use gpui::{
-    AtlasTextureId, DevicePixels, MonochromeSprite, Path, PolychromeSprite, Quad, ScaledPixels,
-    Shadow, Size, SubpixelSprite, Underline,
+    AtlasTextureId, MonochromeSprite, Path, PolychromeSprite, Quad, ScaledPixels, Shadow,
+    SubpixelSprite, Underline,
 };
 
 use crate::WgpuTextureInfo;
@@ -215,7 +215,6 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
         instances: &mut InstanceUpload,
-        extent: Option<Size<DevicePixels>>,
     ) -> frame::DrawResult {
         let vertex_count = path_types::rasterization_vertex_count(paths);
         if vertex_count == 0 {
@@ -257,12 +256,6 @@ impl WgpuRenderer {
             depth_stencil_attachment: None,
             ..Default::default()
         });
-        if let Some(extent) = extent {
-            let width = extent.width.0 as u32;
-            let height = extent.height.0 as u32;
-            pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
-            pass.set_scissor_rect(0, 0, width, height);
-        }
         pass.set_pipeline(&resources.pipelines.path_rasterization);
         pass.set_bind_group(
             shader_interface::GLOBAL_BIND_GROUP,

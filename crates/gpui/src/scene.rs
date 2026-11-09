@@ -27,6 +27,8 @@ mod compositor;
 pub use compositor::{CompositorGroup, CompositorSprite, SpriteContents};
 mod damage;
 pub use damage::{DamagePlan, DamageRedraw};
+mod live_raster;
+pub use live_raster::rasterize_live;
 mod motion;
 pub use motion::*;
 mod frame_loop;

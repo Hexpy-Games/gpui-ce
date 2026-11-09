@@ -45,7 +45,7 @@ pub(super) fn render_to_view(
     // texture that reappears after an intervening primitive and recreate its platform view.
     renderer.retain_surface_cache(&scene.surfaces);
 
-    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, None, targets);
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
     let offscreen = encoder.offscreen.is_some();
     let keys = encoder.backdrop_keys.clone();
     let submission = submit(renderer, encoder, readback);
@@ -61,14 +61,13 @@ pub(super) fn render_offscreen(
     scene: &Scene,
     view: &wgpu::TextureView,
     size: Size<DevicePixels>,
-    extent: Option<Size<DevicePixels>>,
 ) -> bool {
     let planned = *scene.render_plan().requirements();
     let commands = scene.render_commands();
     let Some(targets) = PreparedTargets::prepare(renderer, commands, planned, 0, view, size) else {
         return false;
     };
-    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, extent, targets);
+    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
     submit(renderer, encoder, None).is_some()
 }
 
@@ -383,7 +382,6 @@ pub(super) struct FrameEncoder<'a> {
     damage: Option<&'a DamageRedraw>,
     /// The damage rectangle every pass that writes the scene target is limited to.
     scissor: Option<ScissorRectangle>,
-    extent: Option<Size<DevicePixels>>,
     encoder: wgpu::CommandEncoder,
     targets: TargetStack<wgpu::TextureView>,
     offscreen: Option<wgpu::TextureView>,
@@ -404,7 +402,6 @@ impl<'a> FrameEncoder<'a> {
         commands: &'a [RenderCommand],
         damage: Option<&'a DamageRedraw>,
         scissor: Option<ScissorRectangle>,
-        extent: Option<Size<DevicePixels>>,
         targets: PreparedTargets,
     ) -> Self {
         let encoder =
@@ -428,7 +425,6 @@ impl<'a> FrameEncoder<'a> {
             commands,
             damage,
             scissor,
-            extent,
             encoder,
             targets: TargetStack::new(targets.active),
             offscreen: targets.offscreen,
@@ -445,12 +441,8 @@ impl<'a> FrameEncoder<'a> {
         let result = self.encode_commands();
         if result.is_ok() {
             if let Some(offscreen) = &self.offscreen {
-                self.renderer.blit_to_frame(
-                    &mut self.encoder,
-                    offscreen,
-                    &self.presentation,
-                    self.extent,
-                );
+                self.renderer
+                    .blit_to_frame(&mut self.encoder, offscreen, &self.presentation);
             }
             if let Some(readback) = readback {
                 self.encoder.copy_texture_to_buffer(
@@ -504,7 +496,6 @@ impl<'a> FrameEncoder<'a> {
                     clear.a as f32,
                 ]),
                 wgpu::LoadOp::Load,
-                self.extent,
                 Some(scissor),
             );
             wgpu::LoadOp::Load
@@ -530,7 +521,6 @@ impl<'a> FrameEncoder<'a> {
                         &mut self.encoder,
                         paths,
                         &mut self.instances,
-                        self.extent,
                     )?;
                     let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                     self.renderer
@@ -547,7 +537,6 @@ impl<'a> FrameEncoder<'a> {
                                 self.targets.current(),
                                 filter,
                                 paint,
-                                self.extent,
                                 scissor,
                             );
                             continue;
@@ -595,14 +584,12 @@ impl<'a> FrameEncoder<'a> {
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
                                 region,
-                                self.extent,
                             ))
                         } else if lens.is_active() {
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 std::iter::once(self.targets.current()),
                                 region,
-                                self.extent,
                             ))
                         } else {
                             None
@@ -628,7 +615,6 @@ impl<'a> FrameEncoder<'a> {
                             },
                             hit,
                             wgpu::LoadOp::Load,
-                            self.extent,
                             scissor,
                         );
                         if let (false, Some(key)) = (hit, key) {
@@ -752,7 +738,6 @@ impl<'a> FrameEncoder<'a> {
                         },
                         false,
                         pending_load,
-                        self.extent,
                         scissor,
                     );
                     pending_load = wgpu::LoadOp::Load;
@@ -788,7 +773,6 @@ impl<'a> FrameEncoder<'a> {
                 "scene_pass",
                 self.targets.current(),
                 *pending_load,
-                self.extent,
                 scissor,
             )
             .forget_lifetime();
@@ -804,10 +788,9 @@ fn begin_scene_render_pass<'a>(
     label: &'a str,
     target: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
-    extent: Option<Size<DevicePixels>>,
     scissor: Option<ScissorRectangle>,
 ) -> wgpu::RenderPass<'a> {
-    let mut pass = begin_color_render_pass(encoder, label, target, load, extent, scissor);
+    let mut pass = begin_color_render_pass(encoder, label, target, load, scissor);
     pass.set_bind_group(
         shader_interface::GLOBAL_BIND_GROUP,
         &renderer.resources().globals_bind_group,
