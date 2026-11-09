@@ -2070,8 +2070,139 @@ pub mod blur {
         vec4f(outc.x, outc.y, outc.z, 1.0)
     }
 
+    // --------------------------------- butler.riso-intro ------------------------------------
+
+    pub fn wp_intro_vn(p: Vec2f) -> f32 {
+        let i = floor(p);
+        let f0 = fract(p);
+        let f = f0 * f0 * (vec2f(3.0, 3.0) - 2.0 * f0);
+        mix(
+            mix(wp_hash(i), wp_hash(i + vec2f(1.0, 0.0)), f.x),
+            mix(
+                wp_hash(i + vec2f(0.0, 1.0)),
+                wp_hash(i + vec2f(1.0, 1.0)),
+                f.x,
+            ),
+            f.y,
+        )
+    }
+
+    pub fn wp_intro_fbm(p0: Vec2f) -> f32 {
+        let mut s = 0.0;
+        let mut a = 0.5;
+        let mut p = p0;
+        for _i in 0..4 {
+            s = s + a * wp_intro_vn(p);
+            // mat2(1.6, 1.2, -1.2, 1.6) * p (GLSL column-major)
+            p = vec2f(1.6 * p.x - 1.2 * p.y, 1.2 * p.x + 1.6 * p.y);
+            a = a * 0.5;
+        }
+        s
+    }
+
+    pub fn wp_intro_ang(d: Vec2f) -> f32 {
+        fract(atan2(d.x, -d.y) / WP_TAU + 1.0)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Intro density, ported line for line from Wallpaper/intro/introShaders.ts INTRO_DENSITY.
+    // Distances are CSS px with a top-left origin, converted from GL's bottom-left fc:
+    //   u_resolution, u_pixelRatio, u_time -> wp_frame (res.x, res.y, ratio, t seconds)
+    //   u_css                             -> wp_css.xy
+    //   uCard                             -> wp_p0 (x, y, w, h)
+    //   uRing, uOrigin, uScale             -> wp_p1 (ring.x, ring.y, size, scale);
+    //                                         uOrigin is also ring.xy
+    //   uFlow, uBloom, uResidue, uCardOn   -> wp_p2
+    //   uDraw, uDry, uSweep, uClear        -> wp_p3
+    //   uMarkA, uMark                     -> wp_p4 (alpha, mark.x, mark.y, mark.z)
+    //   uPtr                              -> wp_p5 (x, y, push x, push y)
+    // ---------------------------------------------------------------------------------------
+    pub fn wp_intro_density(fc: Vec2f) -> Vec4f {
+        let u = get!(BLUR_LOCALS);
+        let res = u.wp_frame.xy();
+        let card = u.wp_p0;
+        let ring = u.wp_p1.xyz();
+        let scale = u.wp_p1.w;
+        let flow = u.wp_p2.x;
+        let bloom = u.wp_p2.y;
+        let residue = u.wp_p2.z;
+        let card_on = u.wp_p2.w;
+        let draw = u.wp_p3.x;
+        let dry = u.wp_p3.y;
+        let sweep = u.wp_p3.z;
+        let clear = u.wp_p3.w;
+        let mark_a = u.wp_p4.x;
+        let mark = vec3f(u.wp_p4.y, u.wp_p4.z, u.wp_p4.w);
+        let pointer = u.wp_p5;
+
+        let p = vec2f(fc.x, res.y - fc.y) / res * u.wp_css.xy();
+        let pd = p - pointer.xy();
+        let fall = exp(-dot(pd, pd) / 12100.0);
+        let sp = p - pointer.zw() * fall * 34.0;
+        // The pen drags the field clockwise and pulls it onto the passed stroke.
+        let rp = ring.z * (435.0 / 1200.0);
+        let rd = sp - ring.xy();
+        let rl = length(rd) + 1e-3;
+        let ra = wp_intro_ang(rd);
+        let seam = mix(smoothstep(0.0, 0.07, ra), 1.0, dry);
+        let passed = smoothstep(ra - 0.02, ra + 0.1, sweep) * seam;
+        let dl = (rl - rp) / rp;
+        let g = passed * exp(-dl * dl / 1.6) * 1.7 * (1.0 - 0.55 * residue);
+        let sw = -0.85 * draw * exp(-dl * dl / 3.2);
+        let cs = cos(sw);
+        let sn = sin(sw);
+        let dir = rd / rl;
+        // mat2(cs, sn, -sn, cs) * (rd / rl) (GLSL column-major)
+        let rdir = vec2f(cs * dir.x - sn * dir.y, sn * dir.x + cs * dir.y);
+        let th = draw * WP_TAU;
+        let tip = ring.xy() + vec2f(sin(th), -cos(th)) * rp;
+        let pen = smoothstep(0.0, 0.04, draw) * (1.0 - smoothstep(0.94, 1.0, draw));
+        let tv = sp - tip;
+        let tf = exp(-dot(tv, tv) / (rp * rp * 1.6));
+        let gp = ring.xy() + rdir * (rp + (rl - rp) * (1.0 + g)) + tv * tf * pen * 1.2;
+        let q = (gp - ring.xy()) / scale;
+        let grow = 0.16 + 1.05 * bloom;
+        let qa = q / grow;
+        let ft = flow;
+        let w = vec2f(
+            wp_intro_fbm(qa * 1.4 + vec2f(3.1, ft * 0.45)),
+            wp_intro_fbm(qa * 1.4 + vec2f(5.2 - ft * 0.35, 1.3)),
+        );
+        let rr = length(qa) + (w.x - 0.5) * 0.6;
+        let env = 1.0 - smoothstep(0.5, 1.05, rr);
+        let base = qa * 2.1 + (w - 0.5) * 2.6;
+        let n = vec3f(
+            wp_intro_fbm(base + vec2f(1.7, 9.2) + ft * vec2f(0.18, -0.1)),
+            wp_intro_fbm(base * 1.08 + vec2f(8.3, 2.8) + ft * vec2f(-0.12, 0.16)),
+            wp_intro_fbm(base * 0.94 + vec2f(4.1, 6.6) + ft * vec2f(0.05, 0.14)),
+        );
+        let mut d = smoothstep(vec3f(0.41, 0.43, 0.44), vec3f(0.86, 0.86, 0.86), n) * env;
+        d = d * vec3f(1.0, 0.92, 0.85);
+        // Dries to a residue that keeps to the edges, clear of the card.
+        let cc = card.xy() + card.zw() * 0.5;
+        let bq = abs(p - cc) - card.zw() * 0.5;
+        let sd_c = length(max(bq, vec2f(0.0, 0.0))) + min(max(bq.x, bq.y), 0.0);
+        let edge = smoothstep(60.0, 360.0, sd_c + (w.y - 0.5) * 120.0);
+        d = d * mix(1.0, 0.62 * edge, residue);
+        d = d * mix(1.0, smoothstep(16.0, 120.0, sd_c), card_on);
+        // Ink is used up along the written stroke and inside the ring, traveling with the mark.
+        let md = p - mark.xy();
+        let ml = length(md);
+        let rm = mark.z * (435.0 / 1200.0);
+        let wm = mark.z * (74.0 / 1200.0);
+        let ma = wp_intro_ang(md);
+        let used =
+            smoothstep(ma + 0.03, ma + 0.16, sweep) * mix(smoothstep(0.0, 0.07, ma), 1.0, dry);
+        let halo = 1.0 - smoothstep(wm * 0.5, wm * 0.5 + rm * 0.6, abs(ml - rm));
+        let inner = (1.0 - smoothstep(rm * 0.78, rm * 1.02, ml)) * clear;
+        d = d * (1.0 - 0.95 * max(used * halo, inner) * mark_a);
+        let dc = clamp(d, vec3f(0.0, 0.0, 0.0), vec3f(1.0, 1.0, 1.0));
+        vec4f(dc.x, dc.y, dc.z, 1.0)
+    }
+
     /// One wallpaper pass into its offscreen target: wp_mode.y picks the module (1 bloom,
-    /// 2 dusk, 3 shoreline, 4 riso print density pass, 5 riso print print pass).
+    /// 2 dusk, 3 shoreline, 4 riso print density pass, 5 riso print print pass,
+    /// 6 intro density pass).
     #[fragment]
     pub fn fragment_wallpaper(input: BlurVarying) -> Vec4f {
         let fc = wp_frag_coord(input.position.xy());
@@ -2087,6 +2218,9 @@ pub mod blur {
         }
         if which < 4.5 {
             return wp_riso_density(fc);
+        }
+        if which >= 5.5 {
+            return wp_intro_density(fc);
         }
         wp_riso_print(fc)
     }
