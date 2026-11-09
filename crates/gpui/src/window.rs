@@ -2763,39 +2763,9 @@ impl Window {
 
     fn schedule_animation_frame(&mut self, cx: &App) {
         let now = crate::animation_time_ms();
-        let scene = &self.rendered_frame.scene;
-        let mut animating = !scene.live_layers().is_empty()
-            || scene
-                .monochrome_sprites
-                .iter()
-                .any(|sprite| sprite.frames.is_animated())
-            || scene
-                .polychrome_sprites
-                .iter()
-                .any(|sprite| sprite.frames.is_animated());
-        let mut pending_delay = None;
-        for motion in scene
-            .filter_boundaries
-            .iter()
-            .map(|boundary| &boundary.motion)
-            .chain(
-                scene
-                    .backdrop_filters
-                    .iter()
-                    .filter_map(|filter| filter.appear.as_ref().map(|appear| &appear.motion)),
-            )
-        {
-            if !motion.is_active(now) {
-                continue;
-            }
-            let delay = motion.start_ms.wrapping_sub(now);
-            if delay != 0 && delay < 1 << 31 {
-                pending_delay =
-                    Some(pending_delay.map_or(delay, |current: u32| current.min(delay)));
-            } else {
-                animating = true;
-            }
-        }
+        let demand = self.rendered_frame.scene.animation_demand(now);
+        let animating = demand.animating;
+        let pending_delay = demand.next_start_ms.map(|start| start.wrapping_sub(now));
         if let Some(delay) = pending_delay.filter(|_| !animating) {
             let start = now.wrapping_add(delay);
             if self

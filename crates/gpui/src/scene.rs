@@ -84,6 +84,15 @@ struct FilterGroup {
     start_len: usize,
 }
 
+/// See [`Scene::animation_demand`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnimationDemand {
+    /// Something moves now: request the next frame.
+    pub animating: bool,
+    /// Nothing needs a frame for it yet: a motion starts at this clock value.
+    pub next_start_ms: Option<u32>,
+}
+
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
@@ -583,24 +592,47 @@ impl Scene {
 
     /// Whether any retained animation is still playing at this clock value.
     pub fn animating_at(&self, now_ms: u32) -> bool {
-        !self.live_layers.is_empty()
-            || self
-                .monochrome_sprites
-                .iter()
-                .any(|sprite| sprite.frames.is_animated())
-            || self
-                .polychrome_sprites
-                .iter()
-                .any(|sprite| sprite.frames.is_animated())
-            || self
-                .filter_boundaries
-                .iter()
-                .any(|boundary| boundary.motion.is_active(now_ms))
-            || self.backdrop_filters.iter().any(|filter| {
-                filter
-                    .appear
-                    .is_some_and(|appear| appear.motion.is_active(now_ms))
-            })
+        self.animation_demand(now_ms).animating
+    }
+
+    /// What the scene needs from the frame loop at `now_ms`: frames now, or one wake at the
+    /// earliest motion that starts later (a pending motion holds its start state until then).
+    pub fn animation_demand(&self, now_ms: u32) -> AnimationDemand {
+        let mut demand = AnimationDemand {
+            animating: !self.live_layers.is_empty()
+                || self
+                    .monochrome_sprites
+                    .iter()
+                    .any(|sprite| sprite.frames.is_animated())
+                || self
+                    .polychrome_sprites
+                    .iter()
+                    .any(|sprite| sprite.frames.is_animated()),
+            next_start_ms: None,
+        };
+        let motions = self
+            .filter_boundaries
+            .iter()
+            .map(|boundary| &boundary.motion)
+            .chain(
+                self.backdrop_filters
+                    .iter()
+                    .filter_map(|filter| filter.appear.as_ref().map(|appear| &appear.motion)),
+            );
+        for motion in motions.filter(|motion| motion.is_active(now_ms)) {
+            let delay = motion.start_ms.wrapping_sub(now_ms);
+            if delay != 0 && delay < 1 << 31 {
+                let sooner = demand
+                    .next_start_ms
+                    .is_none_or(|next| delay < next.wrapping_sub(now_ms));
+                if sooner {
+                    demand.next_start_ms = Some(motion.start_ms);
+                }
+            } else {
+                demand.animating = true;
+            }
+        }
+        demand
     }
 
     /// Whether retained animation parameters differ between these clock values.
