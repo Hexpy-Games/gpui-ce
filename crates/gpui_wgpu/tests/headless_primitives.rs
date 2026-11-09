@@ -6,10 +6,10 @@
 
 use gpui::{
     AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ColorSpace, ContentMask, Corners,
-    DevicePixels, Edges, FilterBoundary, FrameLoop, Hsla, MonochromeSprite,
-    PlatformHeadlessRenderer, Point, PolychromeSprite, Quad, RenderImageParams, RenderSvgParams,
-    ScaledFilter, ScaledPixels, Scene, ShaderBool, Shadow, Size, Underline, checkerboard,
-    linear_color_stop, linear_gradient, solid_background,
+    DevicePixels, Edges, FrameLoop, Hsla, MonochromeSprite, PlatformHeadlessRenderer, Point,
+    PolychromeSprite, Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene,
+    ShaderBool, Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient,
+    solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;

@@ -3521,10 +3521,10 @@ mod tests {
     use anyhow::Result;
     use gpui::{
         AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ContentMask, Corners,
-        DevicePixels, Edges, FilterBoundary, ImageId, MonochromeSprite, PlatformAtlas, Point,
-        PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, RenderImageParams, RenderSvgParams,
-        ScaledFilter, ScaledPixels, Scene, ShaderBool, Size, WindowBackgroundAppearance, hsla, rgb,
-        rgb_to_hsla, solid_background, white,
+        DevicePixels, Edges, FilterBoundary, FrameLoop, ImageId, MonochromeSprite, PlatformAtlas,
+        Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, RenderImageParams,
+        RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool, Size,
+        WindowBackgroundAppearance, hsla, rgb, rgb_to_hsla, solid_background, white,
     };
     use smallvec::{SmallVec, smallvec};
     use std::borrow::Cow;
