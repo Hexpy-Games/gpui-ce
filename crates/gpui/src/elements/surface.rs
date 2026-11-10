@@ -5,10 +5,16 @@ use crate::{
     IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, StyleRefinement, Styled, Window,
 };
 #[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use refineable::Refineable;
+use std::hash::Hash;
+#[cfg(target_os = "windows")]
+use windows_061::core::Interface;
 
 /// A source of a surface's content.
+/// A new frame must use a new handle: drawing new content into an already painted handle is not seen as a change.
 #[derive(Clone)]
 pub enum SurfaceSource {
     /// A macOS image buffer from CoreVideo
@@ -64,6 +70,31 @@ impl std::fmt::Debug for SurfaceSource {
 }
 
 impl SurfaceSource {
+    pub(crate) fn hash_identity(&self, state: &mut impl std::hash::Hasher) {
+        match self {
+            #[cfg(target_os = "macos")]
+            SurfaceSource::Surface(buffer) => {
+                (buffer.as_concrete_TypeRef() as usize).hash(state);
+            }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                all(target_os = "macos", feature = "custom-gpu"),
+                all(target_family = "wasm", feature = "custom-gpu")
+            ))]
+            SurfaceSource::Texture { texture, size } => {
+                (std::sync::Arc::as_ptr(texture).cast::<()>() as usize).hash(state);
+                size.hash(state);
+            }
+            #[cfg(target_os = "windows")]
+            SurfaceSource::WindowsCapture(frame) => {
+                (frame.texture().as_raw() as usize).hash(state);
+                frame.display_time().hash(state);
+            }
+            SurfaceSource::Unsupported(size) => size.hash(state),
+        }
+    }
+
     fn size(&self) -> Size<DevicePixels> {
         match self {
             #[cfg(target_os = "macos")]

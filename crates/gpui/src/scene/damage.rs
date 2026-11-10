@@ -87,7 +87,6 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
                         reach = groups.pop().map(|(group_reach, _)| group_reach);
                     }
                 }
-                PaintOperation::Primitive(Primitive::Surface(_)) => return None,
                 PaintOperation::Primitive(primitive) => reach = primitive.painted_bounds(),
                 PaintOperation::Morphed(primitive, morph) => {
                     reach = Some(
@@ -289,7 +288,11 @@ pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
                         }
                     }
                 }
-                Primitive::Surface(_) => {}
+                Primitive::Surface(surface) => {
+                    bytes!(surface.bounds);
+                    bytes!(surface.content_mask);
+                    surface.source.hash_identity(&mut hash);
+                }
             }
         }
         PaintOperation::Morphed(primitive, morph) => {
@@ -568,13 +571,8 @@ fn select_commands(
                         .any(|i| hits(scene.paths[i].painted_bounds(), &rect))
                         .then(|| batch.clone()),
                     PrimitiveBatch::Surfaces(range) => {
-                        if range
-                            .clone()
-                            .any(|i| hits(scene.surfaces[i].painted_bounds(), &rect))
-                        {
-                            return DamagePlan::Full;
-                        }
-                        None
+                        trim(range, |i| scene.surfaces[i].painted_bounds(), &rect)
+                            .map(PrimitiveBatch::Surfaces)
                     }
                     PrimitiveBatch::BackdropFilters(range) => {
                         // Contiguous runs of members that paint inside the rect.
@@ -674,7 +672,8 @@ mod tests {
     use crate::{
         AtlasTextureId, AtlasTextureKind, AtlasTile, BackdropAppear, BackdropLens, ContentMask,
         DevicePixels, FilterBoundary, FrameLoop, LayerMotion, MonochromeSprite, MotionEasing,
-        MotionRepeat, Quad, ScaledFilter, TileId, backdrop_appear_parameters, bounds, px, size,
+        MotionRepeat, PaintSurface, Quad, ScaledFilter, SurfaceSource, TileId,
+        backdrop_appear_parameters, bounds, px, size,
     };
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
@@ -742,6 +741,50 @@ mod tests {
         ] {
             assert!((a - e).abs() < 1e-3, "{actual:?} != {expected:?}");
         }
+    }
+
+    #[test]
+    fn surface_changes_redraw_only_where_they_paint() {
+        let surface_bounds = rect(20.0, 20.0, 20.0, 20.0);
+        let quad_bounds = rect(300.0, 300.0, 10.0, 10.0);
+        let build = |color: crate::Hsla, source_size| {
+            let mut scene = Scene::default();
+            scene.insert_primitive(PaintSurface {
+                order: 0,
+                bounds: surface_bounds,
+                content_mask: mask(),
+                source: SurfaceSource::Unsupported(source_size),
+            });
+            scene.insert_primitive(Quad {
+                bounds: quad_bounds,
+                content_mask: mask(),
+                background: color.into(),
+                ..Default::default()
+            });
+            scene
+        };
+        let mut a = build(crate::red(), size(DevicePixels(20), DevicePixels(20)));
+        a.finish();
+        let mut b = build(crate::blue(), size(DevicePixels(20), DevicePixels(20)));
+        b.finish_over(&a);
+        let Some(DamagePlan::Partial(plan)) = b.damage_plan_over(Some(a.generation())) else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&quad_bounds), quad_bounds);
+        assert!(!plan.rect.intersects(&surface_bounds));
+
+        let mut c = build(crate::red(), size(DevicePixels(30), DevicePixels(30)));
+        c.finish_over(&a);
+        let Some(DamagePlan::Partial(plan)) = c.damage_plan_over(Some(a.generation())) else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&surface_bounds), surface_bounds);
+        assert!(
+            plan.commands.iter().any(|command| matches!(
+                command,
+                RenderCommand::Batch(PrimitiveBatch::Surfaces(_))
+            ))
+        );
     }
 
     #[test]
