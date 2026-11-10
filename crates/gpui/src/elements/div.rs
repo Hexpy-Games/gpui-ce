@@ -3566,18 +3566,18 @@ impl Interactivity {
                         && window.modifiers().secondary()
                     {
                         let secondary_held = window.modifiers().secondary();
+                        let current_view = window.current_view();
                         window.on_key_event({
-                            move |e: &crate::ModifiersChangedEvent, _phase, window, _cx| {
+                            move |e: &crate::ModifiersChangedEvent, _phase, window, cx| {
                                 if e.modifiers.secondary() != secondary_held
                                     && text_bounds.contains(&window.mouse_position())
                                 {
-                                    window.refresh();
+                                    cx.notify(current_view);
                                 }
                             }
                         });
 
                         let was_hovered = hitbox.is_hovered(window);
-                        let current_view = window.current_view();
                         window.on_mouse_event({
                             let hitbox = hitbox.clone();
                             move |_: &MouseMoveEvent, phase, window, cx| {
@@ -3878,6 +3878,7 @@ impl Interactivity {
         }
 
         if let Some(element_state) = element_state {
+            let current_view = window.current_view();
             if !click_listeners.is_empty()
                 || !aux_click_listeners.is_empty()
                 || drag_listener.is_some()
@@ -3901,7 +3902,7 @@ impl Interactivity {
                     let pending_mouse_down = pending_mouse_down.clone();
                     let hitbox = hitbox.clone();
                     let has_aux_click_listeners = !aux_click_listeners.is_empty();
-                    move |event: &MouseDownEvent, phase, window, _cx| {
+                    move |event: &MouseDownEvent, phase, window, cx| {
                         if disabled {
                             return;
                         }
@@ -3911,7 +3912,7 @@ impl Interactivity {
                             && hitbox.is_hovered(window)
                         {
                             *pending_mouse_down.borrow_mut() = Some(event.clone());
-                            window.refresh();
+                            cx.notify(current_view);
                         }
                     }
                 });
@@ -4041,7 +4042,7 @@ impl Interactivity {
                                 let mut pending_mouse_down = pending_mouse_down.borrow_mut();
                                 if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
                                     captured_mouse_down = pending_mouse_down.take();
-                                    window.refresh();
+                                    cx.notify(current_view);
                                 } else if pending_mouse_down.is_some() {
                                     // Clear the pending mouse down event (without firing click handlers)
                                     // if the hitbox is not being hovered.
@@ -4049,7 +4050,7 @@ impl Interactivity {
                                     // immediately after being clicked.
                                     // See https://github.com/zed-industries/zed/issues/24600 for more details
                                     pending_mouse_down.take();
-                                    window.refresh();
+                                    cx.notify(current_view);
                                 }
                             }
                             // Fire click handlers during the bubble phase.
@@ -4165,10 +4166,10 @@ impl Interactivity {
 
             {
                 let active_state = active_state.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _cx| {
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
                     if phase == DispatchPhase::Capture && active_state.borrow().is_clicked() {
                         *active_state.borrow_mut() = ElementClickedState::default();
-                        window.refresh();
+                        cx.notify(current_view);
                     }
                 });
             }
@@ -4179,7 +4180,7 @@ impl Interactivity {
                     .as_ref()
                     .and_then(|group_active| GroupHitboxes::get(&group_active.group, cx));
                 let hitbox = hitbox.clone();
-                window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _cx| {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble && !window.default_prevented() {
                         let group_hovered = active_group_hitbox
                             .is_some_and(|group_hitbox_id| group_hitbox_id.is_hovered(window));
@@ -4189,7 +4190,7 @@ impl Interactivity {
                                 group: group_hovered,
                                 element: element_hovered,
                             };
-                            window.refresh();
+                            cx.notify(current_view);
                         }
                     }
                 });
@@ -4700,19 +4701,21 @@ pub(crate) enum ActiveTooltip {
 
 pub(crate) fn clear_active_tooltip(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
-    window: &mut Window,
+    current_view: EntityId,
+    cx: &mut App,
 ) {
     match active_tooltip.borrow_mut().take() {
         None => {}
         Some(ActiveTooltip::WaitingForShow { .. }) => {}
-        Some(ActiveTooltip::Visible { .. }) => window.refresh(),
-        Some(ActiveTooltip::WaitingForHide { .. }) => window.refresh(),
+        Some(ActiveTooltip::Visible { .. }) => cx.notify(current_view),
+        Some(ActiveTooltip::WaitingForHide { .. }) => cx.notify(current_view),
     }
 }
 
 pub(crate) fn clear_active_tooltip_if_not_hoverable(
     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
-    window: &mut Window,
+    current_view: EntityId,
+    cx: &mut App,
 ) {
     let should_clear = match active_tooltip.borrow().as_ref() {
         None => false,
@@ -4722,7 +4725,7 @@ pub(crate) fn clear_active_tooltip_if_not_hoverable(
     };
     if should_clear {
         active_tooltip.borrow_mut().take();
-        window.refresh();
+        cx.notify(current_view);
     }
 }
 
@@ -4773,18 +4776,18 @@ pub(crate) fn register_tooltip_mouse_handlers(
 
     window.on_mouse_event({
         let active_tooltip = active_tooltip.clone();
-        move |_: &MouseDownEvent, _phase, window: &mut Window, _cx| {
+        move |_: &MouseDownEvent, _phase, window: &mut Window, cx| {
             if !tooltip_id.is_some_and(|tooltip_id| tooltip_id.is_hovered(window)) {
-                clear_active_tooltip_if_not_hoverable(&active_tooltip, window);
+                clear_active_tooltip_if_not_hoverable(&active_tooltip, current_view, cx);
             }
         }
     });
 
     window.on_mouse_event({
         let active_tooltip = active_tooltip.clone();
-        move |_: &ScrollWheelEvent, _phase, window: &mut Window, _cx| {
+        move |_: &ScrollWheelEvent, _phase, window: &mut Window, cx| {
             if !tooltip_id.is_some_and(|tooltip_id| tooltip_id.is_hovered(window)) {
-                clear_active_tooltip_if_not_hoverable(&active_tooltip, window);
+                clear_active_tooltip_if_not_hoverable(&active_tooltip, current_view, cx);
             }
         }
     });
@@ -4898,6 +4901,7 @@ fn handle_tooltip_mouse_move(
                                                     tooltip_is_hoverable,
                                                     &check_is_hovered_during_prepaint,
                                                     tooltip_bounds,
+                                                    current_view,
                                                     window,
                                                     cx,
                                                 )
@@ -4908,7 +4912,7 @@ fn handle_tooltip_mouse_move(
                                 }
                             });
                         *active_tooltip.borrow_mut() = new_tooltip;
-                        window.refresh();
+                        cx.notify(current_view);
                     })
                     .ok();
                 }
@@ -4931,6 +4935,7 @@ fn handle_tooltip_check_visible_and_update(
     tooltip_is_hoverable: bool,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     tooltip_bounds: Bounds<Pixels>,
+    current_view: EntityId,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
@@ -4969,7 +4974,7 @@ fn handle_tooltip_check_visible_and_update(
 
     match action {
         Action::None => {}
-        Action::Hide => clear_active_tooltip(active_tooltip, window),
+        Action::Hide => clear_active_tooltip(active_tooltip, current_view, cx),
         Action::ScheduleHide(tooltip) => {
             let delayed_hide_task = window.spawn(cx, {
                 let weak_active_tooltip = Rc::downgrade(active_tooltip);
@@ -4981,7 +4986,7 @@ fn handle_tooltip_check_visible_and_update(
                         return;
                     };
                     if active_tooltip.borrow_mut().take().is_some() {
-                        cx.update(|window, _cx| window.refresh()).ok();
+                        cx.update(|_window, cx| cx.notify(current_view)).ok();
                     }
                 }
             });
@@ -6388,6 +6393,120 @@ mod tests {
             .unwrap();
 
         (test_app, any_window, captured_active_tooltip)
+    }
+
+    #[gpui::test]
+    fn click_and_tooltip_notify_only_their_view(cx: &mut TestAppContext) {
+        struct A {
+            renders: Rc<Cell<usize>>,
+            clicks: Rc<Cell<usize>>,
+        }
+
+        impl Render for A {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                let clicks = self.clicks.clone();
+                div()
+                    .id("target")
+                    .size(px(50.))
+                    .active_style(|style| style.bg(crate::red()))
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                    .tooltip(|_, cx| cx.new(|_| TestTooltipView).into())
+            }
+        }
+
+        struct B {
+            renders: Rc<Cell<usize>>,
+        }
+
+        impl Render for B {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                div().size(px(50.))
+            }
+        }
+
+        struct Root {
+            a: Entity<A>,
+            b: Entity<B>,
+        }
+
+        impl Render for Root {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div()
+                    .flex()
+                    .child(
+                        self.a
+                            .clone()
+                            .cached(StyleRefinement::default().size(px(50.))),
+                    )
+                    .child(
+                        self.b
+                            .clone()
+                            .cached(StyleRefinement::default().size(px(50.))),
+                    )
+            }
+        }
+
+        let a_renders = Rc::new(Cell::new(0));
+        let b_renders = Rc::new(Cell::new(0));
+        let clicks = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view(|_, cx| Root {
+            a: cx.new(|_| A {
+                renders: a_renders.clone(),
+                clicks: clicks.clone(),
+            }),
+            b: cx.new(|_| B {
+                renders: b_renders.clone(),
+            }),
+        });
+
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let initial_b_renders = b_renders.get();
+        let initial_a_renders = a_renders.get();
+        let position = point(px(10.), px(10.));
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        assert!(a_renders.get() > initial_a_renders);
+        assert_eq!(b_renders.get(), initial_b_renders);
+        let after_press = a_renders.get();
+
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        assert!(a_renders.get() > after_press);
+        assert_eq!(b_renders.get(), initial_b_renders);
+        assert_eq!(clicks.get(), 1);
+
+        cx.simulate_mouse_move(position, None, Default::default());
+        let before_tooltip = a_renders.get();
+        cx.dispatcher
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY + Duration::from_millis(1));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.tooltip_bounds.is_some());
+        });
+        assert!(a_renders.get() > before_tooltip);
+        assert_eq!(b_renders.get(), initial_b_renders);
+
+        cx.simulate_mouse_move(point(px(75.), px(75.)), None, Default::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.tooltip_bounds.is_none());
+        });
+        assert_eq!(b_renders.get(), initial_b_renders);
+        assert_eq!(clicks.get(), 1);
     }
 
     #[test]
