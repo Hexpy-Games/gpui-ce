@@ -189,6 +189,7 @@ impl WgpuRenderer {
     }
 
     pub fn update_transparency(&mut self, transparent: bool) {
+        let scene_blend_state = pipelines::scene_blend_state(self.target.alpha_mode());
         if !self.target.set_transparent(transparent) {
             return;
         }
@@ -199,7 +200,9 @@ impl WgpuRenderer {
                 surface.configure(&resources.device, &config);
             }
         }
-        self.rebuild_pipelines();
+        if pipelines::scene_blend_state(self.target.alpha_mode()) != scene_blend_state {
+            self.rebuild_pipelines();
+        }
     }
 
     pub(super) fn rebuild_pipelines(&mut self) {
