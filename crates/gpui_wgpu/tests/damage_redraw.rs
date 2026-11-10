@@ -183,6 +183,43 @@ fn animated_scene(renderer: &WgpuHeadlessRenderer, under_glass: Hsla) -> Scene {
 
 // test-category: pure-logic
 #[test]
+fn unchanged_scene_represents_retained_frame() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let mut scene = Scene::default();
+    scene.insert_primitive(Quad {
+        bounds: bounds(0.0, 0.0, 128.0, 48.0),
+        content_mask: mask(),
+        background: solid_background(color(0x2a60d0)),
+        ..Default::default()
+    });
+    scene.insert_primitive(Quad {
+        bounds: bounds(8.0, 8.0, 40.0, 32.0),
+        content_mask: mask(),
+        background: solid_background(color(0xd0402a)),
+        ..Default::default()
+    });
+    scene.insert_primitive(Quad {
+        bounds: bounds(78.0, 8.0, 40.0, 32.0),
+        content_mask: mask(),
+        background: solid_background(color(0xffc040)),
+        border_color: color(0xffffff).into(),
+        border_widths: gpui::Edges::all(ScaledPixels(3.0)),
+        ..Default::default()
+    });
+    scene.insert_primitive(glass(bounds(8.0, 8.0, 40.0, 32.0)));
+    scene.finish();
+
+    let first = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("full frame");
+    let second = renderer
+        .render_animation_frame_to_image(&scene, TARGET)
+        .expect("unchanged scene must use the damage path");
+    assert_eq!(second.as_raw(), first.as_raw());
+}
+
+// test-category: pure-logic
+#[test]
 fn damage_redraw_matches_full_redraw() {
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
     let mut scene = animated_scene(&renderer, color(0xffffff));
