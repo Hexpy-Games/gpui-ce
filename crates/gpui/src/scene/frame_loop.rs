@@ -67,14 +67,30 @@ pub fn live_frame_due(last_ms: u32, now_ms: u32) -> bool {
     now_ms.wrapping_sub(last_ms) >= LIVE_FRAME_MIN_MS
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static PINNED_MS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pins [`animation_time_ms`] on this thread to `ms` until it is set back to `None`; for deterministic frame captures.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_animation_clock(ms: Option<u32>) {
+    PINNED_MS.set(ms);
+}
+
 /// Milliseconds since the process's first call, wrapping at 2^32 (about 49.7 days).
 pub fn animation_time_ms() -> u32 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(ms) = PINNED_MS.get() {
+        return ms;
+    }
+
     (ANIMATION_EPOCH.elapsed().as_millis() as u64) as u32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::live_frame_due;
+    use super::*;
 
     #[test]
     fn live_layers_follow_the_display_up_to_60_hz() {
@@ -97,5 +113,13 @@ mod tests {
             }
             assert_eq!(draw, i > 0 && i % 2 == 0);
         }
+    }
+
+    #[test]
+    fn pinned_animation_clock_is_seen_until_released() {
+        set_animation_clock(Some(1234));
+        assert_eq!(animation_time_ms(), 1234);
+        assert_eq!(animation_time_ms(), 1234);
+        set_animation_clock(None);
     }
 }
