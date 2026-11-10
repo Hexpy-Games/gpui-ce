@@ -2423,6 +2423,7 @@ dependencies = [
  "bindgen",
  "bitflags 2.13.1",
  "chrono",
+ "core-foundation",
  "core-text",
  "core-video",
  "criterion",
