@@ -9,8 +9,8 @@ use std::{collections::HashMap, sync::Arc};
 use compositor::CompositorLayers;
 use foreign_types::ForeignType as _;
 use gpui::{
-    Bounds, CompositorSprite, DevicePixels, FrameLoop, GpuSpecs, LiveCanvas, ScaledPixels, Scene,
-    Size, SpriteContents, animation_time_ms, point, px, rasterize_live,
+    Bounds, CompositorSprite, DevicePixels, FrameLoop, GpuSpecs, LIVE_FRAME_MIN_MS, LiveCanvas,
+    ScaledPixels, Scene, Size, SpriteContents, animation_time_ms, point, px, rasterize_live,
 };
 use gpui_apple::metal_renderer::new_window_layer;
 use gpui_wgpu::{
@@ -83,7 +83,7 @@ impl MacWgpuRenderer {
             layer,
             compositor: CompositorLayers::default(),
             live: HashMap::new(),
-            last_live_frame_ms: animation_time_ms().wrapping_sub(16),
+            last_live_frame_ms: animation_time_ms().wrapping_sub(LIVE_FRAME_MIN_MS),
             group_pixels: HashMap::new(),
             presents_with_transaction: false,
         })
@@ -291,7 +291,7 @@ impl MacWgpuRenderer {
 
     pub fn draw_live_layers(&mut self, scene: &Scene) {
         let now = animation_time_ms();
-        if now.wrapping_sub(self.last_live_frame_ms) < 16 {
+        if !gpui::live_frame_due(self.last_live_frame_ms, now) {
             return;
         }
         self.last_live_frame_ms = now;

@@ -1360,7 +1360,6 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     last_frame_ms: Cell<u32>,
-    last_live_frame_ms: Cell<u32>,
     pending_motion_wake: Option<(u32, Task<()>)>,
     layout_transition_until: Cell<u32>,
     covered_live_keys: FxHashSet<u64>,
@@ -1923,13 +1922,10 @@ impl Window {
                                     .draw_animation_frame(&window.rendered_frame.scene);
                                 window.last_frame_ms.set(now);
                             }
-                            if !window.rendered_frame.scene.live_layers().is_empty()
-                                && now.wrapping_sub(window.last_live_frame_ms.get()) >= 16
-                            {
+                            if !window.rendered_frame.scene.live_layers().is_empty() {
                                 window
                                     .platform_window
                                     .draw_live_layers(&window.rendered_frame.scene);
-                                window.last_live_frame_ms.set(now);
                             }
                         })
                         .log_err();
@@ -2130,7 +2126,6 @@ impl Window {
             last_text_input_configuration: None,
             focused_text_input: None,
             last_frame_ms: Cell::new(0),
-            last_live_frame_ms: Cell::new(0),
             pending_motion_wake: None,
             layout_transition_until: Cell::new(0),
             covered_live_keys: FxHashSet::default(),
@@ -3481,7 +3476,6 @@ impl Window {
         }
         self.needs_present.set(true);
         self.last_frame_ms.set(crate::animation_time_ms());
-        self.last_live_frame_ms.set(self.last_frame_ms.get());
 
         #[cfg(feature = "profiler")]
         {

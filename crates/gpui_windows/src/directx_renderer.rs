@@ -346,7 +346,7 @@ impl DirectXRenderer {
             compositor: Default::default(),
             group_pixels: FxHashMap::default(),
             live: FxHashMap::default(),
-            last_live_frame_ms: gpui::animation_time_ms().wrapping_sub(16),
+            last_live_frame_ms: gpui::animation_time_ms().wrapping_sub(gpui::LIVE_FRAME_MIN_MS),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -614,7 +614,8 @@ impl DirectXRenderer {
                 || live_changed
             {
                 // Include visual changes in the commit after live surface uploads.
-                self.last_live_frame_ms = self.animation_time_ms.wrapping_sub(16);
+                self.last_live_frame_ms =
+                    self.animation_time_ms.wrapping_sub(gpui::LIVE_FRAME_MIN_MS);
             }
         }
         self.draw_live_layers(scene)?;
@@ -700,7 +701,7 @@ impl DirectXRenderer {
 
     pub(crate) fn draw_live_layers(&mut self, scene: &Scene) -> Result<()> {
         let now = gpui::animation_time_ms();
-        if now.wrapping_sub(self.last_live_frame_ms) < 16 {
+        if !gpui::live_frame_due(self.last_live_frame_ms, now) {
             return Ok(());
         }
         self.last_live_frame_ms = now;

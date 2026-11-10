@@ -58,7 +58,44 @@ pub struct FrameSpec {
 
 static ANIMATION_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
+/// The renderer's single live-layer gate stays below a 60 Hz period with room for tick jitter
+/// and above a 120 Hz period, following the display up to 60 Hz and every other tick above it.
+pub const LIVE_FRAME_MIN_MS: u32 = 12;
+
+/// Whether the renderer may draw another live-layer frame.
+pub fn live_frame_due(last_ms: u32, now_ms: u32) -> bool {
+    now_ms.wrapping_sub(last_ms) >= LIVE_FRAME_MIN_MS
+}
+
 /// Milliseconds since the process's first call, wrapping at 2^32 (about 49.7 days).
 pub fn animation_time_ms() -> u32 {
     (ANIMATION_EPOCH.elapsed().as_millis() as u64) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_frame_due;
+
+    #[test]
+    fn live_layers_follow_the_display_up_to_60_hz() {
+        let mut last = 0;
+        for i in 0..120 {
+            let now = (i * 1000 / 60) as u32 + u32::from(i % 3 == 0);
+            let draw = live_frame_due(last, now);
+            if draw {
+                last = now;
+            }
+            assert_eq!(draw, i > 0);
+        }
+
+        let mut last = 0;
+        for i in 0..240 {
+            let now = (i * 1000 / 120) as u32;
+            let draw = live_frame_due(last, now);
+            if draw {
+                last = now;
+            }
+            assert_eq!(draw, i > 0 && i % 2 == 0);
+        }
+    }
 }
