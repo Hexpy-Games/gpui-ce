@@ -1004,6 +1004,60 @@ pub enum Primitive {
 
 #[expect(missing_docs)]
 impl Primitive {
+    pub(crate) fn translate(&mut self, offset: Point<ScaledPixels>) {
+        match self {
+            Primitive::Shadow(shadow) => {
+                shadow.bounds.origin += offset;
+                shadow.content_mask.bounds.origin += offset;
+                shadow.element_bounds.origin += offset;
+            }
+            Primitive::Quad(quad) => {
+                quad.bounds.origin += offset;
+                quad.content_mask.bounds.origin += offset;
+            }
+            Primitive::Path(path) => {
+                path.bounds.origin += offset;
+                path.content_mask.bounds.origin += offset;
+                path.start += offset;
+                path.current += offset;
+                for vertex in &mut path.vertices {
+                    vertex.xy_position += offset;
+                    vertex.content_mask.bounds.origin += offset;
+                }
+            }
+            Primitive::Underline(underline) => {
+                underline.bounds.origin += offset;
+                underline.content_mask.bounds.origin += offset;
+            }
+            Primitive::MonochromeSprite(sprite) => {
+                sprite.bounds.origin += offset;
+                sprite.content_mask.bounds.origin += offset;
+            }
+            Primitive::SubpixelSprite(sprite) => {
+                sprite.bounds.origin += offset;
+                sprite.content_mask.bounds.origin += offset;
+            }
+            Primitive::PolychromeSprite(sprite) => {
+                sprite.bounds.origin += offset;
+                sprite.content_mask.bounds.origin += offset;
+            }
+            Primitive::Surface(surface) => {
+                surface.bounds.origin += offset;
+                surface.content_mask.bounds.origin += offset;
+            }
+            Primitive::BackdropFilter(filter) => {
+                filter.bounds.origin += offset;
+                filter.content_mask.bounds.origin += offset;
+            }
+            Primitive::FilterBoundary(boundary) => {
+                boundary.bounds.origin += offset;
+                boundary.content_mask.bounds.origin += offset;
+                boundary.scale_origin += offset;
+                boundary.motion_bounds.origin += offset;
+            }
+        }
+    }
+
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,

@@ -120,26 +120,64 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
     Some(rect.unwrap_or_default())
 }
 
-fn operation_hash(operation: &PaintOperation) -> u64 {
+macro_rules! bytes {
+    ($hash:ident, $value:expr) => {{
+        let value = &$value;
+        $hash.write(unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(value).cast::<u8>(),
+                std::mem::size_of_val(value),
+            )
+        });
+    }};
+}
+pub(super) use bytes;
+
+macro_rules! motion {
+    ($hash:ident, $motion:expr) => {{
+        let motion = &$motion;
+        motion.start_ms.hash(&mut $hash);
+        motion.duration_ms.hash(&mut $hash);
+        std::mem::discriminant(&motion.repeat).hash(&mut $hash);
+        std::mem::discriminant(&motion.easing).hash(&mut $hash);
+        match &motion.easing {
+            super::MotionEasing::CubicBezier(points) => bytes!($hash, *points),
+            super::MotionEasing::Linear { points, len } => {
+                bytes!($hash, *points);
+                len.hash(&mut $hash);
+            }
+            super::MotionEasing::Steps(steps) => steps.hash(&mut $hash),
+        }
+        bytes!($hash, motion.opacity);
+        bytes!($hash, motion.offset);
+        bytes!($hash, motion.relative_offset);
+        motion.clip.is_some().hash(&mut $hash);
+        if let Some((from, to)) = motion.clip {
+            bytes!($hash, from);
+            bytes!($hash, to);
+        }
+        motion.clip_radii.is_some().hash(&mut $hash);
+        if let Some((from, to)) = motion.clip_radii {
+            bytes!($hash, from);
+            bytes!($hash, to);
+        }
+        bytes!($hash, motion.visible);
+        bytes!($hash, motion.scale);
+        bytes!($hash, motion.rotation);
+        bytes!($hash, motion.origin);
+    }};
+}
+pub(super) use motion;
+
+pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hash = DefaultHasher::new();
     // These scene-buffer values have explicit, padding-free layouts, as checked by scene::abi.
-    macro_rules! bytes {
-        ($value:expr) => {{
-            let value = &$value;
-            hash.write(unsafe {
-                std::slice::from_raw_parts(
-                    std::ptr::from_ref(value).cast::<u8>(),
-                    std::mem::size_of_val(value),
-                )
-            });
-        }};
-    }
     macro_rules! instance {
         ($value:expr) => {{
             let mut value = *$value;
             value.order = 0;
-            bytes!(value);
+            bytes!(hash, value);
         }};
     }
     macro_rules! filters {
@@ -147,43 +185,9 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
             $filters.len().hash(&mut hash);
             for filter in $filters {
                 match filter {
-                    crate::ScaledFilter::Blur(radius) => bytes!(radius.0),
+                    crate::ScaledFilter::Blur(radius) => bytes!(hash, radius.0),
                 }
             }
-        }};
-    }
-    macro_rules! motion {
-        ($motion:expr) => {{
-            let motion = &$motion;
-            motion.start_ms.hash(&mut hash);
-            motion.duration_ms.hash(&mut hash);
-            std::mem::discriminant(&motion.repeat).hash(&mut hash);
-            std::mem::discriminant(&motion.easing).hash(&mut hash);
-            match &motion.easing {
-                super::MotionEasing::CubicBezier(points) => bytes!(*points),
-                super::MotionEasing::Linear { points, len } => {
-                    bytes!(*points);
-                    len.hash(&mut hash);
-                }
-                super::MotionEasing::Steps(steps) => steps.hash(&mut hash),
-            }
-            bytes!(motion.opacity);
-            bytes!(motion.offset);
-            bytes!(motion.relative_offset);
-            motion.clip.is_some().hash(&mut hash);
-            if let Some((from, to)) = motion.clip {
-                bytes!(from);
-                bytes!(to);
-            }
-            motion.clip_radii.is_some().hash(&mut hash);
-            if let Some((from, to)) = motion.clip_radii {
-                bytes!(from);
-                bytes!(to);
-            }
-            bytes!(motion.visible);
-            bytes!(motion.scale);
-            bytes!(motion.rotation);
-            bytes!(motion.origin);
         }};
     }
     macro_rules! lens {
@@ -191,7 +195,7 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
             let lens = &$lens;
             lens.saturation.is_some().hash(&mut hash);
             if let Some(saturation) = lens.saturation {
-                bytes!(saturation);
+                bytes!(hash, saturation);
             }
             for value in [
                 lens.bezel,
@@ -215,11 +219,11 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                 lens.curve,
                 lens.sharp_rim,
             ] {
-                bytes!(value);
+                bytes!(hash, value);
             }
             lens.sharp_full.hash(&mut hash);
-            bytes!(lens.tone);
-            bytes!(lens.hairline);
+            bytes!(hash, lens.tone);
+            bytes!(hash, lens.hairline);
             lens.exact.hash(&mut hash);
         }};
     }
@@ -235,41 +239,41 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                 Primitive::SubpixelSprite(value) => instance!(value),
                 Primitive::PolychromeSprite(value) => instance!(value),
                 Primitive::Path(path) => {
-                    bytes!(path.clipped_bounds());
-                    bytes!(path.color);
+                    bytes!(hash, path.clipped_bounds());
+                    bytes!(hash, path.color);
                     path.vertices.len().hash(&mut hash);
                     for vertex in &path.vertices {
-                        bytes!(vertex.xy_position);
-                        bytes!(vertex.st_position);
+                        bytes!(hash, vertex.xy_position);
+                        bytes!(hash, vertex.st_position);
                     }
                 }
                 Primitive::FilterBoundary(boundary) => {
-                    bytes!(boundary.bounds);
-                    bytes!(boundary.content_mask);
-                    bytes!(boundary.corner_radii);
-                    bytes!(boundary.corner_smoothing);
+                    bytes!(hash, boundary.bounds);
+                    bytes!(hash, boundary.content_mask);
+                    bytes!(hash, boundary.corner_radii);
+                    bytes!(hash, boundary.corner_smoothing);
                     filters!(&boundary.filters);
-                    bytes!(boundary.opacity);
-                    bytes!(boundary.scale);
-                    bytes!(boundary.scale_origin);
-                    motion!(boundary.motion);
-                    bytes!(boundary.motion_bounds);
+                    bytes!(hash, boundary.opacity);
+                    bytes!(hash, boundary.scale);
+                    bytes!(hash, boundary.scale_origin);
+                    motion!(hash, boundary.motion);
+                    bytes!(hash, boundary.motion_bounds);
                     boundary.is_start.hash(&mut hash);
                     boundary.inline.hash(&mut hash);
                 }
                 Primitive::BackdropFilter(filter) => {
-                    bytes!(filter.bounds);
-                    bytes!(filter.content_mask);
-                    bytes!(filter.corner_radii);
-                    bytes!(filter.corner_smoothing);
+                    bytes!(hash, filter.bounds);
+                    bytes!(hash, filter.content_mask);
+                    bytes!(hash, filter.corner_radii);
+                    bytes!(hash, filter.corner_smoothing);
                     filters!(&filter.filters);
-                    bytes!(filter.opacity);
+                    bytes!(hash, filter.opacity);
                     lens!(filter.lens);
                     filter.appear.is_some().hash(&mut hash);
                     if let Some(appear) = filter.appear {
                         lens!(appear.lens);
-                        bytes!(appear.blur);
-                        motion!(appear.motion);
+                        bytes!(hash, appear.blur);
+                        motion!(hash, appear.motion);
                     }
                     filter.wallpaper.is_some().hash(&mut hash);
                     if let Some(wallpaper) = &filter.wallpaper {
@@ -281,7 +285,7 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                             pass.width.hash(&mut hash);
                             pass.height.hash(&mut hash);
                             pass.source.hash(&mut hash);
-                            bytes!(pass.uniforms);
+                            bytes!(hash, pass.uniforms);
                         }
                     }
                 }
@@ -295,27 +299,27 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                     let mut value = *value;
                     value.order = 0;
                     value.padding = 0;
-                    bytes!(value);
+                    bytes!(hash, value);
                 }
                 Primitive::Shadow(value) => {
                     let mut value = *value;
                     value.order = 0;
                     value.padding = 0;
-                    bytes!(value);
+                    bytes!(hash, value);
                 }
                 _ => unreachable!("only quads and shadows carry box morphs"),
             }
-            motion!(morph.timing);
-            bytes!(morph.delta);
-            bytes!(morph.radii_delta);
+            motion!(hash, morph.timing);
+            bytes!(hash, morph.delta);
+            bytes!(hash, morph.radii_delta);
         }
-        PaintOperation::StartLayer(bounds) => bytes!(*bounds),
+        PaintOperation::StartLayer(bounds) => bytes!(hash, *bounds),
         PaintOperation::EndLayer => {}
         PaintOperation::LiveLayer(layer) => {
             layer.key.hash(&mut hash);
             layer.start_ms.hash(&mut hash);
-            bytes!(layer.bounds);
-            bytes!(layer.content_mask);
+            bytes!(hash, layer.bounds);
+            bytes!(hash, layer.content_mask);
         }
     }
     hash.finish()
@@ -1055,6 +1059,76 @@ mod tests {
         scene.finish();
         assert_eq!(scene.compositor_groups().len(), 1);
         assert_eq!(scene.filter_boundaries.len(), 2);
+    }
+
+    #[test]
+    fn moved_loop_group_keeps_key_and_local_content() {
+        let build = |offset: crate::Point<ScaledPixels>, changed: bool| {
+            let mut scene = Scene {
+                offload_animations: true,
+                scale_factor: 1.0,
+                ..Scene::default()
+            };
+            let mut content_mask = mask();
+            content_mask.bounds.origin += offset;
+            let boundary = FilterBoundary {
+                order: 0,
+                bounds: content_mask.bounds,
+                content_mask,
+                corner_radii: Default::default(),
+                corner_smoothing: 0.0,
+                filters: SmallVec::new(),
+                opacity: 1.0,
+                scale: 1.0,
+                scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)) + offset,
+                motion_bounds: Bounds::new(offset, Default::default()),
+                motion: LayerMotion {
+                    duration_ms: 1000,
+                    repeat: MotionRepeat::Loop,
+                    offset: (point(px(0.0), px(0.0)), point(px(40.0), px(0.0))),
+                    ..LayerMotion::NONE
+                },
+                is_start: true,
+                inline: false,
+            };
+            scene.insert_primitive(boundary.clone());
+            for x in [10.0, 30.0] {
+                let mut bounds = rect(x, 10.0, 20.0, 20.0);
+                bounds.origin += offset;
+                scene.insert_primitive(Quad {
+                    bounds,
+                    content_mask,
+                    background: if changed && x == 10.0 {
+                        crate::white().into()
+                    } else {
+                        Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+            scene.insert_primitive(FilterBoundary {
+                is_start: false,
+                ..boundary
+            });
+            scene.finish();
+            scene
+        };
+        let offset = point(ScaledPixels(37.0), ScaledPixels(11.0));
+        let original = build(crate::Point::default(), false);
+        let moved = build(offset, false);
+        let original = &original.compositor_groups()[0];
+        let moved = &moved.compositor_groups()[0];
+        assert_eq!(original.key, moved.key);
+        assert_eq!(moved.rect.origin - original.rect.origin, offset);
+        assert_eq!(original.rect.size, moved.rect.size);
+        let local_origin = original.scene.quads[0].bounds.origin;
+        assert_eq!(local_origin, moved.scene.quads[0].bounds.origin);
+        assert!(local_origin.x >= ScaledPixels(0.0));
+        assert!(local_origin.y >= ScaledPixels(0.0));
+        assert!(local_origin.x < original.rect.size.width);
+        assert!(local_origin.y < original.rect.size.height);
+        let changed = build(offset, true);
+        assert_ne!(original.key, changed.compositor_groups()[0].key);
     }
 
     #[test]

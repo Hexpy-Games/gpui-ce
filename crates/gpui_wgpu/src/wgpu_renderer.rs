@@ -286,12 +286,14 @@ impl WgpuRenderer {
         scene: &Scene,
         rect: Bounds<ScaledPixels>,
     ) -> Option<(Size<DevicePixels>, Arc<[u8]>)> {
+        let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
+        let size = gpui::size(DevicePixels(width as i32), DevicePixels(height as i32));
         let device = self.resources().device.clone();
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("motion_group"),
             size: wgpu::Extent3d {
-                width: self.target.width(),
-                height: self.target.height(),
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -302,7 +304,6 @@ impl WgpuRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
         let row_bytes = width * 4;
         let padded = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -314,7 +315,7 @@ impl WgpuRenderer {
         });
         let clear = self.target.clear_color;
         self.target.clear_color = wgpu::Color::TRANSPARENT;
-        let rendered = frame::render_offscreen(self, scene, &view, self.target.viewport_size());
+        let rendered = frame::render_offscreen(self, scene, &view, size);
         self.target.clear_color = clear;
         if !rendered {
             return None;
@@ -324,11 +325,7 @@ impl WgpuRenderer {
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: rect.origin.x.0 as u32,
-                    y: rect.origin.y.0 as u32,
-                    z: 0,
-                },
+                origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -979,6 +976,94 @@ mod tests {
         }
 
         Ok(renderers)
+    }
+
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[test]
+    fn rasterized_group_matches_its_region() -> anyhow::Result<()> {
+        use gpui::PlatformHeadlessRenderer;
+
+        let viewport = test_bounds(0.0, 0.0, 96.0, 80.0);
+        let bounds = test_bounds(17.0, 13.0, 40.0, 32.0);
+        let boundary = gpui::FilterBoundary {
+            order: 0,
+            bounds,
+            content_mask: gpui::ContentMask {
+                bounds: viewport,
+                ..Default::default()
+            },
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: smallvec![],
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: bounds.center(),
+            motion: gpui::LayerMotion {
+                duration_ms: 1000,
+                repeat: gpui::MotionRepeat::Loop,
+                opacity: (0.5, 1.0),
+                ..gpui::LayerMotion::NONE
+            },
+            motion_bounds: bounds,
+            is_start: true,
+            inline: false,
+        };
+        let quads = [
+            Quad {
+                border_widths: gpui::Edges::all(ScaledPixels(3.0)),
+                border_color: gpui::hsla(0.05, 0.8, 0.5, 0.8).into(),
+                corner_radii: gpui::Corners::all(ScaledPixels(6.0)),
+                ..test_quad(bounds, viewport, gpui::hsla(0.6, 0.7, 0.4, 0.6))
+            },
+            test_quad(
+                test_bounds(27.0, 21.0, 14.0, 12.0),
+                viewport,
+                gpui::hsla(0.3, 0.8, 0.6, 0.7),
+            ),
+        ];
+        let mut grouped = Scene::default();
+        grouped.offload_animations = true;
+        grouped.scale_factor = 1.0;
+        let mut plain = Scene::default();
+        grouped.insert_primitive(boundary.clone());
+        for quad in quads {
+            grouped.insert_primitive(quad);
+            plain.insert_primitive(quad);
+        }
+        grouped.insert_primitive(gpui::FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        grouped.finish();
+        plain.finish();
+
+        let group = &grouped.compositor_groups()[0];
+        let target_size = gpui::size(DevicePixels(96), DevicePixels(80));
+        let context = WgpuContext::new_headless(None)?;
+        let mut renderer = WgpuRenderer::new_headless(&context, target_size)?;
+        let (size, raster) = renderer
+            .rasterize(&group.scene, group.rect)
+            .ok_or_else(|| anyhow::anyhow!("group rasterization failed"))?;
+        assert_eq!(size.width.0 as f32, group.rect.size.width.0);
+        assert_eq!(size.height.0 as f32, group.rect.size.height.0);
+
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let image = renderer.render_scene_to_image(&plain, target_size)?;
+        let crop = image::imageops::crop_imm(
+            &image,
+            group.rect.origin.x.0 as u32,
+            group.rect.origin.y.0 as u32,
+            size.width.0 as u32,
+            size.height.0 as u32,
+        )
+        .to_image();
+        for (bgra, rgba) in raster.chunks_exact(4).zip(crop.pixels()) {
+            let rgb = [bgra[2], bgra[1], bgra[0]];
+            for (actual, expected) in rgb.into_iter().zip(rgba.0) {
+                assert!(actual.abs_diff(expected) <= 1, "{rgb:?} != {rgba:?}");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]

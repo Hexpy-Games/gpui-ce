@@ -1,5 +1,6 @@
 //! Animated sprites the platform compositor draws instead of the GPU frame.
 
+use super::damage::{bytes, motion, operation_hash};
 use super::{
     BackdropFilter, DrawOrder, FilterRenderTarget, FrameLoop, PaintOperation, PaintedBounds,
     Primitive, RenderCommand, Scene,
@@ -229,20 +230,30 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
                 ScaledPixels(rect.bottom().0.ceil()),
             ),
         );
+        let offset = Point::default() - rect.origin;
+        let operations = std::mem::take(&mut content.paint_operations);
+        content.clear();
+        for operation in operations {
+            match operation {
+                PaintOperation::Primitive(mut primitive) => {
+                    primitive.translate(offset);
+                    content.insert_primitive(primitive);
+                }
+                PaintOperation::StartLayer(mut bounds) => {
+                    bounds.origin += offset;
+                    content.push_layer(bounds);
+                }
+                PaintOperation::EndLayer => content.pop_layer(),
+                PaintOperation::Morphed(_, _) | PaintOperation::LiveLayer(_) => unreachable!(),
+            }
+        }
         content.finish();
         let mut hash = DefaultHasher::new();
-        format!(
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{rect:?}{:?}",
-            content.shadows,
-            content.quads,
-            content.paths,
-            content.underlines,
-            content.monochrome_sprites,
-            content.subpixel_sprites,
-            content.polychrome_sprites,
-            start.motion
-        )
-        .hash(&mut hash);
+        for operation in &content.paint_operations {
+            operation_hash(operation).hash(&mut hash);
+        }
+        bytes!(hash, rect.size);
+        motion!(hash, start.motion);
         groups.push((
             (start.order, end.order),
             CompositorGroup {
