@@ -1143,8 +1143,8 @@ impl DirectXRenderer {
         let (width, height) = (rect.size.width.0 as u32, rect.size.height.0 as u32);
         let mut texture = None;
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: self.width,
-            Height: self.height,
+            Width: width,
+            Height: height,
             MipLevels: 1,
             ArraySize: 1,
             Format: RENDER_TARGET_FORMAT,
@@ -1206,11 +1206,11 @@ impl DirectXRenderer {
                 &texture,
                 0,
                 Some(&D3D11_BOX {
-                    left: rect.origin.x.0 as u32,
-                    top: rect.origin.y.0 as u32,
+                    left: 0,
+                    top: 0,
                     front: 0,
-                    right: rect.right().0 as u32,
-                    bottom: rect.bottom().0 as u32,
+                    right: width,
+                    bottom: height,
                     back: 1,
                 }),
             );
