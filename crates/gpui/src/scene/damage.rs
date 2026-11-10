@@ -289,8 +289,8 @@ pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
                     }
                 }
                 Primitive::Surface(surface) => {
-                    bytes!(surface.bounds);
-                    bytes!(surface.content_mask);
+                    bytes!(hash, surface.bounds);
+                    bytes!(hash, surface.content_mask);
                     surface.source.hash_identity(&mut hash);
                 }
             }
