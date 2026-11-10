@@ -7,6 +7,7 @@
 //!
 //! If all of your elements are the same height, see [`crate::UniformList`] for a simpler API
 
+use super::wheel_glide::{self, WheelGlide};
 use crate::{
     AnyElement, App, AppContext, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges,
     Element, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
@@ -60,6 +61,7 @@ impl std::fmt::Debug for ListState {
 }
 
 struct StateInner {
+    glide: WheelGlide,
     last_layout_bounds: Option<Bounds<Pixels>>,
     last_padding: Option<Edges<Pixels>>,
     items: SumTree<ListItem>,
@@ -313,6 +315,7 @@ impl ListState {
     /// that the list doesn't flicker or pop in when scrolling.
     pub fn new(item_count: usize, alignment: ListAlignment, overdraw: Pixels) -> Self {
         let this = Self(Rc::new(RefCell::new(StateInner {
+            glide: WheelGlide::default(),
             last_layout_bounds: None,
             last_padding: None,
             items: SumTree::default(),
@@ -353,6 +356,7 @@ impl ListState {
     ///
     /// Note that this will cause scroll events to be dropped until the next paint.
     pub fn reset(&self, element_count: usize) {
+        self.0.borrow_mut().glide.cancel();
         let old_count = {
             let state = &mut *self.0.borrow_mut();
             state.reset = true;
@@ -370,6 +374,7 @@ impl ListState {
     /// uniform height hint so the scrollbar thumb is correctly sized from the first
     /// frame even for off-screen items.
     pub fn reset_with_uniform_height(&self, element_count: usize, height: Pixels) {
+        self.0.borrow_mut().glide.cancel();
         self.reset(element_count);
         self.apply_uniform_item_height(height);
     }
@@ -563,6 +568,7 @@ impl ListState {
 
     /// Scroll the list by the given offset
     pub fn scroll_by(&self, distance: Pixels) {
+        self.0.borrow_mut().glide.cancel();
         if distance == px(0.) {
             return;
         }
@@ -615,6 +621,7 @@ impl ListState {
     /// scrolls back to the bottom. In `Normal` mode, no automatic
     /// following occurs.
     pub fn set_follow_mode(&self, mode: FollowMode) {
+        self.0.borrow_mut().glide.cancel();
         let state = &mut *self.0.borrow_mut();
 
         match mode {
@@ -658,6 +665,7 @@ impl ListState {
 
     /// Scroll the list to the given offset
     pub fn scroll_to(&self, mut scroll_top: ListOffset) {
+        self.0.borrow_mut().glide.cancel();
         let state = &mut *self.0.borrow_mut();
         let item_count = state.items.summary().count;
         if scroll_top.item_ix >= item_count {
@@ -675,6 +683,7 @@ impl ListState {
 
     /// Scroll the list to the given item, such that the item is fully visible.
     pub fn scroll_to_reveal_item(&self, ix: usize) {
+        self.0.borrow_mut().glide.cancel();
         let state = &mut *self.0.borrow_mut();
 
         let mut scroll_top = state.logical_scroll_top();
@@ -764,6 +773,7 @@ impl ListState {
 
     /// Set the offset from the scrollbar
     pub fn set_offset_from_scrollbar(&self, point: Point<Pixels>) {
+        self.0.borrow_mut().glide.cancel();
         self.0.borrow_mut().set_offset_from_scrollbar(point);
     }
 
@@ -1544,6 +1554,19 @@ impl Element for List {
     ) -> ListPrepaintState {
         let state = &mut *self.state.0.borrow_mut();
         state.reset = false;
+        if let Some((slice, active)) = state.glide.step(cx.background_executor().now()) {
+            state.scroll(
+                &state.logical_scroll_top(),
+                bounds.size.height,
+                slice,
+                window.current_view(),
+                window,
+                cx,
+            );
+            if active {
+                window.request_animation_frame();
+            }
+        }
 
         let style = self.base_style();
         let content_mask = style.scroll_mask(bounds, window.rem_size());
@@ -1625,16 +1648,26 @@ impl Element for List {
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
+                let mut state = list_state.0.borrow_mut();
+                if !event.delta.precise() && wheel_glide::enabled(cx) {
+                    let top = state.scroll_top(&scroll_top);
+                    let max = state.max_scroll_offset();
+                    let room = (point(px(0.), max - top), point(px(0.), top));
+                    if state.glide.add(
+                        event.delta.pixel_delta(px(20.)),
+                        room,
+                        cx.background_executor().now(),
+                    ) {
+                        cx.notify(current_view);
+                    }
+                    return;
+                }
+                if event.delta.precise() {
+                    state.glide.cancel();
+                }
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                list_state.0.borrow_mut().scroll(
-                    &scroll_top,
-                    height,
-                    pixel_delta,
-                    current_view,
-                    window,
-                    cx,
-                )
+                state.scroll(&scroll_top, height, pixel_delta, current_view, window, cx)
             }
         });
 

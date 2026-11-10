@@ -56,7 +56,10 @@ use std::{
     time::Duration,
 };
 
-use super::ImageCacheProvider;
+use super::{
+    ImageCacheProvider,
+    wheel_glide::{self, WheelGlide},
+};
 
 mod inline;
 pub(crate) use inline::InlineContent;
@@ -2818,6 +2821,7 @@ pub struct Interactivity {
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
+    pub(crate) wheel_glide: Option<Rc<RefCell<WheelGlide>>>,
     pub(crate) group: Option<SharedString>,
     /// The base style of the element, before any modifications are applied
     /// by focus, active, etc.
@@ -2974,6 +2978,7 @@ impl Interactivity {
                     let scroll_handle_state = scroll_handle.0.borrow();
                     self.scroll_offset = Some(scroll_handle_state.offset.clone());
                     self.ongoing_scroll = Some(scroll_handle_state.ongoing_scroll.clone());
+                    self.wheel_glide = Some(scroll_handle_state.wheel_glide.clone());
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
@@ -2988,6 +2993,12 @@ impl Interactivity {
                         element_state
                             .ongoing_scroll
                             .get_or_insert_with(|| Rc::new(RefCell::new(OngoingScroll::default())))
+                            .clone(),
+                    );
+                    self.wheel_glide = Some(
+                        element_state
+                            .wheel_glide
+                            .get_or_insert_with(Rc::default)
                             .clone(),
                     );
                 }
@@ -3169,7 +3180,7 @@ impl Interactivity {
         bounds: Bounds<Pixels>,
         style: &Style,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Point<Pixels> {
         fn round_to_two_decimals(pixels: Pixels) -> Pixels {
             const ROUNDING_FACTOR: f32 = 100.0;
@@ -3210,12 +3221,31 @@ impl Interactivity {
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
+            if let Some(wheel_glide) = &self.wheel_glide
+                && let Some((slice, active)) = wheel_glide
+                    .borrow_mut()
+                    .step(cx.background_executor().now())
+            {
+                *scroll_offset += slice;
+                if active {
+                    window.request_animation_frame();
+                }
+            }
+            let unclamped_offset = *scroll_offset;
 
             scroll_offset.x = scroll_offset.x.clamp(-scroll_max.x, px(0.));
             if scroll_to_bottom {
                 scroll_offset.y = -scroll_max.y;
             } else {
                 scroll_offset.y = scroll_offset.y.clamp(-scroll_max.y, px(0.));
+            }
+
+            if let Some(wheel_glide) = &self.wheel_glide {
+                let mut glide = wheel_glide.borrow_mut();
+                if *scroll_offset != unclamped_offset {
+                    glide.cancel();
+                }
+                glide.max = scroll_max;
             }
 
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
@@ -4261,6 +4291,7 @@ impl Interactivity {
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let ongoing_scroll = self.ongoing_scroll.clone();
+            let wheel_glide = self.wheel_glide.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -4305,6 +4336,26 @@ impl Interactivity {
                             delta_y = Pixels::ZERO;
                         } else {
                             delta_x = Pixels::ZERO;
+                        }
+                    }
+                    if let Some(wheel_glide) = &wheel_glide {
+                        let mut glide = wheel_glide.borrow_mut();
+                        if !event.delta.precise() && wheel_glide::enabled(cx) {
+                            let room = (
+                                glide.max + *scroll_offset,
+                                point(-scroll_offset.x, -scroll_offset.y),
+                            );
+                            if glide.add(
+                                point(delta_x, delta_y),
+                                room,
+                                cx.background_executor().now(),
+                            ) {
+                                cx.notify(current_view);
+                            }
+                            return;
+                        }
+                        if event.delta.precise() {
+                            glide.cancel();
                         }
                     }
                     scroll_offset.y += delta_y;
@@ -4643,6 +4694,7 @@ pub struct InteractiveElementState {
     pub(crate) pending_keyboard_down: Option<Rc<RefCell<Option<u64>>>>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
+    wheel_glide: Option<Rc<RefCell<WheelGlide>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     pub(crate) style_transitions: Option<Box<StyleTransitionState>>,
 }
@@ -5191,6 +5243,7 @@ impl ScrollAnchor {
 struct ScrollHandleState {
     offset: Rc<RefCell<Point<Pixels>>>,
     ongoing_scroll: Rc<RefCell<OngoingScroll>>,
+    wheel_glide: Rc<RefCell<WheelGlide>>,
     bounds: Bounds<Pixels>,
     max_offset: Point<Pixels>,
     child_bounds: Vec<Bounds<Pixels>>,
@@ -5291,6 +5344,7 @@ impl ScrollHandle {
     /// Update [ScrollHandleState]'s active item for scrolling to in prepaint
     pub fn scroll_to_item(&self, ix: usize) {
         let mut state = self.0.borrow_mut();
+        state.wheel_glide.borrow_mut().cancel();
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::default(),
@@ -5301,6 +5355,7 @@ impl ScrollHandle {
     /// This scrolls the minimal amount to ensure that the child is the first visible element
     pub fn scroll_to_top_of_item(&self, ix: usize) {
         let mut state = self.0.borrow_mut();
+        state.wheel_glide.borrow_mut().cancel();
         state.active_item = Some(ScrollActiveItem {
             index: ix,
             strategy: ScrollStrategy::Top,
@@ -5361,6 +5416,7 @@ impl ScrollHandle {
     /// Scrolls to the bottom.
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
+        state.wheel_glide.borrow_mut().cancel();
         state.scroll_to_bottom = true;
     }
 
@@ -5369,6 +5425,7 @@ impl ScrollHandle {
     /// As you scroll further down the offset becomes more negative.
     pub fn set_offset(&self, mut position: Point<Pixels>) {
         let state = self.0.borrow();
+        state.wheel_glide.borrow_mut().cancel();
         *state.offset.borrow_mut() = position;
     }
 
@@ -5411,6 +5468,80 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn wheel_lines_glide_to_the_unsmoothed_offset_and_pixels_jump(cx: &mut TestAppContext) {
+        struct TestView(ScrollHandle);
+
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("scroller")
+                    .size(px(100.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.0)
+                    .child(div().h(px(1000.)).w_full())
+            }
+        }
+
+        cx.update(|cx| cx.set_global(crate::WheelSmoothing(true)));
+        let scroll = ScrollHandle::new();
+        let window = cx.add_window({
+            let scroll = scroll.clone();
+            move |_, _| TestView(scroll)
+        });
+        let window = AnyWindowHandle::from(window);
+        let target = cx
+            .update_window(window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let target = window.line_height() * -3.;
+                window.dispatch_event(
+                    ScrollWheelEvent {
+                        position: point(px(50.), px(50.)),
+                        delta: crate::ScrollDelta::Lines(point(0., -3.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.draw(cx).clear(cx);
+                target
+            })
+            .unwrap();
+
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.update_window(window, |_, window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert!(scroll.offset().y < px(0.));
+        assert!(scroll.offset().y > target);
+
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.update_window(window, |_, window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(scroll.offset().y, target);
+
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(50.), px(50.)),
+                    delta: crate::ScrollDelta::Pixels(point(px(0.), px(-50.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            assert_eq!(scroll.offset().y, target - px(50.));
+            assert_eq!(window.simulate_next_frame(cx), 0);
+        })
+        .unwrap();
+    }
 
     #[gpui::test]
     fn layout_motion_animates_layout_changes_but_not_scroll(cx: &mut TestAppContext) {
