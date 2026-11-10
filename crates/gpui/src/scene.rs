@@ -16,7 +16,10 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -103,6 +106,9 @@ pub struct Scene {
     filter_groups: Vec<FilterGroup>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
+    pub box_morphs: Vec<BoxMorph>,
+    last_box_morph: Option<Arc<BoxMorph>>,
+    live_box_morphs: bool,
     pub paths: Vec<Path<ScaledPixels>>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
@@ -139,6 +145,8 @@ impl Scene {
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
+        self.box_morphs.clear();
+        self.last_box_morph = None;
         self.underlines.clear();
         self.monochrome_sprites.clear();
         self.subpixel_sprites.clear();
@@ -154,6 +162,7 @@ impl Scene {
         self.render_plan.clear();
         self.is_finished = false;
         self.has_animations = false;
+        self.live_box_morphs = false;
         self.generation = 0;
         self.change = None;
     }
@@ -190,8 +199,14 @@ impl Scene {
         self.filter_depth > 0
     }
 
-    pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        let mut primitive = primitive.into();
+    pub fn insert_primitive(&mut self, operation: impl Into<PaintOperation>) {
+        let (mut primitive, morph) = match operation.into() {
+            PaintOperation::Primitive(primitive) => (primitive, None),
+            PaintOperation::Morphed(primitive, morph) => (primitive, Some(morph)),
+            _ => unreachable!("insert_primitive requires a primitive"),
+        };
+        // A finished morph (e.g. replayed from a cached view) is a plain primitive again.
+        let morph = morph.filter(|morph| morph.timing.is_active(animation_time_ms()));
         self.is_finished = false;
 
         // A fully transparent group paints nothing: it and its contents produce no draw data.
@@ -210,15 +225,19 @@ impl Scene {
                     start_index: 0,
                     start_len: 0,
                 });
-                self.paint_operations
-                    .push(PaintOperation::Primitive(primitive));
+                self.paint_operations.push(match morph {
+                    Some(morph) => PaintOperation::Morphed(primitive, morph),
+                    None => PaintOperation::Primitive(primitive),
+                });
                 return;
             }
             Primitive::FilterBoundary(boundary) if !boundary.is_start => {
                 if let Some(group) = self.filter_groups.pop() {
                     if group.suppressed {
-                        self.paint_operations
-                            .push(PaintOperation::Primitive(primitive));
+                        self.paint_operations.push(match morph {
+                            Some(morph) => PaintOperation::Morphed(primitive, morph),
+                            None => PaintOperation::Primitive(primitive),
+                        });
                         return;
                     }
                     self.close_isolated_group(&group);
@@ -226,8 +245,10 @@ impl Scene {
             }
             Primitive::FilterBoundary(_) => {}
             _ if suppressed => {
-                self.paint_operations
-                    .push(PaintOperation::Primitive(primitive));
+                self.paint_operations.push(match morph {
+                    Some(morph) => PaintOperation::Morphed(primitive, morph),
+                    None => PaintOperation::Primitive(primitive),
+                });
                 return;
             }
             _ => {}
@@ -250,9 +271,21 @@ impl Scene {
             });
         }
 
-        let clipped_bounds = primitive
-            .bounds()
-            .intersect(&primitive.content_mask().bounds);
+        let clipped_bounds = if let Some(morph) = &morph {
+            let painted = match &primitive {
+                Primitive::Shadow(shadow) => shadow
+                    .bounds
+                    .dilate(ScaledPixels(3.0 * shadow.blur_radius.0)),
+                _ => *primitive.bounds(),
+            };
+            morph
+                .reach(painted)
+                .intersect(&primitive.content_mask().bounds)
+        } else {
+            primitive
+                .bounds()
+                .intersect(&primitive.content_mask().bounds)
+        };
 
         // Isolation boundaries stay paired even when their clipped region is empty.
         // Each marker sorts above prior content, and its order floor keeps following
@@ -291,6 +324,22 @@ impl Scene {
                 .flatten()
                 .unwrap_or_else(|| self.primitive_bounds.insert(order_bounds))
         };
+        if let Some(morph) = &morph {
+            if !self
+                .last_box_morph
+                .as_ref()
+                .is_some_and(|last| Arc::ptr_eq(last, morph))
+            {
+                self.box_morphs.push((**morph).clone());
+                self.last_box_morph = Some(morph.clone());
+            }
+            let morph_id = self.box_morphs.len() as u32;
+            match &mut primitive {
+                Primitive::Quad(quad) => quad.padding = morph_id,
+                Primitive::Shadow(shadow) => shadow.padding = morph_id,
+                _ => unreachable!("only quads and shadows carry box morphs"),
+            }
+        }
         match &mut primitive {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -348,8 +397,10 @@ impl Scene {
 
         let opens_group =
             matches!(&primitive, Primitive::FilterBoundary(boundary) if boundary.is_start);
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
+        self.paint_operations.push(match morph {
+            Some(morph) => PaintOperation::Morphed(primitive, morph),
+            None => PaintOperation::Primitive(primitive),
+        });
         if opens_group {
             self.filter_groups.push(FilterGroup {
                 suppressed: false,
@@ -372,6 +423,16 @@ impl Scene {
             .iter()
             .filter_map(|operation| match operation {
                 PaintOperation::Primitive(primitive) => primitive.painted_bounds(),
+                PaintOperation::Morphed(primitive, morph) => Some(
+                    morph
+                        .reach(match primitive {
+                            Primitive::Shadow(shadow) => shadow
+                                .bounds
+                                .dilate(ScaledPixels(3.0 * shadow.blur_radius.0)),
+                            _ => *primitive.bounds(),
+                        })
+                        .intersect(&primitive.content_mask().bounds),
+                ),
                 _ => None,
             })
             .filter(|bounds| !bounds.is_empty())
@@ -457,6 +518,9 @@ impl Scene {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::Morphed(primitive, morph) => {
+                    self.insert_primitive(PaintOperation::Morphed(primitive.clone(), morph.clone()))
+                }
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
                 PaintOperation::LiveLayer(layer) => self.insert_live_layer(layer.clone()),
@@ -520,6 +584,24 @@ impl Scene {
         self.filter_boundaries
             .sort_by_key(|boundary| (boundary.order, !boundary.is_start));
         let now = animation_time_ms();
+        for quad in &mut self.quads {
+            if quad.padding != 0
+                && !self.box_morphs[quad.padding as usize - 1]
+                    .timing
+                    .is_active(now)
+            {
+                quad.padding = 0;
+            }
+        }
+        for shadow in &mut self.shadows {
+            if shadow.padding != 0
+                && !self.box_morphs[shadow.padding as usize - 1]
+                    .timing
+                    .is_active(now)
+            {
+                shadow.padding = 0;
+            }
+        }
         let mut pending_starts = SmallVec::<[usize; 4]>::new();
         let mut removed_orders = FxHashSet::default();
         for (index, boundary) in self.filter_boundaries.iter().enumerate() {
@@ -548,7 +630,10 @@ impl Scene {
             let commands = std::mem::take(&mut self.render_plan.commands);
             self.render_plan = ScenePlan::build(self, commands);
         }
-        self.has_animations = !self.live_layers.is_empty()
+        self.live_box_morphs = self.quads.iter().any(|quad| quad.padding != 0)
+            || self.shadows.iter().any(|shadow| shadow.padding != 0);
+        self.has_animations = self.live_box_morphs
+            || !self.live_layers.is_empty()
             || self
                 .monochrome_sprites
                 .iter()
@@ -574,6 +659,67 @@ impl Scene {
     /// Whether any primitive carries an animated motion (set by `finish`).
     pub fn has_animations(&self) -> bool {
         self.has_animations
+    }
+
+    /// Whether any drawn quad or shadow still carries a morph id.
+    pub fn has_live_box_morphs(&self) -> bool {
+        self.live_box_morphs
+    }
+
+    /// Samples a quad and removes its CPU-only morph id before upload.
+    pub fn sampled_quad(&self, quad: &Quad, now_ms: u32) -> Quad {
+        let mut quad = *quad;
+        if quad.padding != 0 {
+            (quad.bounds, quad.corner_radii) = self.box_morphs[quad.padding as usize - 1].sample(
+                quad.bounds,
+                quad.corner_radii,
+                now_ms,
+            );
+            quad.padding = 0;
+        }
+        quad
+    }
+
+    /// Samples a shadow and its element geometry before upload.
+    pub fn sampled_shadow(&self, shadow: &Shadow, now_ms: u32) -> Shadow {
+        let mut shadow = *shadow;
+        if shadow.padding != 0 {
+            let morph = &self.box_morphs[shadow.padding as usize - 1];
+            (shadow.bounds, shadow.corner_radii) =
+                morph.sample(shadow.bounds, shadow.corner_radii, now_ms);
+            (shadow.element_bounds, shadow.element_corner_radii) =
+                morph.sample(shadow.element_bounds, shadow.element_corner_radii, now_ms);
+            shadow.padding = 0;
+        }
+        shadow
+    }
+
+    /// Painted reach of a quad, including its morph sweep and content mask.
+    pub fn quad_reach(&self, index: usize) -> Bounds<ScaledPixels> {
+        let quad = &self.quads[index];
+        if quad.padding == 0 {
+            quad.painted_bounds()
+        } else {
+            self.box_morphs[quad.padding as usize - 1]
+                .reach(quad.bounds)
+                .intersect(&quad.content_mask.bounds)
+        }
+    }
+
+    /// Painted reach of a shadow, including its morph sweep, blur and content mask.
+    pub fn shadow_reach(&self, index: usize) -> Bounds<ScaledPixels> {
+        let shadow = &self.shadows[index];
+        if shadow.padding == 0 {
+            shadow.painted_bounds()
+        } else {
+            self.box_morphs[shadow.padding as usize - 1]
+                .reach(
+                    shadow
+                        .bounds
+                        .dilate(ScaledPixels(3.0 * shadow.blur_radius.0)),
+                )
+                .intersect(&shadow.content_mask.bounds)
+        }
     }
 
     /// Whether any primitive is drawn strictly between two draw orders (a group's markers).
@@ -618,7 +764,8 @@ impl Scene {
                 self.backdrop_filters
                     .iter()
                     .filter_map(|filter| filter.appear.as_ref().map(|appear| &appear.motion)),
-            );
+            )
+            .chain(self.box_morphs.iter().map(|morph| &morph.timing));
         for motion in motions.filter(|motion| motion.is_active(now_ms)) {
             let delay = motion.start_ms.wrapping_sub(now_ms);
             if delay != 0 && delay < 1 << 31 {
@@ -642,20 +789,24 @@ impl Scene {
     }
 
     pub(crate) fn retained_changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
-        self.monochrome_sprites
+        self.box_morphs
             .iter()
-            .map(|sprite| &sprite.frames)
-            .chain(self.polychrome_sprites.iter().map(|sprite| &sprite.frames))
-            .any(|frames| {
-                frames.turn_period_ms != 0
-                    || (frames.frame_count > 1
-                        && a_ms.wrapping_sub(frames.start_ms) % frames.period_ms
-                            * frames.frame_count
-                            / frames.period_ms
-                            != b_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+            .any(|morph| morph.changes_between(a_ms, b_ms))
+            || self
+                .monochrome_sprites
+                .iter()
+                .map(|sprite| &sprite.frames)
+                .chain(self.polychrome_sprites.iter().map(|sprite| &sprite.frames))
+                .any(|frames| {
+                    frames.turn_period_ms != 0
+                        || (frames.frame_count > 1
+                            && a_ms.wrapping_sub(frames.start_ms) % frames.period_ms
                                 * frames.frame_count
-                                / frames.period_ms)
-            })
+                                / frames.period_ms
+                                != b_ms.wrapping_sub(frames.start_ms) % frames.period_ms
+                                    * frames.frame_count
+                                    / frames.period_ms)
+                })
             || self
                 .filter_boundaries
                 .iter()
@@ -821,11 +972,19 @@ pub(crate) enum PrimitiveKind {
     FilterBoundaryEnd,
 }
 
-pub(crate) enum PaintOperation {
+#[expect(missing_docs)]
+pub enum PaintOperation {
+    Morphed(Primitive, Arc<BoxMorph>),
     LiveLayer(LiveLayer),
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+}
+
+impl<T: Into<Primitive>> From<T> for PaintOperation {
+    fn from(primitive: T) -> Self {
+        Self::Primitive(primitive.into())
+    }
 }
 
 #[derive(Clone)]
@@ -1251,6 +1410,7 @@ pub struct Quad {
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
     pub corner_smoothing: f32,
+    /// CPU-only box morph id (index + 1); zeroed before GPU upload.
     pub padding: u32,
 }
 
@@ -1315,6 +1475,7 @@ pub struct Shadow {
     pub corner_smoothing: f32,
     /// A drop shadow clipped to outside the element (CSS box-shadow semantics).
     pub clip_outside: ShaderBool,
+    /// CPU-only box morph id (index + 1); zeroed before GPU upload.
     pub padding: u32,
 }
 

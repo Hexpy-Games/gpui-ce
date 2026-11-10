@@ -58,7 +58,9 @@ impl DirectXRenderer {
             return Ok(false);
         }
         if self.uploaded_generation != Some(generation) {
-            self.upload_scene_buffers(scene)?;
+            self.upload_scene_buffers(scene, false)?;
+        } else if scene.has_live_box_morphs() {
+            self.upload_scene_buffers(scene, true)?;
         }
         self.upload_globals()?;
 

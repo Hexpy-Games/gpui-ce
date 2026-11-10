@@ -1071,6 +1071,97 @@ mod tests {
 
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
     #[test]
+    fn box_morph_matches_plain_geometry() -> anyhow::Result<()> {
+        use gpui::PlatformHeadlessRenderer;
+
+        let viewport = test_bounds(0.0, 0.0, 128.0, 112.0);
+        let bounds = test_bounds(40.0, 32.0, 64.0, 56.0);
+        let start = gpui::animation_time_ms();
+        let morph = std::sync::Arc::new(gpui::BoxMorph {
+            delta: gpui::Edges {
+                left: ScaledPixels(-24.0),
+                top: ScaledPixels(-16.0),
+                right: ScaledPixels(-40.0),
+                bottom: ScaledPixels(-32.0),
+            },
+            radii_delta: gpui::Corners::all(ScaledPixels(-8.0)),
+            timing: gpui::LayerMotion {
+                start_ms: start,
+                duration_ms: 1000,
+                easing: gpui::MotionEasing::linear(&[(0.0, 0.0), (1.0, 1.0)]),
+                ..gpui::LayerMotion::NONE
+            },
+        });
+        let quad = Quad {
+            corner_radii: gpui::Corners::all(ScaledPixels(12.0)),
+            border_widths: gpui::Edges::all(ScaledPixels(3.0)),
+            border_color: red().into(),
+            ..test_quad(bounds, viewport, white())
+        };
+        let shadow = gpui::Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(3.0),
+            bounds: (bounds + gpui::point(ScaledPixels(4.0), ScaledPixels(3.0)))
+                .dilate(ScaledPixels(2.0)),
+            corner_radii: quad.corner_radii,
+            content_mask: quad.content_mask,
+            color: gpui::black().opacity(0.5).into(),
+            element_bounds: bounds,
+            element_corner_radii: quad.corner_radii,
+            inset: false.into(),
+            corner_smoothing: 0.0,
+            clip_outside: true.into(),
+            padding: 0,
+        };
+        let mut morphed = Scene::default();
+        morphed.insert_primitive(gpui::PaintOperation::Morphed(shadow.into(), morph.clone()));
+        morphed.insert_primitive(gpui::PaintOperation::Morphed(quad.into(), morph));
+        morphed.finish();
+
+        let middle = test_bounds(28.0, 24.0, 56.0, 48.0);
+        let radii = gpui::Corners::all(ScaledPixels(8.0));
+        let mut reference = Scene::default();
+        reference.insert_primitive(gpui::Shadow {
+            bounds: (middle + gpui::point(ScaledPixels(4.0), ScaledPixels(3.0)))
+                .dilate(ScaledPixels(2.0)),
+            corner_radii: radii,
+            element_bounds: middle,
+            element_corner_radii: radii,
+            ..shadow
+        });
+        reference.insert_primitive(Quad {
+            bounds: middle,
+            corner_radii: radii,
+            ..quad
+        });
+        reference.finish();
+
+        let target = gpui::size(DevicePixels(128), DevicePixels(112));
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        renderer.set_animation_time_ms(start.wrapping_add(500));
+        let actual = renderer.render_scene_to_image(&morphed, target)?;
+        let expected = renderer.render_scene_to_image(&reference, target)?;
+        for (x, y, expected) in expected.enumerate_pixels() {
+            let actual = actual.get_pixel(x, y);
+            let tolerance = if expected[0] > 0 && expected[0] < 255 {
+                2
+            } else {
+                0
+            };
+            assert!(
+                actual
+                    .0
+                    .iter()
+                    .zip(expected.0)
+                    .all(|(a, b)| a.abs_diff(b) <= tolerance),
+                "pixel ({x}, {y}): {actual:?}, expected {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[test]
     fn opacity_groups_preserve_overlap_alpha_and_deep_nesting() -> anyhow::Result<()> {
         let bounds = test_bounds(0.0, 0.0, 16.0, 8.0);
         let target_size = gpui::size(DevicePixels(16), DevicePixels(8));

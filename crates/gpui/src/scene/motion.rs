@@ -49,6 +49,21 @@ impl MotionEasing {
             len: len as u8,
         }
     }
+
+    /// Conservative range of eased progress, including overshoot.
+    pub(crate) fn range(&self) -> (f32, f32) {
+        match self {
+            MotionEasing::CubicBezier([_, y1, _, y2]) => {
+                (0.0f32.min(*y1).min(*y2), 1.0f32.max(*y1).max(*y2))
+            }
+            MotionEasing::Steps(_) => (0.0, 1.0),
+            MotionEasing::Linear { points, len } => points[..usize::from(*len)]
+                .iter()
+                .fold((0.0f32, 1.0f32), |(low, high), &(_, y)| {
+                    (low.min(y), high.max(y))
+                }),
+        }
+    }
 }
 
 /// A layout change animated without running layout on each frame.
@@ -295,17 +310,7 @@ impl LayerMotion {
         scale_factor: f32,
         motion_bounds: Bounds<ScaledPixels>,
     ) -> Bounds<ScaledPixels> {
-        let (low, high) = match self.easing {
-            MotionEasing::CubicBezier([_, y1, _, y2]) => {
-                (0.0f32.min(y1).min(y2), 1.0f32.max(y1).max(y2))
-            }
-            MotionEasing::Steps(_) => (0.0, 1.0),
-            MotionEasing::Linear { points, len } => points[..usize::from(len)]
-                .iter()
-                .fold((0.0f32, 1.0f32), |(low, high), &(_, y)| {
-                    (low.min(y), high.max(y))
-                }),
-        };
+        let (low, high) = self.easing.range();
         let mut samples = vec![0.0, 1.0, low, high];
         if self.rotation.0 != self.rotation.1 {
             let delta = self.rotation.1 - self.rotation.0;
@@ -353,6 +358,68 @@ impl LayerMotion {
                 })
                 .reduce(|a, b| a.union(&b))
                 .unwrap()
+            })
+            .reduce(|a, b| a.union(&b))
+            .unwrap()
+    }
+}
+
+/// Geometry deltas for a box painted at its final layout, sampled at presentation time.
+#[derive(Clone, Debug)]
+pub struct BoxMorph {
+    /// Old minus final bounds at each edge.
+    pub delta: Edges<ScaledPixels>,
+    /// Old minus final corner radii.
+    pub radii_delta: Corners<ScaledPixels>,
+    /// Start, duration and easing of this once-only morph.
+    pub timing: LayerMotion,
+}
+
+impl BoxMorph {
+    pub(crate) fn sample(
+        &self,
+        bounds: Bounds<ScaledPixels>,
+        radii: Corners<ScaledPixels>,
+        now_ms: u32,
+    ) -> (Bounds<ScaledPixels>, Corners<ScaledPixels>) {
+        let remaining = 1.0 - self.timing.progress(now_ms);
+        if remaining == 0.0 {
+            return (bounds, radii);
+        }
+        let bounds = Bounds::from_corners(
+            bounds.origin + point(self.delta.left, self.delta.top) * remaining,
+            bounds.bottom_right() + point(self.delta.right, self.delta.bottom) * remaining,
+        );
+        let radii = Corners {
+            top_left: (radii.top_left + self.radii_delta.top_left * remaining)
+                .max(ScaledPixels(0.0)),
+            top_right: (radii.top_right + self.radii_delta.top_right * remaining)
+                .max(ScaledPixels(0.0)),
+            bottom_right: (radii.bottom_right + self.radii_delta.bottom_right * remaining)
+                .max(ScaledPixels(0.0)),
+            bottom_left: (radii.bottom_left + self.radii_delta.bottom_left * remaining)
+                .max(ScaledPixels(0.0)),
+        }
+        .clamp_radii_for_quad_size(bounds.size);
+        (bounds, radii)
+    }
+
+    /// Whether eased progress differs between two presentation times.
+    pub fn changes_between(&self, a_ms: u32, b_ms: u32) -> bool {
+        self.timing.progress(a_ms) != self.timing.progress(b_ms)
+    }
+
+    /// Conservative painted reach over the easing curve, before applying the content mask.
+    pub fn reach(&self, painted_bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let (low, high) = self.timing.easing.range();
+        [0.0, 1.0, low, high]
+            .into_iter()
+            .map(|p| {
+                Bounds::from_corners(
+                    painted_bounds.origin + point(self.delta.left, self.delta.top) * (1.0 - p),
+                    painted_bounds.bottom_right()
+                        + point(self.delta.right, self.delta.bottom) * (1.0 - p),
+                )
             })
             .reduce(|a, b| a.union(&b))
             .unwrap()

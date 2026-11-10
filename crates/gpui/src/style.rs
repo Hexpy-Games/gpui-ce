@@ -1036,82 +1036,92 @@ impl Style {
 
         let current_color = self.text.color.unwrap_or_else(|| window.text_style().color);
 
-        window.paint_drop_shadows(bounds, corner_radii, corner_smoothing, &self.box_shadow);
+        let box_morph = window.box_morph.clone();
+        window.with_box_morph(box_morph.clone(), |window| {
+            window.paint_drop_shadows(bounds, corner_radii, corner_smoothing, &self.box_shadow);
 
-        if let Some(ring) = self.ring.outer_quad(bounds, corner_radii, current_color) {
-            window.paint_quad(ring.corner_smoothing(corner_smoothing));
-        }
+            if let Some(ring) = self.ring.outer_quad(bounds, corner_radii, current_color) {
+                window.paint_quad(ring.corner_smoothing(corner_smoothing));
+            }
 
-        // Blur the content behind this element before its (typically translucent) background
-        // is painted on top, so the background tints the frosted backdrop (CSS `backdrop-filter`).
-        if !self.backdrop_filter.is_empty() {
-            window.paint_backdrop_filter(
-                bounds,
-                corner_radii,
-                corner_smoothing,
-                &self.backdrop_filter,
-            );
-        }
-
-        // The element's own box — background, inset shadows, children, and border — painted as a
-        // unit. A `filter` (CSS `filter`) wraps this whole unit so the renderer blurs the element
-        // and its children together as one group; without a filter it paints directly.
-        let paint_box = |window: &mut Window, cx: &mut App| {
-            let background_color = self.background.as_ref().and_then(Fill::color);
-            if background_color.is_some_and(|color| !color.is_transparent()) {
-                let background_color = background_color.unwrap_or_default();
-                window.paint_quad(
-                    PaintQuad::new(bounds)
-                        .corner_radii(corner_radii)
-                        .background(background_color)
-                        .border_color(background_color.opacity(0.))
-                        .border_style(self.border_style)
-                        .corner_smoothing(corner_smoothing),
+            // Blur the content behind this element before its (typically translucent) background
+            // is painted on top, so the background tints the frosted backdrop (CSS `backdrop-filter`).
+            if !self.backdrop_filter.is_empty() {
+                window.paint_backdrop_filter(
+                    bounds,
+                    corner_radii,
+                    corner_smoothing,
+                    &self.backdrop_filter,
                 );
             }
 
-            if let Some(ring) = self.inset_ring.inset_shadow(current_color) {
+            // The element's own box — background, inset shadows, children, and border — painted as a
+            // unit. A `filter` (CSS `filter`) wraps this whole unit so the renderer blurs the element
+            // and its children together as one group; without a filter it paints directly.
+            let paint_box = |window: &mut Window, cx: &mut App| {
+                let background_color = self.background.as_ref().and_then(Fill::color);
+                if background_color.is_some_and(|color| !color.is_transparent()) {
+                    let background_color = background_color.unwrap_or_default();
+                    window.paint_quad(
+                        PaintQuad::new(bounds)
+                            .corner_radii(corner_radii)
+                            .background(background_color)
+                            .border_color(background_color.opacity(0.))
+                            .border_style(self.border_style)
+                            .corner_smoothing(corner_smoothing),
+                    );
+                }
+
+                if let Some(ring) = self.inset_ring.inset_shadow(current_color) {
+                    window.paint_inset_shadows(
+                        bounds,
+                        corner_radii,
+                        corner_smoothing,
+                        std::slice::from_ref(&ring),
+                    );
+                }
                 window.paint_inset_shadows(
                     bounds,
                     corner_radii,
                     corner_smoothing,
-                    std::slice::from_ref(&ring),
+                    &self.box_shadow,
+                );
+
+                window.with_box_morph(None, |window| continuation(window, cx));
+
+                window.with_box_morph(box_morph, |window| {
+                    if self.is_border_visible() {
+                        let border_widths = self.border_widths.to_pixels(rem_size);
+                        let border_color = self.border_color.unwrap_or_default();
+                        window.paint_quad(
+                            PaintQuad::new(bounds)
+                                .corner_radii(corner_radii)
+                                .background(border_color.opacity(0.))
+                                .border_widths(border_widths)
+                                .border_color(border_color)
+                                .border_style(self.border_style)
+                                .corner_smoothing(corner_smoothing)
+                                .border_dashed_length(self.border_dashed_length)
+                                .border_dashed_gap(self.border_dashed_gap),
+                        );
+                    }
+                });
+            };
+
+            if self.filter.is_empty() {
+                paint_box(window, cx);
+            } else {
+                window.with_filter_layer(
+                    bounds,
+                    corner_radii,
+                    corner_smoothing,
+                    &self.filter,
+                    |window| {
+                        paint_box(window, cx);
+                    },
                 );
             }
-            window.paint_inset_shadows(bounds, corner_radii, corner_smoothing, &self.box_shadow);
-
-            continuation(window, cx);
-
-            if self.is_border_visible() {
-                let border_widths = self.border_widths.to_pixels(rem_size);
-                let border_color = self.border_color.unwrap_or_default();
-                window.paint_quad(
-                    PaintQuad::new(bounds)
-                        .corner_radii(corner_radii)
-                        .background(border_color.opacity(0.))
-                        .border_widths(border_widths)
-                        .border_color(border_color)
-                        .border_style(self.border_style)
-                        .corner_smoothing(corner_smoothing)
-                        .border_dashed_length(self.border_dashed_length)
-                        .border_dashed_gap(self.border_dashed_gap),
-                );
-            }
-        };
-
-        if self.filter.is_empty() {
-            paint_box(window, cx);
-        } else {
-            window.with_filter_layer(
-                bounds,
-                corner_radii,
-                corner_smoothing,
-                &self.filter,
-                |window| {
-                    paint_box(window, cx);
-                },
-            );
-        }
+        });
 
         #[cfg(debug_assertions)]
         if self.debug_below {

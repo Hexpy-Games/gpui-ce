@@ -763,7 +763,7 @@ impl DirectXRenderer {
             _ => [0.0f32; 4],
         })?;
 
-        self.upload_scene_buffers(scene)?;
+        self.upload_scene_buffers(scene, false)?;
 
         let use_offscreen = scene.requires_offscreen_rendering() || scene.has_animations();
         let mut planned = *scene.render_plan().requirements();
@@ -1362,7 +1362,7 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
+    fn upload_scene_buffers(&mut self, scene: &Scene, only_box_morphs: bool) -> Result<()> {
         let devices = self.devices.as_ref().context("devices missing")?;
 
         if !scene.shadows.is_empty() {
@@ -1370,6 +1370,13 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.shadows,
+                |shadows| {
+                    if scene.has_live_box_morphs() {
+                        for shadow in shadows {
+                            *shadow = scene.sampled_shadow(shadow, self.animation_time_ms);
+                        }
+                    }
+                },
             )?;
         }
 
@@ -1378,7 +1385,18 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.quads,
+                |quads| {
+                    if scene.has_live_box_morphs() {
+                        for quad in quads {
+                            *quad = scene.sampled_quad(quad, self.animation_time_ms);
+                        }
+                    }
+                },
             )?;
+        }
+
+        if only_box_morphs {
+            return Ok(());
         }
 
         if !scene.underlines.is_empty() {
@@ -1386,6 +1404,7 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.underlines,
+                |_| {},
             )?;
         }
 
@@ -1394,6 +1413,7 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.monochrome_sprites,
+                |_| {},
             )?;
         }
 
@@ -1402,6 +1422,7 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.subpixel_sprites,
+                |_| {},
             )?;
         }
 
@@ -1410,6 +1431,7 @@ impl DirectXRenderer {
                 &devices.device,
                 &devices.device_context,
                 &scene.polychrome_sprites,
+                |_| {},
             )?;
         }
 
@@ -1500,6 +1522,7 @@ impl DirectXRenderer {
             &devices.device,
             &devices.device_context,
             &self.path_rasterization_vertices,
+            |_| {},
         )?;
         self.pipelines.path_rasterization_pipeline.draw_vertices(
             &self.frame_bindings()?,
@@ -1573,6 +1596,7 @@ impl DirectXRenderer {
             &devices.device,
             &devices.device_context,
             &self.path_sprites,
+            |_| {},
         )?;
         let instances = InstanceRange::from_start(sprite_count)
             .context("path sprite count exceeds the D3D11 instance limit")?;
@@ -2623,6 +2647,7 @@ impl<T> PipelineState<T> {
         device: &ID3D11Device,
         device_context: &ID3D11DeviceContext,
         data: &[T],
+        patch: impl FnOnce(&mut [T]),
     ) -> Result<()> {
         if self.buffer_size < data.len() {
             let element_size = std::mem::size_of::<T>();
@@ -2661,7 +2686,17 @@ impl<T> PipelineState<T> {
             self.view = view;
             self.buffer_size = new_buffer_size;
         }
-        update_buffer(device_context, &self.buffer, data)
+        unsafe {
+            let mut dest = std::mem::zeroed();
+            device_context.Map(&self.buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut dest))?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dest.pData.cast::<T>(), data.len());
+            patch(std::slice::from_raw_parts_mut(
+                dest.pData.cast::<T>(),
+                data.len(),
+            ));
+            device_context.Unmap(&self.buffer, 0);
+        }
+        Ok(())
     }
 
     /// Draws `instances` of the uploaded frame data as the pipeline's fixed rectangle,

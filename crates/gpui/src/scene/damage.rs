@@ -89,6 +89,18 @@ pub(super) fn change_rect(previous: &Scene, scene: &Scene) -> Option<Bounds<Scal
                 }
                 PaintOperation::Primitive(Primitive::Surface(_)) => return None,
                 PaintOperation::Primitive(primitive) => reach = primitive.painted_bounds(),
+                PaintOperation::Morphed(primitive, morph) => {
+                    reach = Some(
+                        morph
+                            .reach(match primitive {
+                                Primitive::Shadow(shadow) => shadow
+                                    .bounds
+                                    .dilate(ScaledPixels(3.0 * shadow.blur_radius.0)),
+                                _ => *primitive.bounds(),
+                            })
+                            .intersect(&primitive.content_mask().bounds),
+                    )
+                }
                 PaintOperation::LiveLayer(layer) => {
                     reach = Some(layer.bounds.intersect(&layer.content_mask.bounds))
                 }
@@ -276,6 +288,27 @@ fn operation_hash(operation: &PaintOperation) -> u64 {
                 Primitive::Surface(_) => {}
             }
         }
+        PaintOperation::Morphed(primitive, morph) => {
+            std::mem::discriminant(primitive).hash(&mut hash);
+            match primitive {
+                Primitive::Quad(value) => {
+                    let mut value = *value;
+                    value.order = 0;
+                    value.padding = 0;
+                    bytes!(value);
+                }
+                Primitive::Shadow(value) => {
+                    let mut value = *value;
+                    value.order = 0;
+                    value.padding = 0;
+                    bytes!(value);
+                }
+                _ => unreachable!("only quads and shadows carry box morphs"),
+            }
+            motion!(morph.timing);
+            bytes!(morph.delta);
+            bytes!(morph.radii_delta);
+        }
         PaintOperation::StartLayer(bounds) => bytes!(*bounds),
         PaintOperation::EndLayer => {}
         PaintOperation::LiveLayer(layer) => {
@@ -293,18 +326,13 @@ fn hits(bounds: Bounds<ScaledPixels>, rect: &Bounds<ScaledPixels>) -> bool {
 }
 
 /// The sub-range of `range` from its first to its last member painting inside `rect`.
-fn trim<T: PaintedBounds>(
+fn trim(
     range: &Range<usize>,
-    items: &[T],
+    reach: impl Fn(usize) -> Bounds<ScaledPixels>,
     rect: &Bounds<ScaledPixels>,
 ) -> Option<Range<usize>> {
-    let first = range
-        .clone()
-        .find(|&i| hits(items[i].painted_bounds(), rect))?;
-    let last = range
-        .clone()
-        .rev()
-        .find(|&i| hits(items[i].painted_bounds(), rect))?;
+    let first = range.clone().find(|&i| hits(reach(i), rect))?;
+    let last = range.clone().rev().find(|&i| hits(reach(i), rect))?;
     Some(first..last + 1)
 }
 
@@ -342,6 +370,22 @@ fn changed_area(
         .filter(|sprite| sprite.frames.is_animated())
     {
         changed.push((sprite.painted_bounds(), sprite.order));
+    }
+    for (index, quad) in scene
+        .quads
+        .iter()
+        .enumerate()
+        .filter(|(_, quad)| quad.padding != 0)
+    {
+        changed.push((scene.quad_reach(index), quad.order));
+    }
+    for (index, shadow) in scene
+        .shadows
+        .iter()
+        .enumerate()
+        .filter(|(_, shadow)| shadow.padding != 0)
+    {
+        changed.push((scene.shadow_reach(index), shadow.order));
     }
     for boundary in &scene.filter_boundaries {
         if boundary.is_start && boundary.motion.is_animated() {
@@ -454,45 +498,55 @@ fn select_commands(
                 }
                 let kept = match batch {
                     PrimitiveBatch::Shadows { range, smoothed } => {
-                        trim(range, &scene.shadows, &rect).map(|range| PrimitiveBatch::Shadows {
-                            range,
-                            smoothed: *smoothed,
+                        trim(range, |i| scene.shadow_reach(i), &rect).map(|range| {
+                            PrimitiveBatch::Shadows {
+                                range,
+                                smoothed: *smoothed,
+                            }
                         })
                     }
-                    PrimitiveBatch::Quads { range, smoothed } => trim(range, &scene.quads, &rect)
-                        .map(|range| PrimitiveBatch::Quads {
-                            range,
-                            smoothed: *smoothed,
-                        }),
+                    PrimitiveBatch::Quads { range, smoothed } => {
+                        trim(range, |i| scene.quad_reach(i), &rect).map(|range| {
+                            PrimitiveBatch::Quads {
+                                range,
+                                smoothed: *smoothed,
+                            }
+                        })
+                    }
                     PrimitiveBatch::Underlines(range) => {
-                        trim(range, &scene.underlines, &rect).map(PrimitiveBatch::Underlines)
+                        trim(range, |i| scene.underlines[i].painted_bounds(), &rect)
+                            .map(PrimitiveBatch::Underlines)
                     }
-                    PrimitiveBatch::MonochromeSprites { texture_id, range } => {
-                        trim(range, &scene.monochrome_sprites, &rect).map(|range| {
-                            PrimitiveBatch::MonochromeSprites {
-                                texture_id: *texture_id,
-                                range,
-                            }
-                        })
-                    }
+                    PrimitiveBatch::MonochromeSprites { texture_id, range } => trim(
+                        range,
+                        |i| scene.monochrome_sprites[i].painted_bounds(),
+                        &rect,
+                    )
+                    .map(|range| PrimitiveBatch::MonochromeSprites {
+                        texture_id: *texture_id,
+                        range,
+                    }),
                     PrimitiveBatch::SubpixelSprites { texture_id, range } => {
-                        trim(range, &scene.subpixel_sprites, &rect).map(|range| {
-                            PrimitiveBatch::SubpixelSprites {
+                        trim(range, |i| scene.subpixel_sprites[i].painted_bounds(), &rect).map(
+                            |range| PrimitiveBatch::SubpixelSprites {
                                 texture_id: *texture_id,
                                 range,
-                            }
-                        })
+                            },
+                        )
                     }
                     PrimitiveBatch::PolychromeSprites {
                         texture_id,
                         range,
                         smoothed,
-                    } => trim(range, &scene.polychrome_sprites, &rect).map(|range| {
-                        PrimitiveBatch::PolychromeSprites {
-                            texture_id: *texture_id,
-                            range,
-                            smoothed: *smoothed,
-                        }
+                    } => trim(
+                        range,
+                        |i| scene.polychrome_sprites[i].painted_bounds(),
+                        &rect,
+                    )
+                    .map(|range| PrimitiveBatch::PolychromeSprites {
+                        texture_id: *texture_id,
+                        range,
+                        smoothed: *smoothed,
                     }),
                     PrimitiveBatch::Paths { range, .. } => range
                         .clone()
@@ -1152,6 +1206,98 @@ mod tests {
             motion.sample(0, 1.0, motion_bounds)
         );
         assert!(pending.is_active(500));
+    }
+
+    #[test]
+    fn box_morph_samples_holds_and_damages() {
+        let now = crate::animation_time_ms();
+        let start = now.wrapping_add(1000);
+        let old = rect(20.0, 30.0, 60.0, 40.0);
+        let new = rect(80.0, 70.0, 100.0, 80.0);
+        let morph = std::sync::Arc::new(crate::BoxMorph {
+            delta: crate::Edges {
+                left: ScaledPixels(-60.0),
+                top: ScaledPixels(-40.0),
+                right: ScaledPixels(-100.0),
+                bottom: ScaledPixels(-80.0),
+            },
+            radii_delta: crate::Corners::all(ScaledPixels(-12.0)),
+            timing: LayerMotion {
+                start_ms: start,
+                duration_ms: 1000,
+                easing: MotionEasing::linear(&[(0.0, 0.0), (1.0, 1.0)]),
+                ..LayerMotion::NONE
+            },
+        });
+        let quad = Quad {
+            bounds: new,
+            corner_radii: crate::Corners::all(ScaledPixels(16.0)),
+            content_mask: mask(),
+            ..Default::default()
+        };
+        let shadow = crate::Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(3.0),
+            bounds: new.dilate(ScaledPixels(2.0)),
+            corner_radii: quad.corner_radii,
+            content_mask: mask(),
+            color: crate::black().into(),
+            element_bounds: new,
+            element_corner_radii: quad.corner_radii,
+            inset: false.into(),
+            corner_smoothing: 0.0,
+            clip_outside: true.into(),
+            padding: 0,
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintOperation::Morphed(shadow.into(), morph.clone()));
+        scene.insert_primitive(PaintOperation::Morphed(quad.into(), morph));
+        scene.finish();
+        assert_eq!(scene.box_morphs.len(), 1);
+        assert!(scene.has_animations());
+
+        let middle = scene.sampled_quad(&scene.quads[0], start.wrapping_add(500));
+        assert_eq!(middle.bounds, rect(50.0, 50.0, 80.0, 60.0));
+        assert_eq!(middle.corner_radii, crate::Corners::all(ScaledPixels(10.0)));
+        assert_eq!(middle.padding, 0);
+        let middle_shadow = scene.sampled_shadow(&scene.shadows[0], start.wrapping_add(500));
+        assert_eq!(
+            middle_shadow.bounds,
+            middle.bounds.dilate(ScaledPixels(2.0))
+        );
+        assert_eq!(middle_shadow.element_bounds, middle.bounds);
+        assert_eq!(middle_shadow.corner_radii, middle.corner_radii);
+        assert_eq!(middle_shadow.element_corner_radii, middle.corner_radii);
+        assert_eq!(middle_shadow.padding, 0);
+
+        let pending = scene.sampled_quad(&scene.quads[0], now);
+        assert_eq!(pending.bounds, old);
+        assert_eq!(pending.corner_radii, crate::Corners::all(ScaledPixels(4.0)));
+        let demand = scene.animation_demand(now);
+        assert!(!demand.animating);
+        assert_eq!(demand.next_start_ms, Some(start));
+        assert!(scene.animation_demand(start.wrapping_add(1)).animating);
+
+        let DamagePlan::Partial(plan) = scene.damage_plan() else {
+            panic!("box morph must have a partial damage plan");
+        };
+        let reach = old
+            .union(&new)
+            .dilate(ScaledPixels(2.0 + 3.0 * shadow.blur_radius.0));
+        assert_eq!(plan.rect.union(&reach), plan.rect);
+        assert!(scene.retained_changes_between(start.wrapping_add(100), start.wrapping_add(500)));
+        assert!(
+            !scene.retained_changes_between(start.wrapping_add(1100), start.wrapping_add(1200))
+        );
+        let final_quad = scene.sampled_quad(&scene.quads[0], start.wrapping_add(1000));
+        assert_eq!(final_quad.bounds, quad.bounds);
+        assert_eq!(final_quad.corner_radii, quad.corner_radii);
+
+        scene.box_morphs[0].timing.start_ms = crate::animation_time_ms().wrapping_sub(2000);
+        scene.finish();
+        assert_eq!(scene.quads[0].padding, 0);
+        assert_eq!(scene.shadows[0].padding, 0);
+        assert!(!scene.has_animations());
     }
 
     #[test]
