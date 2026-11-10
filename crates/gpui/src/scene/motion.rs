@@ -179,37 +179,7 @@ impl LayerMotion {
                 y0 + (y1 - y0) * (x - x0) / (x1 - x0)
             }
             MotionEasing::Steps(n) => (x * n as f32).floor() / n as f32,
-            MotionEasing::CubicBezier([x1, y1, x2, y2]) => {
-                let mut t = x;
-                for _ in 0..8 {
-                    let inverse = 1.0 - t;
-                    let position =
-                        3.0 * inverse * inverse * t * x1 + 3.0 * inverse * t * t * x2 + t * t * t;
-                    let derivative = 3.0 * inverse * inverse * x1
-                        + 6.0 * inverse * t * (x2 - x1)
-                        + 3.0 * t * t * (1.0 - x2);
-                    if derivative.abs() < 1e-6 {
-                        let mut low = 0.0;
-                        let mut high = 1.0;
-                        for _ in 0..20 {
-                            t = (low + high) * 0.5;
-                            let inverse = 1.0 - t;
-                            let position = 3.0 * inverse * inverse * t * x1
-                                + 3.0 * inverse * t * t * x2
-                                + t * t * t;
-                            if position < x {
-                                low = t;
-                            } else {
-                                high = t;
-                            }
-                        }
-                        break;
-                    }
-                    t = (t - (position - x) / derivative).clamp(0.0, 1.0);
-                }
-                let inverse = 1.0 - t;
-                3.0 * inverse * inverse * t * y1 + 3.0 * inverse * t * t * y2 + t * t * t
-            }
+            MotionEasing::CubicBezier([x1, y1, x2, y2]) => cubic_bezier(x1, y1, x2, y2, x),
         }
     }
 
@@ -554,4 +524,33 @@ pub struct LiveLayer {
     pub order: super::DrawOrder,
     pub start_ms: u32,
     pub paint: LivePaint,
+}
+
+pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+    let mut t = x;
+    for _ in 0..8 {
+        let inverse = 1.0 - t;
+        let position = 3.0 * inverse * inverse * t * x1 + 3.0 * inverse * t * t * x2 + t * t * t;
+        let derivative =
+            3.0 * inverse * inverse * x1 + 6.0 * inverse * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+        if derivative.abs() < 1e-6 {
+            let mut low = 0.0;
+            let mut high = 1.0;
+            for _ in 0..20 {
+                t = (low + high) * 0.5;
+                let inverse = 1.0 - t;
+                let position =
+                    3.0 * inverse * inverse * t * x1 + 3.0 * inverse * t * t * x2 + t * t * t;
+                if position < x {
+                    low = t;
+                } else {
+                    high = t;
+                }
+            }
+            break;
+        }
+        t = (t - (position - x) / derivative).clamp(0.0, 1.0);
+    }
+    let inverse = 1.0 - t;
+    3.0 * inverse * inverse * t * y1 + 3.0 * inverse * t * t * y2 + t * t * t
 }
