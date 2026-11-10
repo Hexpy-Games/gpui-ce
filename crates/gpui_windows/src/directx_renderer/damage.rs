@@ -37,6 +37,18 @@ impl DirectXRenderer {
         if self.retained_atlas_epoch != self.atlas.removal_epoch() {
             return Ok(false);
         }
+        if plan.rect.is_empty() {
+            let Some(resources) = self.resources.as_ref() else {
+                return Ok(false);
+            };
+            let Some(blur) = resources.blur.as_ref() else {
+                return Ok(false);
+            };
+            let scene_srv = blur.scene.source.clone();
+            let swapchain_rtv = resources.render_target_view.clone();
+            self.dx_blit(&scene_srv, &swapchain_rtv)?;
+            return Ok(true);
+        }
         let Some(scissor) = self.clamped_scissor(plan.rect) else {
             return Ok(false);
         };

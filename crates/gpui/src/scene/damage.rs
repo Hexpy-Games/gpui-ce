@@ -414,6 +414,9 @@ fn changed_area(
         }
     }
     changed.retain(|(bounds, _)| !bounds.is_empty());
+    if changed.is_empty() && seed.is_none() {
+        return Some((Bounds::default(), SmallVec::new()));
+    }
     let mut rect = changed
         .iter()
         .map(|(bounds, _)| *bounds)
@@ -461,6 +464,14 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
     let Some((rect, reblur)) = changed_area(scene, None) else {
         return DamagePlan::Full;
     };
+    if rect.is_empty() {
+        return DamagePlan::Partial(DamageRedraw {
+            rect,
+            commands: Vec::new(),
+            reblur,
+            requirements: ScenePlanRequirements::default(),
+        });
+    }
     select_commands(scene, rect, reblur)
 }
 
@@ -1044,6 +1055,63 @@ mod tests {
         scene.finish();
         assert_eq!(scene.compositor_groups().len(), 1);
         assert_eq!(scene.filter_boundaries.len(), 2);
+    }
+
+    #[test]
+    fn unchanged_scene_plans_no_redraw() {
+        let mut scene = Scene {
+            scale_factor: 1.0,
+            ..Scene::default()
+        };
+        scene.insert_primitive(Quad {
+            bounds: rect(10.0, 10.0, 20.0, 20.0),
+            content_mask: mask(),
+            background: crate::white().into(),
+            ..Default::default()
+        });
+        scene.finish();
+        let DamagePlan::Partial(damage) = scene.damage_plan() else {
+            panic!("expected a partial redraw");
+        };
+        assert!(damage.rect.is_empty());
+        assert!(damage.commands.is_empty());
+
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds: mask().bounds,
+            content_mask: mask(),
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: point(ScaledPixels(10.0), ScaledPixels(10.0)),
+            motion_bounds: Bounds::default(),
+            motion: LayerMotion {
+                duration_ms: 1000,
+                repeat: MotionRepeat::Loop,
+                easing: MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
+                offset: (point(px(0.0), px(0.0)), point(px(40.0), px(0.0))),
+                ..LayerMotion::NONE
+            },
+            is_start: true,
+            inline: false,
+        };
+        scene.insert_primitive(boundary.clone());
+        scene.insert_primitive(Quad {
+            bounds: rect(10.0, 10.0, 20.0, 20.0),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        scene.finish();
+        let DamagePlan::Partial(damage) = scene.damage_plan() else {
+            panic!("expected a partial redraw");
+        };
+        assert!(!damage.rect.is_empty());
     }
 
     #[test]

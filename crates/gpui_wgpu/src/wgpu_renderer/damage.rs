@@ -5,6 +5,7 @@ use gpui::{Bounds, DamagePlan, DamageRedraw, PrimitiveBatch, RenderCommand, Scal
 use gpui_render::blur::ScissorRectangle;
 
 use super::WgpuRenderer;
+use super::filters::FrameUniformRequirements;
 use super::frame::{FrameEncoder, PreparedTargets, ReadbackCopy, submit, uses_blurred_backdrop};
 
 /// Encodes the scene's damage plan over the retained frame into `frame_view`; `None` when this
@@ -23,6 +24,46 @@ pub(super) fn render_damage_to_view(
         || renderer.resources.as_ref()?.scene_color_view.is_none()
     {
         return None;
+    }
+    if plan.rect.is_empty() {
+        if !renderer.ensure_uniform_capacity(FrameUniformRequirements {
+            filter_count: 1,
+            surface_count: 0,
+        }) {
+            return None;
+        }
+        let resources = renderer.resources();
+        let mut encoder =
+            resources
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("gpui_frame"),
+                });
+        renderer.blit_to_frame(
+            &mut encoder,
+            resources.scene_color_view.as_ref()?,
+            frame_view,
+        );
+        if let Some(readback) = readback {
+            encoder.copy_texture_to_buffer(
+                readback.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: readback.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(readback.bytes_per_row),
+                        rows_per_image: Some(readback.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: readback.width,
+                    height: readback.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        resources.finish_frame_uploads();
+        return Some(resources.queue.submit([encoder.finish()]));
     }
     let scissor = damage_scissor(renderer, plan.rect)?;
     if !gpui_render::damage_fits(scissor, renderer.target.viewport_size()) {
