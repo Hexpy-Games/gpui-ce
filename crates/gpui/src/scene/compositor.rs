@@ -132,6 +132,7 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
             || end.is_start
             || !start.motion.is_animated()
             || start.motion.repeat == MotionRepeat::Once
+            || start.motion.clip_radii.is_some()
             || start.motion.visible != (0.0, 1.0)
             || isolated
                 .iter()

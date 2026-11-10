@@ -276,7 +276,8 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         composite_rotation,
         composite_rotation_padding0,
         composite_rotation_padding1,
-        composite_rotation_padding2
+        composite_rotation_padding2,
+        motion_clip
     ),
     render_layout!(crate::path_types::PathSprite, "PathSprite", bounds),
     render_layout!(

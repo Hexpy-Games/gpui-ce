@@ -983,6 +983,94 @@ mod tests {
 
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
     #[test]
+    fn motion_rounded_clip_follows_source_offset() -> anyhow::Result<()> {
+        use gpui::PlatformHeadlessRenderer;
+
+        let viewport = test_bounds(0.0, 0.0, 96.0, 80.0);
+        let motion_bounds = test_bounds(12.0, 14.0, 48.0, 40.0);
+        let now = 500;
+        let motion = gpui::LayerMotion {
+            duration_ms: 1000,
+            easing: gpui::MotionEasing::linear(&[(0.0, 0.0), (1.0, 1.0)]),
+            offset: (
+                gpui::point(gpui::px(8.0), gpui::px(4.0)),
+                gpui::point(gpui::px(16.0), gpui::px(12.0)),
+            ),
+            clip: Some((
+                gpui::Edges {
+                    right: gpui::px(20.0),
+                    ..Default::default()
+                },
+                gpui::Edges::default(),
+            )),
+            clip_radii: Some((gpui::Corners::default(), gpui::Corners::all(gpui::px(16.0)))),
+            ..gpui::LayerMotion::NONE
+        };
+        let boundary = gpui::FilterBoundary {
+            order: 0,
+            bounds: viewport,
+            content_mask: gpui::ContentMask {
+                bounds: viewport,
+                ..Default::default()
+            },
+            corner_radii: gpui::Corners::default(),
+            corner_smoothing: 0.0,
+            filters: smallvec![],
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: motion_bounds.center(),
+            motion,
+            motion_bounds,
+            is_start: true,
+            inline: false,
+        };
+        let mut grouped = Scene::default();
+        grouped.scale_factor = 1.0;
+        grouped.insert_primitive(boundary.clone());
+        grouped.insert_primitive(test_quad(motion_bounds, viewport, white()));
+        grouped.insert_primitive(gpui::FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        grouped.finish();
+
+        let sample = motion.sample(now, 1.0, motion_bounds);
+        let (mut clip, radii) = sample.clip.unwrap();
+        clip.origin += sample.offset;
+        let mut reference = Scene::default();
+        reference.insert_primitive(Quad {
+            corner_radii: radii,
+            border_color: gpui::transparent_black().into(),
+            ..test_quad(clip, viewport, white())
+        });
+        reference.finish();
+
+        let target_size = gpui::size(DevicePixels(96), DevicePixels(80));
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        renderer.set_animation_time_ms(now);
+        let actual = renderer.render_scene_to_image(&grouped, target_size)?;
+        let expected = renderer.render_scene_to_image(&reference, target_size)?;
+        for (x, y, expected) in expected.enumerate_pixels() {
+            let actual = actual.get_pixel(x, y);
+            let tolerance = if expected[0] > 0 && expected[0] < 255 {
+                2
+            } else {
+                0
+            };
+            assert!(
+                actual
+                    .0
+                    .iter()
+                    .zip(expected.0)
+                    .all(|(a, b)| a.abs_diff(b) <= tolerance),
+                "pixel ({x}, {y}): {actual:?}, expected {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[test]
     fn opacity_groups_preserve_overlap_alpha_and_deep_nesting() -> anyhow::Result<()> {
         let bounds = test_bounds(0.0, 0.0, 16.0, 8.0);
         let target_size = gpui::size(DevicePixels(16), DevicePixels(8));

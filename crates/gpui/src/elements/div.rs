@@ -2791,6 +2791,7 @@ pub(crate) struct AriaProperties {
 
 struct LayoutMotionState {
     rest: Bounds<Pixels>,
+    radii: crate::Corners<Pixels>,
     viewport: Size<Pixels>,
     active: Option<crate::LayerMotion>,
 }
@@ -3283,6 +3284,10 @@ impl Interactivity {
                 let layout_motion =
                     if let (Some(config), Some(global_id)) = (style.layout_motion, global_id) {
                         let rest = self.layout_motion_rest;
+                        let radii = style
+                            .corner_radii
+                            .to_pixels(window.rem_size())
+                            .clamp_radii_for_quad_size(rest.size);
                         let viewport = window.viewport_size();
                         let now = crate::animation_time_ms();
                         window.with_optional_element_state::<LayoutMotionState, _>(
@@ -3302,18 +3307,26 @@ impl Interactivity {
                                     .into_iter()
                                     .any(|delta| delta.abs() > px(0.5))
                                 {
+                                    let sample = previous.active.map(|motion| {
+                                        motion.sample(
+                                            now,
+                                            window.scale_factor(),
+                                            bounds.scale(window.scale_factor()),
+                                        )
+                                    });
                                     let from = previous.rest.origin
-                                        + previous.active.map_or(Point::default(), |motion| {
-                                            motion
-                                                .sample(
-                                                    now,
-                                                    window.scale_factor(),
-                                                    bounds.scale(window.scale_factor()),
-                                                )
+                                        + sample.map_or(Point::default(), |sample| {
+                                            sample
                                                 .offset
                                                 .map(|value| px(value.0 / window.scale_factor()))
                                         })
                                         - rest.origin;
+                                    let from_radii = sample.and_then(|sample| sample.clip).map_or(
+                                        previous.radii,
+                                        |(_, radii)| {
+                                            radii.map(|value| px(value.0 / window.scale_factor()))
+                                        },
+                                    );
                                     let growth = rest.size - previous.rest.size;
                                     active = Some(crate::LayerMotion {
                                         start_ms: now,
@@ -3331,6 +3344,9 @@ impl Interactivity {
                                             },
                                             crate::Edges::default(),
                                         )),
+                                        clip_radii: (from_radii != crate::Corners::default()
+                                            || radii != crate::Corners::default())
+                                        .then_some((from_radii, radii)),
                                         ..crate::LayerMotion::NONE
                                     });
                                 }
@@ -3339,6 +3355,7 @@ impl Interactivity {
                                     active,
                                     Some(LayoutMotionState {
                                         rest,
+                                        radii,
                                         viewport,
                                         active,
                                     }),

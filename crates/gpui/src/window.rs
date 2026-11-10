@@ -1360,6 +1360,7 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     last_frame_ms: Cell<u32>,
     last_live_frame_ms: Cell<u32>,
+    pending_motion_wake: Option<(u32, Task<()>)>,
     layout_transition_until: Cell<u32>,
     covered_live_keys: FxHashSet<u64>,
     pub(crate) next_frame: Frame,
@@ -1933,34 +1934,9 @@ impl Window {
                         .log_err();
                 }
 
-                let animating = handle
-                    .update(&mut cx, |_, window, _| {
-                        window
-                            .rendered_frame
-                            .scene
-                            .animating_at(window.last_frame_ms.get())
-                    })
-                    .unwrap_or(false);
                 handle
-                    .update(&mut cx, |_, window, _| {
-                        if window.invalidator.is_dirty()
-                            || !window.next_frame_callbacks.borrow().is_empty()
-                            || animating
-                        {
-                            window.platform_window.schedule_frame();
-                        }
-                    })
+                    .update(&mut cx, |_, window, cx| window.schedule_animation_frame(cx))
                     .log_err();
-
-                // Platforms that stop requesting frames for idle windows only
-                // deliver another request after a wakeup. If demand remains
-                // after this frame (the window was re-invalidated mid-draw, or
-                // animations scheduled next-frame callbacks), re-arm the frame
-                // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() || animating
-                {
-                    invalidator.wake_platform();
-                }
             }
         }));
         invalidator.set_platform_waker(platform_window.frame_waker());
@@ -2153,6 +2129,7 @@ impl Window {
             focused_text_input: None,
             last_frame_ms: Cell::new(0),
             last_live_frame_ms: Cell::new(0),
+            pending_motion_wake: None,
             layout_transition_until: Cell::new(0),
             covered_live_keys: FxHashSet::default(),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -2782,6 +2759,45 @@ impl Window {
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
         self.on_next_frame(move |_, cx| cx.notify(entity));
+    }
+
+    fn schedule_animation_frame(&mut self, cx: &App) {
+        let now = crate::animation_time_ms();
+        let demand = self.rendered_frame.scene.animation_demand(now);
+        let animating = demand.animating;
+        let pending_delay = demand.next_start_ms.map(|start| start.wrapping_sub(now));
+        if let Some(delay) = pending_delay.filter(|_| !animating) {
+            let start = now.wrapping_add(delay);
+            if self
+                .pending_motion_wake
+                .as_ref()
+                .is_none_or(|(scheduled, _)| delay < scheduled.wrapping_sub(now))
+            {
+                self.pending_motion_wake = Some((
+                    start,
+                    self.spawn(cx, async move |cx| {
+                        cx.background_executor
+                            .timer(Duration::from_millis(u64::from(delay)))
+                            .await;
+                        cx.update(|window, _| {
+                            window.pending_motion_wake.take();
+                            window.platform_window.schedule_frame();
+                            window.invalidator.wake_platform();
+                        })
+                        .log_err();
+                    }),
+                ));
+            }
+        } else {
+            self.pending_motion_wake.take();
+        }
+        if self.invalidator.is_dirty()
+            || !self.next_frame_callbacks.borrow().is_empty()
+            || animating
+        {
+            self.platform_window.schedule_frame();
+            self.invalidator.wake_platform();
+        }
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.

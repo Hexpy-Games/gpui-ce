@@ -1008,7 +1008,8 @@ impl DirectXRenderer {
                                 filter.corner_smoothing,
                                 radius,
                                 filter.opacity,
-                                true,
+                                FilterCompositeClip::RoundedBounds,
+                                Bounds::default(),
                                 1.0,
                                 Point::default(),
                                 Point::default(),
@@ -1077,12 +1078,13 @@ impl DirectXRenderer {
                         &source,
                         parent_rtv,
                         boundary.bounds,
-                        clip.map_or(boundary.content_mask.bounds, |clip| boundary.content_mask.bounds.intersect(&clip)),
-                        boundary.corner_radii,
+                        boundary.content_mask.bounds,
+                        clip.map_or(boundary.corner_radii, |(_, radii)| radii),
                         boundary.corner_smoothing,
                         boundary.max_blur_radius(),
                         opacity,
-                        false,
+                        clip.map_or(FilterCompositeClip::ContentShape, |_| FilterCompositeClip::MotionRounded),
+                        clip.map_or(Bounds::default(), |(rect, _)| rect),
                         scale,
                         boundary.scale_origin,
                         composite_offset,
@@ -1813,7 +1815,8 @@ impl DirectXRenderer {
         blur_radius: f32,
         opacity: f32,
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
-        clip_rounded: bool,
+        clip: FilterCompositeClip,
+        motion_clip: Bounds<ScaledPixels>,
         scale: f32,
         scale_origin: Point<ScaledPixels>,
         composite_offset: Point<ScaledPixels>,
@@ -1822,6 +1825,7 @@ impl DirectXRenderer {
         // The blurred backdrop was restored into the ping texture, so the blur passes are skipped.
         blurred_ready: bool,
     ) -> Result<()> {
+        let clip_rounded = matches!(clip, FilterCompositeClip::RoundedBounds);
         if clip_rounded && blur_radius <= 0.0 && !lens.is_active() {
             return Ok(());
         }
@@ -1832,11 +1836,6 @@ impl DirectXRenderer {
             downsampled_dimension(full_width) as f32,
             downsampled_dimension(full_height) as f32,
         ];
-        let clip = if clip_rounded {
-            FilterCompositeClip::RoundedBounds
-        } else {
-            FilterCompositeClip::ContentShape
-        };
         let half_vp = D3D11_VIEWPORT {
             TopLeftX: 0.0,
             TopLeftY: 0.0,
@@ -1936,6 +1935,7 @@ impl DirectXRenderer {
         composite_uniforms.composite_offset =
             wgsl_rs::std::vec2f(composite_offset.x.0, composite_offset.y.0);
         composite_uniforms.composite_rotation = composite_rotation;
+        composite_uniforms.motion_clip = motion_clip.into();
         let (composite_vertex, composite_fragment) = if composite_uniforms.corner_smoothing > 0.0 {
             (
                 &self.pipelines.smoothed_blur_composite_vertex,
@@ -2037,7 +2037,8 @@ impl DirectXRenderer {
                 0.0,
                 0.0,
                 1.0,
-                false,
+                FilterCompositeClip::ContentShape,
+                Bounds::default(),
                 1.0,
                 Point::default(),
                 Point::default(),

@@ -6,9 +6,9 @@ use super::{
     path_types,
 };
 use gpui::{
-    BackdropFilter, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite, Point,
-    PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow,
-    Size, SubpixelSprite, Underline, backdrop_appear_parameters,
+    BackdropFilter, Bounds, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite,
+    Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements,
+    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
@@ -620,6 +620,7 @@ impl<'a> FrameEncoder<'a> {
                                 composite_offset: Point::default(),
                                 composite_rotation: 0.0,
                                 clip: FilterCompositeClip::RoundedBounds,
+                                motion_clip: Bounds::default(),
                                 lens,
                             },
                             hit,
@@ -734,10 +735,8 @@ impl<'a> FrameEncoder<'a> {
                         parent,
                         FilterCompositeParameters {
                             bounds: boundary.bounds,
-                            content_mask: clip.map_or(boundary.content_mask.bounds, |clip| {
-                                boundary.content_mask.bounds.intersect(&clip)
-                            }),
-                            corner_radii: boundary.corner_radii,
+                            content_mask: boundary.content_mask.bounds,
+                            corner_radii: clip.map_or(boundary.corner_radii, |(_, radii)| radii),
                             corner_smoothing: boundary.corner_smoothing,
                             blur_radius: boundary.max_blur_radius(),
                             opacity,
@@ -745,7 +744,10 @@ impl<'a> FrameEncoder<'a> {
                             composite_offset,
                             composite_rotation,
                             scale_origin: boundary.scale_origin,
-                            clip: FilterCompositeClip::ContentShape,
+                            clip: clip.map_or(FilterCompositeClip::ContentShape, |_| {
+                                FilterCompositeClip::MotionRounded
+                            }),
+                            motion_clip: clip.map_or(Bounds::default(), |(rect, _)| rect),
                             lens: Default::default(),
                         },
                         false,
