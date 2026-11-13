@@ -1408,7 +1408,7 @@ impl WindowsWindowInner {
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
-            vsync: None,
+            vsync: latest_vsync(),
         });
 
         self.state.callbacks.request_frame.set(Some(request_frame));
