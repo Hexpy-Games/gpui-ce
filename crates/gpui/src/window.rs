@@ -5375,6 +5375,7 @@ impl Window {
     }
 
     /// Paints a monochrome (non-emoji) glyph into the scene for the next frame at the current z-index.
+    /// A glyph whose colour is fully transparent paints nothing.
     ///
     /// The y component of the origin is the baseline of the glyph.
     /// You should generally prefer to use the [`ShapedLine::paint`](crate::ShapedLine::paint) or
@@ -5391,6 +5392,10 @@ impl Window {
         color: Hsla,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        // A monochrome glyph is its mask tinted by `color`, so at alpha 0 it draws nothing; skip the raster and the sprite.
+        if color.alpha <= 0. {
+            return Ok(());
+        }
 
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
