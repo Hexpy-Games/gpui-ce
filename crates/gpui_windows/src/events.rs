@@ -1408,6 +1408,7 @@ impl WindowsWindowInner {
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
+            vsync: None,
         });
 
         self.state.callbacks.request_frame.set(Some(request_frame));

@@ -1,7 +1,14 @@
 //! Looping flipbook sprites and the animation clock the GPU reads.
 
 use scheduler::Instant;
-use std::{sync::LazyLock, time::Duration};
+use std::{
+    cell::Cell,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 /// Border, in device pixels, around each flipbook cell.
 pub const FRAME_GUTTER: u32 = 1;
@@ -58,6 +65,63 @@ pub struct FrameSpec {
 
 static ANIMATION_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
+thread_local! {
+    /// The running frame's stamp on the animation clock, in nanoseconds, while a frame runs on
+    /// this thread.
+    static FRAME_NS: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// The latest animation time handed out, so the clock never goes backwards.
+static HIGH_WATER_NS: AtomicU64 = AtomicU64::new(0);
+
+/// The refresh period of the last frame that had a vsync, 0 when none had.
+static VSYNC_PERIOD_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds on the animation clock's epoch: what [`FrameVsync`] is measured on.
+pub fn animation_clock_ns() -> u64 {
+    ANIMATION_EPOCH.elapsed().as_nanos() as u64
+}
+
+/// Hands out `ns`, or the latest time already handed out if that is later.
+fn hand_out(ns: u64) -> u64 {
+    ns.max(HIGH_WATER_NS.fetch_max(ns, Ordering::Relaxed))
+}
+
+/// The display's current vsync, as a platform's frame source reports it.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct FrameVsync {
+    /// When the vsync happened, on [`animation_clock_ns`]'s epoch.
+    pub at_ns: u64,
+    /// The display's refresh period.
+    pub period_ns: u64,
+}
+
+/// One frame on the animation clock. While it lives, [`animation_time_ms`] on this thread
+/// reads one value: the display's vsync when the platform reports it, else the wall clock at
+/// the frame's start, never earlier than any time handed out before.
+pub struct AnimationFrame {
+    previous: Option<u64>,
+}
+
+impl AnimationFrame {
+    /// Starts a frame stamped at `vsync`, or now.
+    pub fn begin(vsync: Option<FrameVsync>) -> Self {
+        if let Some(vsync) = vsync {
+            VSYNC_PERIOD_NS.store(vsync.period_ns, Ordering::Relaxed);
+        }
+        let stamp = hand_out(vsync.map_or_else(animation_clock_ns, |vsync| vsync.at_ns));
+        Self {
+            previous: FRAME_NS.replace(Some(stamp)),
+        }
+    }
+}
+
+impl Drop for AnimationFrame {
+    fn drop(&mut self) {
+        FRAME_NS.set(self.previous);
+    }
+}
+
 /// The renderer's single live-layer gate stays below a 60 Hz period with room for tick jitter
 /// and above a 120 Hz period, following the display up to 60 Hz and every other tick above it.
 pub const LIVE_FRAME_MIN_MS: u32 = 12;
@@ -78,19 +142,43 @@ pub fn set_animation_clock(ms: Option<u32>) {
     PINNED_MS.set(ms);
 }
 
-/// Milliseconds since the process's first call, wrapping at 2^32 (about 49.7 days).
+/// The animation clock in milliseconds, wrapping at 2^32 (about 49.7 days): the running frame's
+/// stamp during a frame (see [`AnimationFrame`]), else now (less one refresh period while frames
+/// follow the display); it never goes backwards.
 pub fn animation_time_ms() -> u32 {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(ms) = PINNED_MS.get() {
         return ms;
     }
 
-    (ANIMATION_EPOCH.elapsed().as_millis() as u64) as u32
+    // Between frames: now, less one refresh period when frames follow the display. The
+    // display's latest vsync is never older than that, so the next frame's stamp is not held
+    // back by a time handed out in between.
+    let ns = FRAME_NS.get().unwrap_or_else(|| {
+        hand_out(animation_clock_ns().saturating_sub(VSYNC_PERIOD_NS.load(Ordering::Relaxed)))
+    });
+    (ns / 1_000_000) as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // test-category: pure-logic
+    #[test]
+    fn a_frame_reads_one_time_that_never_goes_back() {
+        let before = animation_time_ms();
+        let frame = AnimationFrame::begin(Some(FrameVsync {
+            at_ns: 0,
+            period_ns: 16_666_667,
+        }));
+        let stamp = animation_time_ms();
+        assert!(stamp >= before);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(animation_time_ms(), stamp);
+        drop(frame);
+        assert!(animation_time_ms() >= stamp);
+    }
 
     #[test]
     fn live_layers_follow_the_display_up_to_60_hz() {

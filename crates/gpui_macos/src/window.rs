@@ -901,6 +901,10 @@ impl MacWindowState {
     fn next_frame_request(&mut self) -> RequestFrameOptions {
         RequestFrameOptions {
             force_render: mem::take(&mut self.force_render_pending),
+            vsync: self
+                .frame_source
+                .as_ref()
+                .and_then(WindowFrameSource::vsync),
             ..Default::default()
         }
     }

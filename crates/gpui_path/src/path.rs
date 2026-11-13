@@ -340,12 +340,13 @@ impl PathStyle {
                     .is_some_and(u8::is_ascii_alphabetic)
                     && path_bytes.get(drive_start + 1) == Some(&b':');
 
-                // A drive letter only counts as a prefix when followed by a separator or end
-                // of path; otherwise (e.g. `\\?\C:foo`) the whole first component is the prefix.
+                // A drive letter only counts as a prefix when followed by `\` or end of path;
+                // otherwise (e.g. `\\?\C:foo`, or `\\?\C:/foo` where '/' is literal) the whole
+                // first component is the prefix, as the standard library parses it.
                 if has_drive_prefix
                     && path_bytes
                         .get(drive_end)
-                        .is_none_or(|byte| is_separator(*byte))
+                        .is_none_or(|byte| is_body_separator(*byte))
                 {
                     drive_end
                 } else {
@@ -373,9 +374,6 @@ impl PathStyle {
             }
         };
 
-        // Uses is_separator rather than is_body_separator: after a verbatim drive prefix,
-        // '/' still counts as the root separator (e.g. `\\?\C:/foo`) even though '/' does
-        // not separate body components.
         let has_root = path_bytes
             .get(prefix_end)
             .is_some_and(|byte| is_separator(*byte));
@@ -731,7 +729,7 @@ mod tests {
             (Path::new("//server/share/foo.txt"), Some("foo.txt")),
             (Path::new(r"\\?\bar"), None),
             (Path::new(r"\\?\bar\foo.txt"), Some("foo.txt")),
-            (Path::new(r"\\?\C:/foo/bar"), Some("foo/bar")),
+            (Path::new(r"\\?\C:/foo/bar"), None),
             (Path::new(r"\\.\device"), None),
             (Path::new(r"\\.\device\foo.txt"), Some("foo.txt")),
         ];
@@ -801,7 +799,7 @@ mod tests {
                 Some(r"\\?\UNC\server\share\"),
             ),
             (r"\\?\C:\foo.txt", Some(r"\\?\C:\")),
-            (r"\\?\C:/foo/bar", Some(r"\\?\C:/")),
+            (r"\\?\C:/foo/bar", None),
             (r"\\.\device", None),
             (r"\\.\device\foo.txt", Some(r"\\.\device\")),
             (".", Some("")),

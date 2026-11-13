@@ -1867,6 +1867,9 @@ impl Window {
                     }
                 }
                 last_frame_time.set(Some(now));
+                // One animation time for everything this frame reads (callbacks, layout,
+                // encode), from the display's vsync when the platform reports it.
+                let _animation_frame = crate::AnimationFrame::begin(request_frame_options.vsync);
 
                 let pending_next_frame_callbacks = next_frame_callbacks.take();
                 if !pending_next_frame_callbacks.is_empty() {
@@ -5860,7 +5863,7 @@ impl Window {
                 frame_index,
             };
 
-            self.sprite_atlas.remove(&params.clone().into());
+            self.sprite_atlas.remove(&params.into());
         }
 
         Ok(())

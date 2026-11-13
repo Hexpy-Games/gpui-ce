@@ -59,7 +59,10 @@ use gpui_util::ResultExt;
 use std::{
     collections::{BTreeMap, btree_map},
     ffi::c_void,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
@@ -81,6 +84,10 @@ impl Registry {
 struct DisplayEntry {
     link: sys::DisplayLink,
     running: bool,
+    /// The latest vsync on the animation clock, 0 when unknown.
+    vsync_ns: AtomicU64,
+    /// The display's refresh period, 0 when unknown.
+    period_ns: AtomicU64,
     subscribers: Vec<(SubscriberId, DispatchRetained<DispatchSource>)>,
 }
 
@@ -117,7 +124,7 @@ fn debug_assert_main_thread() {
 
 unsafe extern "C" fn display_link_output_callback(
     _display_link_out: *mut sys::CVDisplayLink,
-    _current_time: *const sys::CVTimeStamp,
+    current_time: *const sys::CVTimeStamp,
     _output_time: *const sys::CVTimeStamp,
     _flags_in: i64,
     _flags_out: *mut i64,
@@ -126,11 +133,43 @@ unsafe extern "C" fn display_link_output_callback(
     let display_id = display_id as usize as CGDirectDisplayID;
     let registry = lock_registry();
     if let Some(entry) = registry.displays.get(&display_id) {
+        // SAFETY: CoreVideo passes a valid timestamp for the duration of the callback.
+        if let Some(current) = unsafe { current_time.as_ref() }
+            && current.flags & sys::kCVTimeStampHostTimeValid != 0
+            && current.video_time_scale > 0
+        {
+            let period = i128::from(current.video_refresh_period) * 1_000_000_000
+                / i128::from(current.video_time_scale);
+            entry
+                .period_ns
+                .store(period.max(0) as u64, Ordering::Relaxed);
+            entry.vsync_ns.store(
+                vsync_on_animation_clock(current.host_time),
+                Ordering::Relaxed,
+            );
+        }
         for (_, frame_requests) in &entry.subscribers {
             frame_requests.merge_data(1);
         }
     }
     0
+}
+
+/// A host-time vsync mapped onto the animation clock: now on that clock, plus how far the vsync
+/// lies from now in host time.
+fn vsync_on_animation_clock(host_time: u64) -> u64 {
+    static TIMEBASE: std::sync::LazyLock<(u128, u128)> = std::sync::LazyLock::new(|| {
+        let mut info = mach2::mach_time::mach_timebase_info_data_t { numer: 0, denom: 0 };
+        // SAFETY: `info` is a valid out-pointer.
+        unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
+        (u128::from(info.numer), u128::from(info.denom.max(1)))
+    });
+    let (numer, denom) = *TIMEBASE;
+    let to_ns = |ticks: u64| (u128::from(ticks) * numer / denom) as i128;
+    // SAFETY: reads the host clock.
+    let host_now = unsafe { mach2::mach_time::mach_absolute_time() };
+    let offset = to_ns(host_time) - to_ns(host_now);
+    (i128::from(gpui::animation_clock_ns()) + offset).max(1) as u64
 }
 
 fn subscribe(
@@ -166,6 +205,8 @@ fn subscribe(
             (btree_map::Entry::Vacant(vacant), Some(link)) => vacant.insert(DisplayEntry {
                 link,
                 running: false,
+                vsync_ns: AtomicU64::new(0),
+                period_ns: AtomicU64::new(0),
                 subscribers: Vec::new(),
             }),
             (btree_map::Entry::Vacant(_), None) => {
@@ -233,6 +274,18 @@ pub struct WindowFrameSource {
 }
 
 impl WindowFrameSource {
+    /// The latest vsync of the display this source is subscribed to.
+    pub fn vsync(&self) -> Option<gpui::FrameVsync> {
+        let (display_id, _) = self.registration?;
+        let registry = lock_registry();
+        let entry = registry.displays.get(&display_id)?;
+        let at_ns = entry.vsync_ns.load(Ordering::Relaxed);
+        (at_ns != 0).then(|| gpui::FrameVsync {
+            at_ns,
+            period_ns: entry.period_ns.load(Ordering::Relaxed),
+        })
+    }
+
     pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
         let frame_requests = unsafe {
             let frame_requests = DispatchSource::new(
