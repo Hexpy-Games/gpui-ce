@@ -360,6 +360,7 @@ impl WebWindow {
                     callback(RequestFrameOptions {
                         require_presentation: true,
                         force_render: true,
+                        vsync: None,
                     })
                 },
             );
@@ -401,6 +402,7 @@ impl WebWindowInner {
                     callback(RequestFrameOptions {
                         require_presentation: false,
                         force_render,
+                        vsync: None,
                     })
                 },
             );

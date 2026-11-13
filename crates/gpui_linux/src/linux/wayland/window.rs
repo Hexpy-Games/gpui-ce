@@ -1001,6 +1001,7 @@ impl WaylandWindowStatePtr {
         request_frame_callback(RequestFrameOptions {
             force_render,
             require_presentation,
+            vsync: None,
         });
         self.update_ime_enabled();
         drop(callbacks);

@@ -45,9 +45,9 @@ use crate::util::FluentBuilder;
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
-    FontId, FontMetrics, ForegroundExecutor, GlyphAtlasEntry, GlyphId, GpuSpecs, ImageSource,
-    InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures, PlatformInput,
-    Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
+    FontId, FontMetrics, ForegroundExecutor, FrameVsync, GlyphAtlasEntry, GlyphId, GpuSpecs,
+    ImageSource, InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures,
+    PlatformInput, Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
     RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
     ScaledPixels, Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
     ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
@@ -823,6 +823,9 @@ pub struct RequestFrameOptions {
     pub require_presentation: bool,
     /// Force refresh of all rendering states when true.
     pub force_render: bool,
+    /// The display's current vsync, when the platform's frame source reports it; the frame's
+    /// animation time is stamped from it.
+    pub vsync: Option<FrameVsync>,
 }
 
 /// The application's lifecycle phase, as owned and reported by a mobile OS.
