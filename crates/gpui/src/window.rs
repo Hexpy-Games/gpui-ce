@@ -1371,6 +1371,7 @@ pub struct Window {
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
+    pub(crate) text_input_focus_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
     mouse_position: Point<Pixels>,
@@ -2141,6 +2142,7 @@ impl Window {
             dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
+            text_input_focus_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
             mouse_position,
@@ -3406,6 +3408,8 @@ impl Window {
             None
         };
         self.apply_text_input_configuration(cx);
+        let text_input_focused =
+            focused_text_input.is_some() && focused_text_input != self.focused_text_input;
         if focused_text_input != self.focused_text_input {
             let change = match (self.focused_text_input, focused_text_input) {
                 (None, _) => TextInputStateChange::FocusGained,
@@ -3460,6 +3464,12 @@ impl Window {
             self.focus_listeners
                 .clone()
                 .retain(&(), |listener| listener(&event, self, cx));
+        }
+
+        if text_input_focused {
+            self.text_input_focus_listeners
+                .clone()
+                .retain(&(), |listener| listener(self, cx));
         }
 
         debug_assert!(self.rendered_entity_stack.is_empty());
