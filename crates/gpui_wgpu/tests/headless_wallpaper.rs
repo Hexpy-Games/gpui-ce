@@ -10,6 +10,7 @@ use smallvec::smallvec;
 
 #[test]
 fn intro_resting_print_clears_card_and_keeps_edge_ink() {
+    let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Warn).try_init();
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
     let target = size(DevicePixels(1200), DevicePixels(900));
     let css = [1200.0_f32, 900.0_f32];
@@ -314,6 +315,7 @@ const DEFAULT_PARAMS: [[[f32; 4]; 6]; 18] = [
 
 #[test]
 fn every_module_renders_a_finite_varied_still() {
+    let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Warn).try_init();
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
     let target = size(DevicePixels(64), DevicePixels(40));
     let rgba: Vec<u8> = (0..8)
