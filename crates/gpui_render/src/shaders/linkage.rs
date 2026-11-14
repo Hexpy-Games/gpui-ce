@@ -12,4 +12,5 @@ pub mod base {
     use super::super::shadow::*;
     use super::super::surface::*;
     use super::super::underline::*;
+    use super::super::wallpaper::*;
 }

@@ -141,6 +141,7 @@ fn build_shaders() {
         )
     );
     let surface = shader_source("surface interface", &shaders::surface::WGSL_SOURCE);
+    let wallpaper = shader_source("wallpaper interface", &shaders::wallpaper::WGSL_SOURCE);
     let blur = shader_source("blur interface", &shaders::blur::WGSL_SOURCE);
     let downlevel_quad = downlevel_dialect("quad interface", &quad);
     let downlevel_polychrome = downlevel_dialect("polychrome sprite interface", &polychrome);
@@ -181,6 +182,12 @@ fn build_shaders() {
         BindingLayout {
             constant: "SURFACE_BINDINGS",
             source: &surface,
+            group: shaders::interface::DATA_BIND_GROUP,
+            dialect: ReflectionDialect::Modern,
+        },
+        BindingLayout {
+            constant: "WALLPAPER_BINDINGS",
+            source: &wallpaper,
             group: shaders::interface::DATA_BIND_GROUP,
             dialect: ReflectionDialect::Modern,
         },
@@ -888,7 +895,7 @@ fn write_native_shaders(out_dir: &std::path::Path) {
         NativeShaderModule {
             pipeline: &WALLPAPER,
             pipeline_path: "WALLPAPER",
-            source: &shaders::blur::WGSL_SOURCE,
+            source: &shaders::wallpaper::WGSL_SOURCE,
             requires_dual_source_lowering: false,
         },
     ];
@@ -1231,7 +1238,9 @@ fn dx11_draw_constants_register(pipeline: &shaders::interface::Pipeline) -> Opti
         | DataLayout::TexturedInstances
         | DataLayout::MonochromeSprites
         | DataLayout::SubpixelSprites => Some(shaders::interface::DX11_DRAW_CONSTANTS_REGISTER),
-        DataLayout::NativeOnly | DataLayout::Surface | DataLayout::Blur => None,
+        DataLayout::NativeOnly | DataLayout::Surface | DataLayout::Blur | DataLayout::Wallpaper => {
+            None
+        }
     }
 }
 

@@ -30,7 +30,14 @@ impl DirectXRenderer {
     /// `false` when this frame needs a full encode (no retained frame for this scene, a `Full`
     /// plan, or a missing cache entry).
     pub(super) fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
-        let Some(DamagePlan::Partial(plan)) = scene.damage_plan_over(self.retained) else {
+        let Some(damage) = scene.damage_plan_with_wallpapers(self.retained, |paint| {
+            self.wallpapers
+                .borrow()
+                .slot_changed(paint, self.animation_time_ms)
+        }) else {
+            return Ok(false);
+        };
+        let DamagePlan::Partial(plan) = damage.as_ref() else {
             return Ok(false);
         };
         let generation = scene.generation();

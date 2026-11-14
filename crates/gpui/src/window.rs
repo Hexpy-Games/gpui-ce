@@ -2765,7 +2765,10 @@ impl Window {
         let now = crate::animation_time_ms();
         let demand = self.rendered_frame.scene.animation_demand(now);
         let animating = demand.animating;
-        let pending_delay = demand.next_start_ms.map(|start| start.wrapping_sub(now));
+        let pending_delay = demand
+            .next_start_ms
+            .filter(|_| !self.platform_window.is_minimized())
+            .map(|start| start.wrapping_sub(now));
         if let Some(delay) = pending_delay.filter(|_| !animating) {
             let start = now.wrapping_add(delay);
             if self
@@ -2781,8 +2784,10 @@ impl Window {
                             .await;
                         cx.update(|window, _| {
                             window.pending_motion_wake.take();
-                            window.platform_window.schedule_frame();
-                            window.invalidator.wake_platform();
+                            if !window.platform_window.is_minimized() {
+                                window.platform_window.schedule_frame();
+                                window.invalidator.wake_platform();
+                            }
                         })
                         .log_err();
                     }),

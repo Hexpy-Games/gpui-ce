@@ -16,7 +16,14 @@ pub(super) fn render_damage_to_view(
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
 ) -> Option<wgpu::SubmissionIndex> {
-    let Some(DamagePlan::Partial(plan)) = scene.damage_plan_over(renderer.retained) else {
+    let damage = scene.damage_plan_with_wallpapers(renderer.retained, |paint| {
+        renderer
+            .resources()
+            .wallpapers
+            .borrow()
+            .slot_changed(paint, renderer.animation_time_ms)
+    })?;
+    let DamagePlan::Partial(plan) = damage.as_ref() else {
         return None;
     };
     let generation = scene.generation();

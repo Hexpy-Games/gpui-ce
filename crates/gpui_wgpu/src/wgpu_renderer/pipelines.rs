@@ -115,6 +115,7 @@ pub(super) struct WgpuBindGroupLayouts {
     textured_instances: wgpu::BindGroupLayout,
     pub(super) surfaces: wgpu::BindGroupLayout,
     pub(super) blur: wgpu::BindGroupLayout,
+    pub(super) wallpaper: wgpu::BindGroupLayout,
 }
 
 impl WgpuBindGroupLayouts {
@@ -184,7 +185,14 @@ impl WgpuBindGroupLayouts {
             blur_table,
             Some(shader::DATA_BUFFER_BINDING),
         );
+        let wallpaper = generated_bind_group_layout(
+            device,
+            "wallpaper_layout",
+            gpui_render::artifacts::WALLPAPER_BINDINGS,
+            Some(shader::DATA_BUFFER_BINDING),
+        );
         Self {
+            wallpaper,
             globals,
             instances,
             monochrome_sprites,
@@ -385,6 +393,12 @@ impl WgpuPipelines {
             bind_group_layouts,
             &bind_group_layouts.surfaces,
         );
+        let wallpaper_layout = create_pipeline_layout(
+            device,
+            "wallpaper_pipeline_layout",
+            bind_group_layouts,
+            &bind_group_layouts.wallpaper,
+        );
         let blur_layout = create_pipeline_layout(
             device,
             "blur_pipeline_layout",
@@ -412,6 +426,7 @@ impl WgpuPipelines {
             }
             shader::DataLayout::Surface => &surface_layout,
             shader::DataLayout::Blur => &blur_layout,
+            shader::DataLayout::Wallpaper => &wallpaper_layout,
         };
         let create =
             |specification: shader::Pipeline, target: &wgpu::ColorTargetState, samples, module| {

@@ -44,6 +44,7 @@ pub enum DataLayout {
     NativeOnly,
     Surface,
     Blur,
+    Wallpaper,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,7 +114,7 @@ define_pipelines! {
     BLUR: "blur", vertex_blur_fullscreen, fragment_blur, TriangleList, Blur, FullscreenTriangle;
     BLUR_COMPOSITE: "blur_composite", vertex_blur_composite, fragment_blur_composite, TriangleStrip, Blur, Rectangle;
     SMOOTHED_BLUR_COMPOSITE: "smoothed_blur_composite", vertex_smoothed_blur_composite, fragment_smoothed_blur_composite, TriangleStrip, Blur, Rectangle;
-    WALLPAPER: "wallpaper", vertex_blur_fullscreen, fragment_wallpaper, TriangleList, Blur, FullscreenTriangle;
+    WALLPAPER: "wallpaper", vertex_blur_fullscreen, fragment_wallpaper, TriangleList, Wallpaper, FullscreenTriangle;
 }
 
 pub const EMOJI_RASTERIZATION: Pipeline = Pipeline {
