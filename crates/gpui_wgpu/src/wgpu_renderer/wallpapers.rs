@@ -6,10 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpui::{BackdropFilter, WallpaperImage, WallpaperPaint};
-use gpui_render::{
-    blur::{FilterCompositeClip, ScissorRectangle},
-    shaders::blur::BlurUniforms,
-};
+use gpui_render::{blur::FilterCompositeClip, shaders::blur::BlurUniforms};
 
 use super::WgpuRenderer;
 
@@ -92,16 +89,13 @@ fn noise_texture(device: &wgpu::Device, queue: &wgpu::Queue, print: bool) -> wgp
 }
 
 impl WgpuRenderer {
-    pub(super) fn draw_wallpaper(
+    pub(super) fn prepare_wallpaper(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        filter: &BackdropFilter,
         paint: &WallpaperPaint,
-        scissor: Option<ScissorRectangle>,
-    ) {
+    ) -> Option<wgpu::TextureView> {
         if paint.passes.is_empty() {
-            return;
+            return None;
         }
         let format = self.target.format();
         // Collect the views to render into / sample (cloned out, so the cache borrow ends here).
@@ -290,6 +284,16 @@ impl WgpuRenderer {
             draw.set_bind_group(1, &bind_group, &[uniform_offset]);
             draw.draw(0..3, 0..1);
         }
+        views.last().cloned()
+    }
+
+    pub(super) fn draw_wallpaper(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        filter: &BackdropFilter,
+        paint: &WallpaperPaint,
+        view: &wgpu::TextureView,
+    ) {
         let last = paint.passes.last().expect("passes");
         let size = [last.width as f32, last.height as f32];
         let uniforms = BlurUniforms::composite(
@@ -307,16 +311,7 @@ impl WgpuRenderer {
         )
         .with_wallpaper_texture(size);
         let pipeline = &self.resources().pipelines.blur_composite;
-        self.draw_filter_pass(
-            encoder,
-            "wallpaper_composite",
-            pipeline,
-            target,
-            views.last().expect("views"),
-            uniforms,
-            wgpu::LoadOp::Load,
-            scissor,
-        );
+        self.draw_filter(pass, pipeline, view, uniforms);
     }
 }
 

@@ -535,18 +535,21 @@ impl<'a> FrameEncoder<'a> {
                         .draw_paths_from_intermediate(paths, &mut self.instances, pass)?;
                 }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
-                    self.scene_pass(&mut pass, &mut pending_load, scissor);
-                    drop(pass.take());
                     for index in range.clone() {
+                        // The target must hold everything painted so far before a filter reads it;
+                        // a pending clear is the only reason to open a pass that draws nothing.
+                        if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+                            self.scene_pass(&mut pass, &mut pending_load, scissor);
+                        }
+                        drop(pass.take());
                         let filter = &self.scene.backdrop_filters[index];
                         if let Some(paint) = &filter.wallpaper {
-                            self.renderer.draw_wallpaper(
-                                &mut self.encoder,
-                                self.targets.current(),
-                                filter,
-                                paint,
-                                scissor,
-                            );
+                            if let Some(view) =
+                                self.renderer.prepare_wallpaper(&mut self.encoder, paint)
+                            {
+                                let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                                self.renderer.draw_wallpaper(pass, filter, paint, &view);
+                            }
                             continue;
                         }
                         let (lens, radius) =
@@ -603,29 +606,27 @@ impl<'a> FrameEncoder<'a> {
                         } else {
                             None
                         };
-                        let source = snapshot.as_ref().unwrap_or_else(|| self.targets.current());
-                        self.renderer.blur_and_composite(
+                        let source = snapshot.unwrap_or_else(|| self.targets.current().clone());
+                        let parameters = FilterCompositeParameters {
+                            bounds: filter.bounds,
+                            content_mask: filter.content_mask.bounds,
+                            corner_radii: filter.corner_radii,
+                            corner_smoothing: filter.corner_smoothing,
+                            blur_radius: radius,
+                            opacity: filter.opacity,
+                            scale: 1.0,
+                            scale_origin: Point::default(),
+                            composite_offset: Point::default(),
+                            composite_rotation: 0.0,
+                            clip: FilterCompositeClip::RoundedBounds,
+                            motion_clip: Bounds::default(),
+                            lens,
+                        };
+                        let prepared = self.renderer.prepare_composite(
                             &mut self.encoder,
-                            source,
-                            self.targets.current(),
-                            FilterCompositeParameters {
-                                bounds: filter.bounds,
-                                content_mask: filter.content_mask.bounds,
-                                corner_radii: filter.corner_radii,
-                                corner_smoothing: filter.corner_smoothing,
-                                blur_radius: radius,
-                                opacity: filter.opacity,
-                                scale: 1.0,
-                                scale_origin: Point::default(),
-                                composite_offset: Point::default(),
-                                composite_rotation: 0.0,
-                                clip: FilterCompositeClip::RoundedBounds,
-                                motion_clip: Bounds::default(),
-                                lens,
-                            },
+                            &source,
+                            parameters,
                             hit,
-                            wgpu::LoadOp::Load,
-                            scissor,
                         );
                         if let (false, Some(key)) = (hit, key) {
                             let resources = self.renderer.resources();
@@ -664,6 +665,11 @@ impl<'a> FrameEncoder<'a> {
                                 blurred,
                                 sharp,
                             );
+                        }
+                        if let Some(prepared) = prepared {
+                            let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                            self.renderer
+                                .draw_composite(pass, &prepared, &source, parameters);
                         }
                     }
                 }
@@ -716,7 +722,7 @@ impl<'a> FrameEncoder<'a> {
                         self.scene_pass(&mut pass, &mut pending_load, scissor);
                     }
                     drop(pass.take());
-                    let (filtered, parent) = self.targets.exit();
+                    let (filtered, _) = self.targets.exit();
                     pending_load = parent_loads.pop().expect("filter parent load must exist");
                     if motion_target == Some(*index) {
                         motion_target = None;
@@ -729,32 +735,34 @@ impl<'a> FrameEncoder<'a> {
                             self.renderer.animation_time_ms,
                             self.scene.scale_factor,
                         );
-                    self.renderer.blur_and_composite(
+                    let parameters = FilterCompositeParameters {
+                        bounds: boundary.bounds,
+                        content_mask: boundary.content_mask.bounds,
+                        corner_radii: clip.map_or(boundary.corner_radii, |(_, radii)| radii),
+                        corner_smoothing: boundary.corner_smoothing,
+                        blur_radius: boundary.max_blur_radius(),
+                        opacity,
+                        scale,
+                        composite_offset,
+                        composite_rotation,
+                        scale_origin: boundary.scale_origin,
+                        clip: clip.map_or(FilterCompositeClip::ContentShape, |_| {
+                            FilterCompositeClip::MotionRounded
+                        }),
+                        motion_clip: clip.map_or(Bounds::default(), |(rect, _)| rect),
+                        lens: Default::default(),
+                    };
+                    let prepared = self.renderer.prepare_composite(
                         &mut self.encoder,
                         &filtered,
-                        parent,
-                        FilterCompositeParameters {
-                            bounds: boundary.bounds,
-                            content_mask: boundary.content_mask.bounds,
-                            corner_radii: clip.map_or(boundary.corner_radii, |(_, radii)| radii),
-                            corner_smoothing: boundary.corner_smoothing,
-                            blur_radius: boundary.max_blur_radius(),
-                            opacity,
-                            scale,
-                            composite_offset,
-                            composite_rotation,
-                            scale_origin: boundary.scale_origin,
-                            clip: clip.map_or(FilterCompositeClip::ContentShape, |_| {
-                                FilterCompositeClip::MotionRounded
-                            }),
-                            motion_clip: clip.map_or(Bounds::default(), |(rect, _)| rect),
-                            lens: Default::default(),
-                        },
+                        parameters,
                         false,
-                        pending_load,
-                        scissor,
                     );
-                    pending_load = wgpu::LoadOp::Load;
+                    if let Some(prepared) = prepared {
+                        let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                        self.renderer
+                            .draw_composite(pass, &prepared, &filtered, parameters);
+                    }
                 }
                 RenderCommand::BeginFilter {
                     target: FilterRenderTarget::Inline,

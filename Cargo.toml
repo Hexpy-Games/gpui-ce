@@ -338,3 +338,18 @@ single_range_in_vec_init = "allow"
 too_many_arguments = "allow"
 large_enum_variant = "allow"
 nonminimal_bool = "allow"
+
+# wgpu 29.0.4 plus one commit: on Metal, render passes with no pre-pass work are recorded into
+# the encoder's open command buffer instead of two MTLCommandBuffers each (wgpu issue 5738).
+# Every wgpu-repository crate is listed because they depend on each other by path there.
+# A workspace that depends on gpui-ce by git must repeat this section: patches do not propagate.
+[patch.crates-io]
+wgpu-core = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-hal = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-types = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+naga = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-naga-bridge = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-core-deps-apple = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-core-deps-windows-linux-android = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-core-deps-wasm = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
+wgpu-core-deps-emscripten = { git = "https://github.com/Hexpy-Games/wgpu", rev = "32880beb30cf76ccd82742e8224c264c799061ff" }
