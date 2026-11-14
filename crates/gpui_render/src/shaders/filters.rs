@@ -1649,7 +1649,7 @@ pub mod wallpaper {
         col0: Vec3f,
         fo: f32,
         s: f32,
-        gl: f32,
+        glint_k: f32,
         ha: f32,
         sheen: f32,
         light: WpShoreLight,
@@ -1675,7 +1675,7 @@ pub mod wallpaper {
             lc = wp_mix3(vec3f(ly, ly, ly), lc, mix(1.0, 0.42, nt));
         }
         lc = lc * light.tint * light.expo;
-        lc = lc + light.glint * gl + light.halation * ha;
+        lc = lc + light.glint * glint_k + light.halation * ha;
         let mut y = sqrt(wp_filmic(lc));
         let mut l = wp_lum(y);
         let sh_t = wp_mix3(vec3f(-0.035, 0.01, 0.03), vec3f(-0.02, 0.01, 0.03), nt);
@@ -6007,7 +6007,7 @@ pub mod wallpaper {
 
     pub fn wp_cherry_blossom_petals(
         ctx: ptr!(function, WpCherryBlossomContext),
-        gl: Vec2f,
+        css_fc: Vec2f,
         p: Vec2f,
         under: f32,
         t: f32,
@@ -6021,7 +6021,7 @@ pub mod wallpaper {
         let tz: bool = wp_cherry_blossom_in_text_zone(ctx, p) || bar;
         let vy: f32 = fall as f32 * cell * 8.0 / WP_CHERRY_BLOSSOM_T;
         let vx: f32 = (fall / 2 + 1) as f32 * cell * 16.0 / WP_CHERRY_BLOSSOM_T;
-        let pp: Vec2f = gl + vec2f(vx * t, vy * t);
+        let pp: Vec2f = css_fc + vec2f(vx * t, vy * t);
         let id: Vec2f = floor(pp / cell);
         let f: Vec2f = pp - id * cell;
         let hx: i32 = wp_mod(id.x, 16.0) as i32 + 16 * wp_mod(id.y, 8.0) as i32;
@@ -6077,8 +6077,8 @@ pub mod wallpaper {
         };
         let ctx = &mut state;
         let res: Vec2f = get!(BLUR_LOCALS).wp_frame.xy() / get!(BLUR_LOCALS).wp_frame.z;
-        let gl: Vec2f = fc / get!(BLUR_LOCALS).wp_frame.z;
-        let p: Vec2f = vec2f(gl.x, res.y - gl.y);
+        let css_fc: Vec2f = fc / get!(BLUR_LOCALS).wp_frame.z;
+        let p: Vec2f = vec2f(css_fc.x, res.y - css_fc.y);
         (*ctx).w_upper = res.x;
         (*ctx).h_upper = res.y;
         (*ctx).dark_upper = get!(BLUR_LOCALS).wp_env.x > 0.5;
@@ -6142,13 +6142,13 @@ pub mod wallpaper {
         );
         col = wp_cherry_blossom_over(
             col,
-            wp_cherry_blossom_petals(ctx, gl, p, under, t, 22.0, 1.5, 5, 0.42, 11),
+            wp_cherry_blossom_petals(ctx, css_fc, p, under, t, 22.0, 1.5, 5, 0.42, 11),
         );
         col = wp_cherry_blossom_over(
             col,
             wp_cherry_blossom_petals(
                 ctx,
-                gl + vec2f(9.0, 9.0),
+                css_fc + vec2f(9.0, 9.0),
                 p,
                 under,
                 t,
@@ -6163,7 +6163,7 @@ pub mod wallpaper {
             col,
             wp_cherry_blossom_petals(
                 ctx,
-                gl + vec2f(17.0, 17.0),
+                css_fc + vec2f(17.0, 17.0),
                 p,
                 under,
                 t,
