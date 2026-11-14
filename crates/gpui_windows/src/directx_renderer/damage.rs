@@ -89,6 +89,7 @@ impl DirectXRenderer {
         requirements.uses_blur_target = true;
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
+        resources.retain_surface_views(&scene.surfaces);
         if requirements.uses_path_target {
             resources.ensure_path_resources(device)?;
         }

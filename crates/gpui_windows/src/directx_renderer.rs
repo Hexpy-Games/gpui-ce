@@ -120,6 +120,8 @@ pub(crate) struct DirectXRendererDevices {
     pub(crate) dxgi_factory: IDXGIFactory6,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
+    /// The same context with fence waits and signals; absent before the Windows 10 Creators Update.
+    context4: Option<ID3D11DeviceContext4>,
     dxgi_device: Option<IDXGIDevice>,
     annotation: Option<ID3DUserDefinedAnnotation>,
 }
@@ -140,8 +142,7 @@ struct DirectXResources {
     // underlying texture alive makes its COM pointer a stable cache key.
     surface_views: FxHashMap<usize, CachedSurfaceView>,
 
-    // Opened shared textures referenced by the current scene, keyed by texture handle. Each
-    // entry holds a frame clone so the handle stays open and its value cannot be reused.
+    // Shared textures referenced by the current scene, keyed by texture handle.
     shared_surfaces: FxHashMap<usize, CachedSharedSurface>,
 
     // Cached viewport
@@ -154,13 +155,89 @@ struct CachedSurfaceView {
     srv: Option<ID3D11ShaderResourceView>,
 }
 
+/// A shared texture referenced by the current scene.
 struct CachedSharedSurface {
+    // The latest frame drawn from this texture. Holding it keeps the handles open, so their
+    // values cannot be reused for other objects while they key this cache.
     frame: WindowsSharedTextureFrame,
+    // `None` once importing or drawing this texture failed: the failure is logged once and the
+    // surface is skipped until it leaves the scene.
+    imported: Option<ImportedSharedSurface>,
+}
+
+struct ImportedSharedSurface {
     srv: Option<ID3D11ShaderResourceView>,
-    fence: ID3D11Fence,
+    acquire: ID3D11Fence,
+    release: ID3D11Fence,
 }
 
 impl CachedSharedSurface {
+    fn new(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Self {
+        let mut surface = Self {
+            frame: frame.clone(),
+            imported: None,
+        };
+        surface.imported = surface.settle(ImportedSharedSurface::open(device, frame));
+        surface
+    }
+
+    /// Reopens fences whose handles changed and makes the GPU wait until the producer finished
+    /// writing `frame`. Returns the view to sample, or `None` when the surface must be skipped.
+    fn acquire(
+        &mut self,
+        device: &ID3D11Device,
+        context: Option<&ID3D11DeviceContext4>,
+        frame: &WindowsSharedTextureFrame,
+    ) -> Option<Option<ID3D11ShaderResourceView>> {
+        let imported = self.imported.as_mut()?;
+        let previous = &self.frame;
+        let result = (|| {
+            let context = context.context("D3D11 fence waits are unavailable")?;
+            if previous.fence_handle().as_raw_handle() != frame.fence_handle().as_raw_handle() {
+                imported.acquire = open_shared_fence(device, frame.fence_handle())?;
+            }
+            if previous.release_handle().as_raw_handle() != frame.release_handle().as_raw_handle() {
+                imported.release = open_shared_fence(device, frame.release_handle())?;
+            }
+            // SAFETY: the fence is a live COM object owned by this entry.
+            unsafe { context.Wait(&imported.acquire, frame.fence_value()) }
+                .context("waiting for the shared surface's acquire fence")?;
+            Ok(imported.srv.clone())
+        })();
+        self.frame = frame.clone();
+        let srv = self.settle(result);
+        if srv.is_none() {
+            self.imported = None;
+        }
+        srv
+    }
+
+    /// Tells the producer, GPU-ordered after the draw that sampled the frame, that the renderer
+    /// is done with every older frame.
+    fn release(&mut self, context: Option<&ID3D11DeviceContext4>) {
+        let Some(imported) = &self.imported else {
+            return;
+        };
+        let result = context
+            .context("D3D11 fence signals are unavailable")
+            .and_then(|context| {
+                // SAFETY: the fence is a live COM object owned by this entry.
+                unsafe { context.Signal(&imported.release, self.frame.fence_value()) }
+                    .context("signaling the shared surface's release fence")
+            });
+        if self.settle(result).is_none() {
+            self.imported = None;
+        }
+    }
+
+    fn settle<T>(&self, result: Result<T>) -> Option<T> {
+        result
+            .inspect_err(|error| log::error!("skipping shared surface {:?}: {error:#}", self.frame))
+            .ok()
+    }
+}
+
+impl ImportedSharedSurface {
     fn open(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Result<Self> {
         let device1: ID3D11Device1 = device
             .cast()
@@ -179,6 +256,16 @@ impl CachedSharedSurface {
             ),
             "shared surface texture has unsupported format {:?}",
             desc.Format
+        );
+        anyhow::ensure!(
+            desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32 == 0,
+            "shared surface texture uses a keyed mutex"
+        );
+        anyhow::ensure!(
+            desc.ArraySize == 1 && desc.SampleDesc.Count == 1,
+            "shared surface texture has {} slices and {} samples, expected one of each",
+            desc.ArraySize,
+            desc.SampleDesc.Count
         );
         anyhow::ensure!(
             desc.Width == frame.size().width.0 as u32
@@ -203,25 +290,25 @@ impl CachedSharedSurface {
         unsafe { device.CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv)) }
             .context("creating shared surface view")?;
         Ok(Self {
-            frame: frame.clone(),
             srv,
-            fence: Self::open_fence(device, frame)?,
+            acquire: open_shared_fence(device, frame.fence_handle())?,
+            release: open_shared_fence(device, frame.release_handle())?,
         })
     }
+}
 
-    fn open_fence(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Result<ID3D11Fence> {
-        let device5: ID3D11Device5 = device
-            .cast()
-            .context("D3D11 shared fences are unavailable")?;
-        let mut fence: Option<ID3D11Fence> = None;
-        // SAFETY: the frame owns the handle and keeps it open for this call; `fence` is a valid
-        // out-pointer.
-        unsafe {
-            device5.OpenSharedFence(HANDLE(frame.fence_handle().as_raw_handle()), &mut fence)
-        }
+fn open_shared_fence(
+    device: &ID3D11Device,
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> Result<ID3D11Fence> {
+    let device5: ID3D11Device5 = device
+        .cast()
+        .context("D3D11 shared fences are unavailable")?;
+    let mut fence: Option<ID3D11Fence> = None;
+    // SAFETY: the borrowed handle is open for this call; `fence` is a valid out-pointer.
+    unsafe { device5.OpenSharedFence(HANDLE(handle.as_raw_handle()), &mut fence) }
         .context("opening shared surface fence")?;
-        fence.context("D3D11 returned no shared surface fence")
-    }
+    fence.context("D3D11 returned no shared surface fence")
 }
 
 struct PathResources {
@@ -372,6 +459,7 @@ impl DirectXRendererDevices {
             dxgi_factory: dxgi_factory.clone(),
             device: device.clone(),
             device_context: device_context.clone(),
+            context4: device_context.cast().ok(),
             dxgi_device,
             annotation,
         })
@@ -1742,6 +1830,7 @@ impl DirectXRenderer {
         let sampler = [self.globals.sampler.clone()];
 
         for surface in surfaces {
+            let mut shared_key = None;
             let texture_srv = match &surface.source {
                 gpui::SurfaceSource::WindowsCapture(frame) => {
                     let key = frame.texture().as_raw() as usize;
@@ -1773,25 +1862,16 @@ impl DirectXRenderer {
                 }
                 gpui::SurfaceSource::WindowsSharedTexture(frame) => {
                     let key = frame.texture_handle().as_raw_handle() as usize;
-                    let shared = match resources.shared_surfaces.entry(key) {
-                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            entry.insert(CachedSharedSurface::open(&devices.device, frame)?)
-                        }
+                    let Some(srv) = resources
+                        .shared_surfaces
+                        .entry(key)
+                        .or_insert_with(|| CachedSharedSurface::new(&devices.device, frame))
+                        .acquire(&devices.device, devices.context4.as_ref(), frame)
+                    else {
+                        continue;
                     };
-                    if shared.frame.fence_handle().as_raw_handle()
-                        != frame.fence_handle().as_raw_handle()
-                    {
-                        shared.fence = CachedSharedSurface::open_fence(&devices.device, frame)?;
-                    }
-                    shared.frame = frame.clone();
-                    let ctx4: ID3D11DeviceContext4 =
-                        ctx.cast().context("D3D11 fence waits are unavailable")?;
-                    // Sampling must not start before the producer's writes complete.
-                    // SAFETY: the fence is a live COM object owned by the cache entry.
-                    unsafe { ctx4.Wait(&shared.fence, frame.fence_value()) }
-                        .context("waiting for shared surface fence")?;
-                    shared.srv.clone()
+                    shared_key = Some(key);
+                    srv
                 }
                 _ => {
                     log::error!("DirectX renderer cannot import this surface source");
@@ -1828,6 +1908,10 @@ impl DirectXRenderer {
                 ctx.PSSetSamplers(SURFACE_SAMPLER_REGISTER, Some(&sampler));
                 ctx.OMSetBlendState(&self.pipelines.surfaces.blend, None, 0xFFFFFFFF);
                 ctx.DrawInstanced(4, 1, 0, 0);
+            }
+            if let Some(shared) = shared_key.and_then(|key| resources.shared_surfaces.get_mut(&key))
+            {
+                shared.release(devices.context4.as_ref());
             }
         }
         Ok(())
@@ -3742,7 +3826,9 @@ mod tests {
         D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
     };
     use windows::Win32::Graphics::Direct3D11::*;
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+    };
     use windows::Win32::Graphics::Dxgi::IDXGIResource1;
     use windows::core::Interface as _;
 
@@ -4096,20 +4182,25 @@ mod tests {
         Ok(())
     }
 
-    /// A producer on its own D3D11 device, sharing a BGRA texture and a fence like a browser's
+    /// A producer on its own D3D11 device, sharing a texture and two fences like a browser's
     /// accelerated off-screen paint does.
     struct SharedTextureProducer {
         context: ID3D11DeviceContext4,
         target: ID3D11RenderTargetView,
         fence: ID3D11Fence,
+        release: ID3D11Fence,
         // Every frame reuses one handle per object, as a producer with a texture pool would.
-        texture_handle: Arc<OwnedHandle>,
-        fence_handle: Arc<OwnedHandle>,
+        handles: [Arc<OwnedHandle>; 3],
         size: Size<DevicePixels>,
     }
 
     impl SharedTextureProducer {
-        fn new(devices: &DirectXDevices, width: u32, height: u32) -> Result<Self> {
+        fn new(
+            devices: &DirectXDevices,
+            width: u32,
+            height: u32,
+            format: DXGI_FORMAT,
+        ) -> Result<Self> {
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
             // SAFETY: the adapter is live and the out-pointers are valid for the call.
@@ -4132,7 +4223,7 @@ mod tests {
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                Format: format,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
@@ -4151,27 +4242,30 @@ mod tests {
             // SAFETY: `texture` is a live render-target texture; `target` is a valid out-pointer.
             unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut target)) }?;
             let device5 = device.cast::<ID3D11Device5>()?;
-            let mut fence: Option<ID3D11Fence> = None;
-            // SAFETY: `fence` is a valid out-pointer.
-            unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence) }?;
-            let fence = fence.context("no producer fence")?;
+            let shared_fence = || -> Result<ID3D11Fence> {
+                let mut fence = None;
+                // SAFETY: `fence` is a valid out-pointer.
+                unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence) }?;
+                fence.context("no producer fence")
+            };
+            let (fence, release) = (shared_fence()?, shared_fence()?);
             let resource = texture.cast::<IDXGIResource1>()?;
-            // SAFETY: both objects were created shareable; each call returns a new NT handle
-            // that the `OwnedHandle` takes sole ownership of.
-            let (texture_handle, fence_handle) = unsafe {
-                let texture = resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?;
-                let fence = fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?;
-                (
-                    OwnedHandle::from_raw_handle(texture.0),
-                    OwnedHandle::from_raw_handle(fence.0),
-                )
+            // SAFETY: the objects were created shareable; each call returns a new NT handle that
+            // the `OwnedHandle` takes sole ownership of.
+            let handles = unsafe {
+                [
+                    resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                    fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                    release.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                ]
+                .map(|handle| Arc::new(OwnedHandle::from_raw_handle(handle.0)))
             };
             Ok(Self {
                 context: context.context("no producer context")?.cast()?,
                 target: target.context("no producer target")?,
                 fence,
-                texture_handle: Arc::new(texture_handle),
-                fence_handle: Arc::new(fence_handle),
+                release,
+                handles,
                 size: Size {
                     width: DevicePixels(width as i32),
                     height: DevicePixels(height as i32),
@@ -4187,16 +4281,30 @@ mod tests {
                 self.context.Signal(&self.fence, fence_value)?;
                 self.context.Flush();
             }
+            let [texture, fence, release] = self.handles.clone();
             Ok(WindowsSharedTextureFrame::new(
-                self.texture_handle.clone(),
-                self.fence_handle.clone(),
+                texture,
+                fence,
                 fence_value,
+                release,
                 self.size,
             ))
         }
+
+        /// Whether the renderer's GPU signals `value` on the release fence within two seconds.
+        fn released(&self, value: u64) -> bool {
+            (0..200).any(|_| {
+                // SAFETY: the fence is live and owned by this producer.
+                let done = unsafe { self.release.GetCompletedValue() } >= value;
+                if !done {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                done
+            })
+        }
     }
 
-    fn surface_scene(frame: Option<WindowsSharedTextureFrame>) -> Scene {
+    fn surface_scene(frame: Option<WindowsSharedTextureFrame>, quad: bool) -> Scene {
         let mut scene = Scene::default();
         if let Some(frame) = frame {
             scene.insert_primitive(PaintSurface {
@@ -4206,12 +4314,20 @@ mod tests {
                 source: frame.into(),
             });
         }
+        if quad {
+            scene.insert_primitive(Quad {
+                bounds: scaled(54.0, 2.0, 8.0, 8.0),
+                content_mask: full_mask(),
+                background: solid_background(rgb_to_hsla(rgb(0x00ff00))),
+                ..Default::default()
+            });
+        }
         scene.finish();
         scene
     }
 
     #[test]
-    fn shared_d3d11_textures_wait_on_their_fence_and_evict_when_unused() -> Result<()> {
+    fn shared_d3d11_textures_render_release_skip_and_evict() -> Result<()> {
         let window = HiddenWindow::new()?;
         let devices = DirectXDevices::new()?;
         let mut renderer = DirectXRenderer::new(window.0, &devices, true)?;
@@ -4219,7 +4335,7 @@ mod tests {
             width: DevicePixels(64),
             height: DevicePixels(40),
         })?;
-        let producer = SharedTextureProducer::new(&devices, 40, 20)?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
 
         let expect = |image: &image::RgbaImage, name: &str, x: u32, y: u32, wanted: [u8; 3]| {
             let [r, g, b, _] = image.get_pixel(x, y).0;
@@ -4229,12 +4345,19 @@ mod tests {
                 "{name} at ({x},{y}) rendered ({r},{g},{b}), expected {wanted:?}"
             );
         };
-        let shared_entries =
-            |renderer: &DirectXRenderer| renderer.resources.as_ref().unwrap().shared_surfaces.len();
+        let shared = |renderer: &DirectXRenderer| {
+            let surfaces = &renderer.resources.as_ref().unwrap().shared_surfaces;
+            (
+                surfaces.len(),
+                surfaces.values().filter(|s| s.imported.is_some()).count(),
+            )
+        };
+        // SAFETY: the renderer's context is live; flushing submits the queued release signals.
+        let flush = || unsafe { devices.device_context.Flush() };
 
         let red = producer.paint([1.0, 0.0, 0.0, 1.0], 1)?;
         let image = renderer.render_to_image(
-            &surface_scene(Some(red)),
+            &surface_scene(Some(red), false),
             WindowBackgroundAppearance::Opaque,
         )?;
         expect(&image, "first frame top-left", 11, 11, [255, 0, 0]);
@@ -4242,22 +4365,42 @@ mod tests {
         expect(&image, "left of surface", 8, 20, [255, 255, 255]);
         expect(&image, "below surface", 30, 32, [255, 255, 255]);
         expect(&image, "right of surface", 52, 20, [255, 255, 255]);
-        assert_eq!(shared_entries(&renderer), 1);
+        assert_eq!(shared(&renderer), (1, 1));
+        flush();
+        assert!(producer.released(1), "the renderer must release frame 1");
 
         // Same texture handle, higher fence value: the cached texture is sampled again.
         let blue = producer.paint([0.0, 0.0, 1.0, 1.0], 2)?;
         let image = renderer.render_to_image(
-            &surface_scene(Some(blue)),
+            &surface_scene(Some(blue), false),
             WindowBackgroundAppearance::Opaque,
         )?;
         expect(&image, "second frame", 30, 20, [0, 0, 255]);
         expect(&image, "outside second frame", 5, 5, [255, 255, 255]);
-        assert_eq!(shared_entries(&renderer), 1);
+        assert_eq!(shared(&renderer), (1, 1));
+        flush();
+        assert!(producer.released(2), "the renderer must release frame 2");
 
-        let image =
-            renderer.render_to_image(&surface_scene(None), WindowBackgroundAppearance::Opaque)?;
+        let image = renderer.render_to_image(
+            &surface_scene(None, false),
+            WindowBackgroundAppearance::Opaque,
+        )?;
         expect(&image, "removed surface", 30, 20, [255, 255, 255]);
-        assert_eq!(shared_entries(&renderer), 0);
+        assert_eq!(shared(&renderer), (0, 0));
+
+        // A texture the renderer cannot sample is skipped; the rest of the frame still draws.
+        let wrong_format =
+            SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_R8G8B8A8_UNORM)?;
+        for _ in 0..2 {
+            let frame = wrong_format.paint([1.0, 0.0, 0.0, 1.0], 1)?;
+            let image = renderer.render_to_image(
+                &surface_scene(Some(frame), true),
+                WindowBackgroundAppearance::Opaque,
+            )?;
+            expect(&image, "skipped surface", 30, 20, [255, 255, 255]);
+            expect(&image, "quad beside skipped surface", 58, 6, [0, 255, 0]);
+            assert_eq!(shared(&renderer), (1, 0));
+        }
         Ok(())
     }
 }

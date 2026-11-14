@@ -52,43 +52,55 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 }
 
 /// A frame that another Direct3D 11 device rendered into a shared texture, such as a browser's
-/// accelerated off-screen paint.
+/// accelerated off-screen paint. Only the Direct3D 11 renderer imports it.
 ///
-/// The producer must create the texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` (no keyed
-/// mutex) in `DXGI_FORMAT_B8G8R8A8_UNORM` or `DXGI_FORMAT_B8G8R8A8_TYPELESS`, holding
-/// premultiplied-alpha pixels, and share it with a shared `ID3D11Fence`. After writing the frame
-/// it signals the fence with `fence_value` and flushes; the renderer makes the GPU wait for that
-/// value before it samples the texture. The producer must not write the texture again until the
-/// frame is no longer painted.
+/// The producer creates the texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` and no keyed
+/// mutex, as a single-sample, single-slice `DXGI_FORMAT_B8G8R8A8_UNORM` or
+/// `DXGI_FORMAT_B8G8R8A8_TYPELESS` texture of premultiplied-alpha pixels (only mip 0 is shown).
+/// It also creates two shared `ID3D11Fence`s:
 ///
-/// A frame is identified by its texture handle and fence value: a new frame must use a new
+/// - the acquire fence: after writing the frame the producer signals it with `fence_value` and
+///   flushes; the renderer's GPU waits for that value before sampling the texture;
+/// - the release fence: after each draw that samples the frame the renderer's GPU signals it
+///   with `fence_value`.
+///
+/// Frames of one surface are shown in increasing fence-value order. The producer may write a
+/// texture last used for frame K again only once the release fence's completed value is greater
+/// than K: the renderer has then drawn a newer frame, so frame K is no longer in the scene. A
+/// producer therefore needs a pool of at least two textures.
+///
+/// A frame is identified by its texture handle and fence value, so a new frame must use a new
 /// texture handle or a higher fence value, otherwise damage tracking treats it as unchanged.
 /// The handles close when the last clone of the frame drops; renderers keep a clone while they
-/// cache the opened texture, so a handle value cannot be reused for another texture meanwhile.
+/// cache the opened objects, so a handle value cannot be reused for another object meanwhile.
 #[derive(Clone)]
 pub struct WindowsSharedTextureFrame {
     texture: Arc<OwnedHandle>,
     fence: Arc<OwnedHandle>,
     fence_value: u64,
+    release: Arc<OwnedHandle>,
     size: Size<DevicePixels>,
 }
 
 impl WindowsSharedTextureFrame {
-    /// Creates a frame from NT handles to a shared texture and a shared fence.
+    /// Creates a frame from NT handles to a shared texture, its acquire fence and its release
+    /// fence (see the type documentation for the protocol).
     ///
-    /// Pass an `Arc` to reuse one handle across frames (for example a fence that every frame
-    /// signals, or a texture from a producer's pool) so renderers open it only once. Invalid or
-    /// mismatched handles are reported as a draw error by the renderer.
+    /// Pass an `Arc` to reuse one handle across frames (the fences, or a texture from the
+    /// producer's pool) so renderers open it only once. A renderer that cannot import the
+    /// handles logs the failure once and skips the surface.
     pub fn new(
         texture: impl Into<Arc<OwnedHandle>>,
         fence: impl Into<Arc<OwnedHandle>>,
         fence_value: u64,
+        release: impl Into<Arc<OwnedHandle>>,
         size: Size<DevicePixels>,
     ) -> Self {
         Self {
             texture: texture.into(),
             fence: fence.into(),
             fence_value,
+            release: release.into(),
             size,
         }
     }
@@ -98,14 +110,20 @@ impl WindowsSharedTextureFrame {
         self.texture.as_handle()
     }
 
-    /// Returns the NT handle of the shared fence.
+    /// Returns the NT handle of the acquire fence the producer signals.
     pub fn fence_handle(&self) -> BorrowedHandle<'_> {
         self.fence.as_handle()
     }
 
-    /// Returns the fence value the producer signals once the frame is written.
+    /// Returns the value the producer signals on the acquire fence once the frame is written;
+    /// the renderer signals the same value on the release fence after sampling it.
     pub fn fence_value(&self) -> u64 {
         self.fence_value
+    }
+
+    /// Returns the NT handle of the release fence the renderer signals.
+    pub fn release_handle(&self) -> BorrowedHandle<'_> {
+        self.release.as_handle()
     }
 
     /// Returns the frame dimensions in device pixels.
@@ -119,8 +137,10 @@ impl std::fmt::Debug for WindowsSharedTextureFrame {
         formatter
             .debug_struct("WindowsSharedTextureFrame")
             .field("texture", &self.texture.as_raw_handle())
+            .field("fence", &self.fence.as_raw_handle())
             .field("fence_value", &self.fence_value)
+            .field("release", &self.release.as_raw_handle())
             .field("size", &self.size)
-            .finish_non_exhaustive()
+            .finish()
     }
 }
