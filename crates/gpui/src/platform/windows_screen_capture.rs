@@ -64,10 +64,19 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// - the release fence: after each draw that samples the frame the renderer's GPU signals it
 ///   with `fence_value`.
 ///
-/// Frames of one surface are shown in increasing fence-value order. The producer may write a
-/// texture last used for frame K again only once the release fence's completed value is greater
-/// than K: the renderer has then drawn a newer frame, so frame K is no longer in the scene. A
-/// producer therefore needs a pool of at least two textures.
+/// A release fence serves one surface in one window, and its frames must be shown in increasing
+/// fence-value order. The producer may write a texture last used for frame K again only once the
+/// release fence's completed value is greater than K: the renderer has then drawn a newer frame,
+/// so frame K is no longer in the scene. A producer therefore needs a pool of at least two
+/// textures. A frame is released when it is drawn; a surface left entirely outside a damage
+/// redraw is not drawn, so its frame is released when the surface is next drawn.
+///
+/// A surface the renderer cannot import (for example a texture of another format, or handles
+/// from another adapter) is skipped and logged once; the renderer still signals its release
+/// fence when it can open it, and retries the import when a frame brings other fence handles.
+/// If the release fence itself cannot be used, frames are never released, so a producer should
+/// treat a release that does not arrive within its own timeout as a failure and fall back, for
+/// example by recreating its textures and fences.
 ///
 /// A frame is identified by its texture handle and fence value, so a new frame must use a new
 /// texture handle or a higher fence value, otherwise damage tracking treats it as unchanged.

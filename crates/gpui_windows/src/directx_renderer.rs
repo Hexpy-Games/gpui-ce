@@ -160,141 +160,170 @@ struct CachedSharedSurface {
     // The latest frame drawn from this texture. Holding it keeps the handles open, so their
     // values cannot be reused for other objects while they key this cache.
     frame: WindowsSharedTextureFrame,
-    // `None` once importing or drawing this texture failed: the failure is logged once and the
-    // surface is skipped until it leaves the scene.
-    imported: Option<ImportedSharedSurface>,
-}
-
-struct ImportedSharedSurface {
-    srv: Option<ID3D11ShaderResourceView>,
-    acquire: ID3D11Fence,
-    release: ID3D11Fence,
+    // The view and size of the imported texture.
+    texture: Option<(Option<ID3D11ShaderResourceView>, Size<DevicePixels>)>,
+    acquire: Option<ID3D11Fence>,
+    release: Option<ID3D11Fence>,
+    // Importing or using the current (texture, acquire, release) handles failed: the failure was
+    // logged once and the surface is skipped until a frame brings other fence handles.
+    failed: bool,
 }
 
 impl CachedSharedSurface {
-    fn new(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Self {
-        let mut surface = Self {
+    fn new(frame: &WindowsSharedTextureFrame) -> Self {
+        Self {
             frame: frame.clone(),
-            imported: None,
-        };
-        surface.imported = surface.settle(ImportedSharedSurface::open(device, frame));
-        surface
+            texture: None,
+            acquire: None,
+            release: None,
+            failed: false,
+        }
     }
 
-    /// Reopens fences whose handles changed and makes the GPU wait until the producer finished
-    /// writing `frame`. Returns the view to sample, or `None` when the surface must be skipped.
+    /// Imports what `frame` needs and makes the GPU wait until the producer finished writing
+    /// it. Returns the view to sample, or `None` when the surface must be skipped.
     fn acquire(
         &mut self,
         device: &ID3D11Device,
         context: Option<&ID3D11DeviceContext4>,
         frame: &WindowsSharedTextureFrame,
     ) -> Option<Option<ID3D11ShaderResourceView>> {
-        let imported = self.imported.as_mut()?;
-        let previous = &self.frame;
-        let result = (|| {
-            let context = context.context("D3D11 fence waits are unavailable")?;
-            if previous.fence_handle().as_raw_handle() != frame.fence_handle().as_raw_handle() {
-                imported.acquire = open_shared_fence(device, frame.fence_handle())?;
-            }
-            if previous.release_handle().as_raw_handle() != frame.release_handle().as_raw_handle() {
-                imported.release = open_shared_fence(device, frame.release_handle())?;
-            }
-            // SAFETY: the fence is a live COM object owned by this entry.
-            unsafe { context.Wait(&imported.acquire, frame.fence_value()) }
-                .context("waiting for the shared surface's acquire fence")?;
-            Ok(imported.srv.clone())
-        })();
-        self.frame = frame.clone();
-        let srv = self.settle(result);
-        if srv.is_none() {
-            self.imported = None;
+        if self.frame.fence_handle().as_raw_handle() != frame.fence_handle().as_raw_handle() {
+            self.acquire = None;
+            self.failed = false;
         }
-        srv
+        if self.frame.release_handle().as_raw_handle() != frame.release_handle().as_raw_handle() {
+            self.release = None;
+            self.failed = false;
+        }
+        self.frame = frame.clone();
+        if self.failed {
+            return None;
+        }
+        let result = self.import_and_wait(device, context);
+        self.settle(result)
     }
 
-    /// Tells the producer, GPU-ordered after the draw that sampled the frame, that the renderer
-    /// is done with every older frame.
+    fn import_and_wait(
+        &mut self,
+        device: &ID3D11Device,
+        context: Option<&ID3D11DeviceContext4>,
+    ) -> Result<Option<ID3D11ShaderResourceView>> {
+        // The release fence comes first so that a surface whose texture fails can still be
+        // released.
+        if self.release.is_none() {
+            self.release = Some(open_shared_fence(device, self.frame.release_handle())?);
+        }
+        let (srv, size) = match &self.texture {
+            Some(texture) => texture.clone(),
+            None => self
+                .texture
+                .insert(open_shared_texture(device, &self.frame)?)
+                .clone(),
+        };
+        let acquire = match &self.acquire {
+            Some(acquire) => acquire.clone(),
+            None => self
+                .acquire
+                .insert(open_shared_fence(device, self.frame.fence_handle())?)
+                .clone(),
+        };
+        anyhow::ensure!(
+            size == self.frame.size(),
+            "shared surface texture is {size:?}, frame says {:?}",
+            self.frame.size()
+        );
+        let context = context.context("D3D11 fence waits are unavailable")?;
+        // SAFETY: the fence is a live COM object owned by this entry.
+        unsafe { context.Wait(&acquire, self.frame.fence_value()) }
+            .context("waiting for the shared surface's acquire fence")?;
+        Ok(srv)
+    }
+
+    /// Signals the frame's value on the release fence, GPU-ordered after any draw that sampled
+    /// it, so the producer may reuse the textures of older frames.
     fn release(&mut self, context: Option<&ID3D11DeviceContext4>) {
-        let Some(imported) = &self.imported else {
+        let Some(release) = &self.release else {
             return;
         };
         let result = context
             .context("D3D11 fence signals are unavailable")
             .and_then(|context| {
                 // SAFETY: the fence is a live COM object owned by this entry.
-                unsafe { context.Signal(&imported.release, self.frame.fence_value()) }
+                unsafe { context.Signal(release, self.frame.fence_value()) }
                     .context("signaling the shared surface's release fence")
             });
-        if self.settle(result).is_none() {
-            self.imported = None;
+        if result.is_err() {
+            self.release = None;
         }
+        self.settle(result);
     }
 
-    fn settle<T>(&self, result: Result<T>) -> Option<T> {
-        result
-            .inspect_err(|error| log::error!("skipping shared surface {:?}: {error:#}", self.frame))
-            .ok()
+    fn settle<T>(&mut self, result: Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                if !self.failed {
+                    log::error!("skipping shared surface {:?}: {error:#}", self.frame);
+                }
+                self.failed = true;
+                None
+            }
+        }
     }
 }
 
-impl ImportedSharedSurface {
-    fn open(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Result<Self> {
-        let device1: ID3D11Device1 = device
-            .cast()
-            .context("D3D11 shared NT handles are unavailable")?;
-        // SAFETY: the frame owns the handle and keeps it open for this call.
-        let texture: ID3D11Texture2D =
-            unsafe { device1.OpenSharedResource1(HANDLE(frame.texture_handle().as_raw_handle())) }
-                .context("opening shared surface texture")?;
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: `desc` is a valid out-pointer for the duration of the call.
-        unsafe { texture.GetDesc(&mut desc) };
-        anyhow::ensure!(
-            matches!(
-                desc.Format,
-                DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_TYPELESS
-            ),
-            "shared surface texture has unsupported format {:?}",
-            desc.Format
-        );
-        anyhow::ensure!(
-            desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32 == 0,
-            "shared surface texture uses a keyed mutex"
-        );
-        anyhow::ensure!(
-            desc.ArraySize == 1 && desc.SampleDesc.Count == 1,
-            "shared surface texture has {} slices and {} samples, expected one of each",
-            desc.ArraySize,
-            desc.SampleDesc.Count
-        );
-        anyhow::ensure!(
-            desc.Width == frame.size().width.0 as u32
-                && desc.Height == frame.size().height.0 as u32,
-            "shared surface texture is {}x{}, frame says {:?}",
-            desc.Width,
-            desc.Height,
-            frame.size()
-        );
-        let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_SRV {
-                    MostDetailedMip: 0,
-                    MipLevels: 1,
-                },
+fn open_shared_texture(
+    device: &ID3D11Device,
+    frame: &WindowsSharedTextureFrame,
+) -> Result<(Option<ID3D11ShaderResourceView>, Size<DevicePixels>)> {
+    let device1: ID3D11Device1 = device
+        .cast()
+        .context("D3D11 shared NT handles are unavailable")?;
+    // SAFETY: the frame owns the handle and keeps it open for this call.
+    let texture: ID3D11Texture2D =
+        unsafe { device1.OpenSharedResource1(HANDLE(frame.texture_handle().as_raw_handle())) }
+            .context("opening shared surface texture")?;
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: `desc` is a valid out-pointer for the duration of the call.
+    unsafe { texture.GetDesc(&mut desc) };
+    anyhow::ensure!(
+        matches!(
+            desc.Format,
+            DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_TYPELESS
+        ),
+        "shared surface texture has unsupported format {:?}",
+        desc.Format
+    );
+    anyhow::ensure!(
+        desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32 == 0,
+        "shared surface texture uses a keyed mutex"
+    );
+    anyhow::ensure!(
+        desc.ArraySize == 1 && desc.SampleDesc.Count == 1,
+        "shared surface texture has {} slices and {} samples, expected one of each",
+        desc.ArraySize,
+        desc.SampleDesc.Count
+    );
+    let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_SRV {
+                MostDetailedMip: 0,
+                MipLevels: 1,
             },
-        };
-        let mut srv = None;
-        // SAFETY: `texture` and `srv_desc` are valid and `srv` is a valid out-pointer.
-        unsafe { device.CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv)) }
-            .context("creating shared surface view")?;
-        Ok(Self {
-            srv,
-            acquire: open_shared_fence(device, frame.fence_handle())?,
-            release: open_shared_fence(device, frame.release_handle())?,
-        })
-    }
+        },
+    };
+    let mut srv = None;
+    // SAFETY: `texture` and `srv_desc` are valid and `srv` is a valid out-pointer.
+    unsafe { device.CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv)) }
+        .context("creating shared surface view")?;
+    let size = Size {
+        width: DevicePixels(desc.Width as i32),
+        height: DevicePixels(desc.Height as i32),
+    };
+    Ok((srv, size))
 }
 
 fn open_shared_fence(
@@ -760,6 +789,7 @@ impl DirectXRenderer {
             keys.push(Some(group.key));
         }
         self.animation_time_ms = gpui::animation_time_ms();
+        self.retain_surfaces(scene);
         if !self.render_damage(scene)? {
             self.render(scene, background_appearance, true)?;
         }
@@ -935,7 +965,6 @@ impl DirectXRenderer {
         let requirements = &planned;
         let device = &self.devices.as_ref().context("devices missing")?.device;
         let resources = self.resources.as_mut().context("resources missing")?;
-        resources.retain_surface_views(&scene.surfaces);
 
         if requirements.uses_path_target {
             resources.ensure_path_resources(device)?;
@@ -1295,6 +1324,13 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    /// Drops cached surface imports that `scene`, the window's own scene, no longer paints.
+    fn retain_surfaces(&mut self, scene: &Scene) {
+        if let Some(resources) = self.resources.as_mut() {
+            resources.retain_surface_views(&scene.surfaces);
+        }
+    }
+
     /// Rasterises a scene region as tightly packed, premultiplied BGRA rows.
     pub(crate) fn rasterize(
         &mut self,
@@ -1415,6 +1451,7 @@ impl DirectXRenderer {
             !self.skip_draws,
             "render_to_image unavailable while recovering from a lost device"
         );
+        self.retain_surfaces(scene);
         self.render(scene, background_appearance, true)?;
 
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -1862,12 +1899,15 @@ impl DirectXRenderer {
                 }
                 gpui::SurfaceSource::WindowsSharedTexture(frame) => {
                     let key = frame.texture_handle().as_raw_handle() as usize;
-                    let Some(srv) = resources
+                    let shared = resources
                         .shared_surfaces
                         .entry(key)
-                        .or_insert_with(|| CachedSharedSurface::new(&devices.device, frame))
-                        .acquire(&devices.device, devices.context4.as_ref(), frame)
+                        .or_insert_with(|| CachedSharedSurface::new(frame));
+                    let Some(srv) =
+                        shared.acquire(&devices.device, devices.context4.as_ref(), frame)
                     else {
+                        // Nothing samples the frame, so the producer may have it back now.
+                        shared.release(devices.context4.as_ref());
                         continue;
                     };
                     shared_key = Some(key);
@@ -4302,6 +4342,22 @@ mod tests {
                 done
             })
         }
+
+        /// Shares both fences again under new handles, as a producer recovering from a failure.
+        fn reshare_fences(&mut self) -> Result<()> {
+            // SAFETY: the fences were created shareable; each call returns a new NT handle that
+            // the `OwnedHandle` takes sole ownership of.
+            let [fence, release] = unsafe {
+                [
+                    self.fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                    self.release.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                ]
+                .map(|handle| Arc::new(OwnedHandle::from_raw_handle(handle.0)))
+            };
+            self.handles[1] = fence;
+            self.handles[2] = release;
+            Ok(())
+        }
     }
 
     fn surface_scene(frame: Option<WindowsSharedTextureFrame>, quad: bool) -> Scene {
@@ -4326,81 +4382,159 @@ mod tests {
         scene
     }
 
-    #[test]
-    fn shared_d3d11_textures_render_release_skip_and_evict() -> Result<()> {
+    fn expect_pixel(image: &image::RgbaImage, name: &str, x: u32, y: u32, wanted: [u8; 3]) {
+        let [r, g, b, _] = image.get_pixel(x, y).0;
+        let close = |actual: u8, wanted: u8| actual.abs_diff(wanted) <= 8;
+        assert!(
+            close(r, wanted[0]) && close(g, wanted[1]) && close(b, wanted[2]),
+            "{name} at ({x},{y}) rendered ({r},{g},{b}), expected {wanted:?}"
+        );
+    }
+
+    /// Cached shared surfaces, and how many of them are drawable.
+    fn shared_state(renderer: &DirectXRenderer) -> (usize, usize) {
+        let surfaces = &renderer.resources.as_ref().unwrap().shared_surfaces;
+        let drawable = surfaces.values().filter(|surface| !surface.failed).count();
+        (surfaces.len(), drawable)
+    }
+
+    fn shared_renderer(devices: &DirectXDevices) -> Result<(HiddenWindow, DirectXRenderer)> {
         let window = HiddenWindow::new()?;
-        let devices = DirectXDevices::new()?;
-        let mut renderer = DirectXRenderer::new(window.0, &devices, true)?;
+        let mut renderer = DirectXRenderer::new(window.0, devices, true)?;
         renderer.resize(Size {
             width: DevicePixels(64),
             height: DevicePixels(40),
         })?;
-        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        Ok((window, renderer))
+    }
 
-        let expect = |image: &image::RgbaImage, name: &str, x: u32, y: u32, wanted: [u8; 3]| {
-            let [r, g, b, _] = image.get_pixel(x, y).0;
-            let close = |actual: u8, wanted: u8| actual.abs_diff(wanted) <= 8;
-            assert!(
-                close(r, wanted[0]) && close(g, wanted[1]) && close(b, wanted[2]),
-                "{name} at ({x},{y}) rendered ({r},{g},{b}), expected {wanted:?}"
-            );
-        };
-        let shared = |renderer: &DirectXRenderer| {
-            let surfaces = &renderer.resources.as_ref().unwrap().shared_surfaces;
-            (
-                surfaces.len(),
-                surfaces.values().filter(|s| s.imported.is_some()).count(),
-            )
-        };
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    #[test]
+    fn shared_d3d11_textures_render_release_skip_and_evict() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
         // SAFETY: the renderer's context is live; flushing submits the queued release signals.
         let flush = || unsafe { devices.device_context.Flush() };
+        let opaque = WindowBackgroundAppearance::Opaque;
 
-        let red = producer.paint([1.0, 0.0, 0.0, 1.0], 1)?;
-        let image = renderer.render_to_image(
-            &surface_scene(Some(red), false),
-            WindowBackgroundAppearance::Opaque,
-        )?;
-        expect(&image, "first frame top-left", 11, 11, [255, 0, 0]);
-        expect(&image, "first frame bottom-right", 48, 28, [255, 0, 0]);
-        expect(&image, "left of surface", 8, 20, [255, 255, 255]);
-        expect(&image, "below surface", 30, 32, [255, 255, 255]);
-        expect(&image, "right of surface", 52, 20, [255, 255, 255]);
-        assert_eq!(shared(&renderer), (1, 1));
+        let red = producer.paint(RED, 1)?;
+        let image = renderer.render_to_image(&surface_scene(Some(red), false), opaque)?;
+        expect_pixel(&image, "first frame top-left", 11, 11, [255, 0, 0]);
+        expect_pixel(&image, "first frame bottom-right", 48, 28, [255, 0, 0]);
+        expect_pixel(&image, "left of surface", 8, 20, [255, 255, 255]);
+        expect_pixel(&image, "below surface", 30, 32, [255, 255, 255]);
+        expect_pixel(&image, "right of surface", 52, 20, [255, 255, 255]);
+        assert_eq!(shared_state(&renderer), (1, 1));
         flush();
         assert!(producer.released(1), "the renderer must release frame 1");
 
         // Same texture handle, higher fence value: the cached texture is sampled again.
-        let blue = producer.paint([0.0, 0.0, 1.0, 1.0], 2)?;
-        let image = renderer.render_to_image(
-            &surface_scene(Some(blue), false),
-            WindowBackgroundAppearance::Opaque,
-        )?;
-        expect(&image, "second frame", 30, 20, [0, 0, 255]);
-        expect(&image, "outside second frame", 5, 5, [255, 255, 255]);
-        assert_eq!(shared(&renderer), (1, 1));
+        let blue = producer.paint(BLUE, 2)?;
+        let image = renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+        expect_pixel(&image, "second frame", 30, 20, [0, 0, 255]);
+        expect_pixel(&image, "outside second frame", 5, 5, [255, 255, 255]);
+        assert_eq!(shared_state(&renderer), (1, 1));
         flush();
         assert!(producer.released(2), "the renderer must release frame 2");
 
-        let image = renderer.render_to_image(
-            &surface_scene(None, false),
-            WindowBackgroundAppearance::Opaque,
-        )?;
-        expect(&image, "removed surface", 30, 20, [255, 255, 255]);
-        assert_eq!(shared(&renderer), (0, 0));
+        let image = renderer.render_to_image(&surface_scene(None, false), opaque)?;
+        expect_pixel(&image, "removed surface", 30, 20, [255, 255, 255]);
+        assert_eq!(shared_state(&renderer), (0, 0));
 
-        // A texture the renderer cannot sample is skipped; the rest of the frame still draws.
+        // A texture the renderer cannot sample is skipped, yet released; the rest of the frame
+        // still draws.
         let wrong_format =
             SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_R8G8B8A8_UNORM)?;
-        for _ in 0..2 {
-            let frame = wrong_format.paint([1.0, 0.0, 0.0, 1.0], 1)?;
-            let image = renderer.render_to_image(
-                &surface_scene(Some(frame), true),
-                WindowBackgroundAppearance::Opaque,
-            )?;
-            expect(&image, "skipped surface", 30, 20, [255, 255, 255]);
-            expect(&image, "quad beside skipped surface", 58, 6, [0, 255, 0]);
-            assert_eq!(shared(&renderer), (1, 0));
+        for value in 1..=2 {
+            let frame = wrong_format.paint(RED, value)?;
+            let image = renderer.render_to_image(&surface_scene(Some(frame), true), opaque)?;
+            expect_pixel(&image, "skipped surface", 30, 20, [255, 255, 255]);
+            expect_pixel(&image, "quad beside skipped surface", 58, 6, [0, 255, 0]);
+            assert_eq!(shared_state(&renderer), (1, 0));
+            flush();
+            assert!(
+                wrong_format.released(value),
+                "a skipped frame must be released"
+            );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_surfaces_survive_group_rasterization_and_recover_with_new_fences() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let mut producer =
+            SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        // SAFETY: the renderer's context is live; flushing submits the queued release signals.
+        let flush = || unsafe { devices.device_context.Flush() };
+        let opaque = WindowBackgroundAppearance::Opaque;
+        let view = |renderer: &DirectXRenderer| {
+            let surfaces = &renderer.resources.as_ref().unwrap().shared_surfaces;
+            surfaces.values().next()?.texture.as_ref()?.0.clone()
+        };
+
+        renderer.render_to_image(&surface_scene(Some(producer.paint(RED, 1)?), false), opaque)?;
+        // Holding the view keeps its address from being reused by a re-import.
+        let imported = view(&renderer).context("the surface must be imported")?;
+
+        // A compositor group that misses its cache is rasterized from the group's own scene,
+        // which never contains surfaces; that must not evict the window's surfaces.
+        renderer
+            .rasterize(&surface_scene(None, true), scaled(54.0, 2.0, 8.0, 8.0))
+            .context("rasterizing the group")?;
+        assert_eq!(shared_state(&renderer), (1, 1));
+        let blue = producer.paint(BLUE, 2)?;
+        let image = renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+        expect_pixel(
+            &image,
+            "frame after group rasterization",
+            30,
+            20,
+            [0, 0, 255],
+        );
+        assert_eq!(
+            view(&renderer).map(|view| view.as_raw()),
+            Some(imported.as_raw()),
+            "the texture must not be imported again"
+        );
+
+        // A frame whose size disagrees with its texture is skipped but released, and stays
+        // skipped while frames bring the same fence handles.
+        producer.paint(GREEN, 3)?;
+        let [texture, fence, release] = producer.handles.clone();
+        let tiny = Size {
+            width: DevicePixels(1),
+            height: DevicePixels(1),
+        };
+        let wrong_size = WindowsSharedTextureFrame::new(texture, fence, 3, release, tiny);
+        let image = renderer.render_to_image(&surface_scene(Some(wrong_size), false), opaque)?;
+        expect_pixel(&image, "wrong-size frame", 30, 20, [255, 255, 255]);
+        let green = producer.paint(GREEN, 4)?;
+        let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
+        expect_pixel(
+            &image,
+            "frame with the failed fence handles",
+            30,
+            20,
+            [255, 255, 255],
+        );
+        assert_eq!(shared_state(&renderer), (1, 0));
+        flush();
+        assert!(producer.released(4), "skipped frames must be released");
+
+        // New fence handles retry the import.
+        producer.reshare_fences()?;
+        let green = producer.paint(GREEN, 5)?;
+        let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
+        expect_pixel(&image, "recovered frame", 30, 20, [0, 255, 0]);
+        assert_eq!(shared_state(&renderer), (1, 1));
+        flush();
+        assert!(producer.released(5), "the recovered frame must be released");
         Ok(())
     }
 }
