@@ -637,6 +637,26 @@ impl<'a, T: 'static> Context<'a, T> {
         subscription
     }
 
+    /// Register a listener to be called when a text input gains focus in the window: the newly
+    /// focused element paints an input handler that accepts text (gained, or moved from another
+    /// text input). Returns a subscription and persists until the subscription is dropped.
+    pub fn on_text_input_focus(
+        &mut self,
+        window: &mut Window,
+        mut listener: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        let (subscription, activate) = window.text_input_focus_listeners.insert(
+            (),
+            Box::new(move |window, cx| {
+                view.update(cx, |view, cx| listener(view, window, cx))
+                    .is_ok()
+            }),
+        );
+        self.defer(|_| activate());
+        subscription
+    }
+
     /// Register a listener to be called when the given focus handle or one of its descendants loses focus.
     /// Returns a subscription and persists until the subscription is dropped.
     pub fn on_focus_out(

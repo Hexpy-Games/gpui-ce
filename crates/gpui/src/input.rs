@@ -463,6 +463,59 @@ mod configuration_tests {
         );
     }
 
+    // test-category: pure-logic
+    #[gpui::test]
+    fn text_input_focus_listener_fires_when_a_text_input_gains_focus(cx: &mut TestAppContext) {
+        struct TextInputFocusObserver {
+            calls: usize,
+        }
+
+        let window = cx.add_window(|_, cx| ConfigurationTestView {
+            focus_handle: cx.focus_handle(),
+            second_focus_handle: cx.focus_handle(),
+            configuration: TextInputConfiguration::default(),
+        });
+        let view = window.root(cx).unwrap();
+        let window = AnyWindowHandle::from(window);
+        let observer = cx.new(|_| TextInputFocusObserver { calls: 0 });
+        let _subscription = cx
+            .update_window(window, |_, window, cx| {
+                observer.update(cx, |_, cx| {
+                    cx.on_text_input_focus(window, |observer, _, _| observer.calls += 1)
+                })
+            })
+            .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        };
+
+        draw(cx);
+        assert_eq!(observer.read_with(cx, |observer, _| observer.calls), 0);
+
+        cx.update_window(window, |_, window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+        })
+        .unwrap();
+        draw(cx);
+        assert_eq!(observer.read_with(cx, |observer, _| observer.calls), 1);
+
+        draw(cx);
+        assert_eq!(observer.read_with(cx, |observer, _| observer.calls), 1);
+
+        cx.update_window(window, |_, window, cx| window.blur(cx))
+            .unwrap();
+        draw(cx);
+        cx.update_window(window, |_, window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+        })
+        .unwrap();
+        draw(cx);
+        assert_eq!(observer.read_with(cx, |observer, _| observer.calls), 2);
+    }
+
     struct ConfigurationTestView {
         focus_handle: FocusHandle,
         second_focus_handle: FocusHandle,
