@@ -26,6 +26,37 @@ pub fn damage_worth_partial(
     viewport: (i32, i32),
     plan_skips_blur: bool,
 ) -> bool {
-    let target = gpui::size(gpui::DevicePixels(viewport.0), gpui::DevicePixels(viewport.1));
+    let target = gpui::size(
+        gpui::DevicePixels(viewport.0),
+        gpui::DevicePixels(viewport.1),
+    );
     damage_fits(scissor, target) || plan_skips_blur
+}
+
+#[cfg(test)]
+mod tests {
+    // test-category: pure-logic
+
+    use super::damage_worth_partial;
+    use crate::blur::ScissorRectangle;
+
+    #[test]
+    fn damage_worth_partial_when_blur_is_skipped() {
+        let large = ScissorRectangle {
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 400,
+        };
+        let small = ScissorRectangle {
+            width: 100,
+            height: 100,
+            ..large
+        };
+        let viewport = (400, 400);
+        assert!(!damage_worth_partial(large, viewport, false));
+        assert!(damage_worth_partial(large, viewport, true));
+        assert!(damage_worth_partial(small, viewport, false));
+        assert!(damage_worth_partial(small, viewport, true));
+    }
 }

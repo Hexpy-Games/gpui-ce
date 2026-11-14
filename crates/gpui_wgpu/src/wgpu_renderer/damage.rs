@@ -80,7 +80,10 @@ pub(super) fn render_damage_to_view(
         .count();
     if !gpui_render::damage_worth_partial(
         scissor,
-        (renderer.target.width() as i32, renderer.target.height() as i32),
+        (
+            renderer.target.width() as i32,
+            renderer.target.height() as i32,
+        ),
         plan.reblur.len() < blurred_filters,
     ) {
         return None;

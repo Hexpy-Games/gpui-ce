@@ -836,27 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn damage_worth_partial_when_blur_is_skipped() {
-        use gpui_render::{blur::ScissorRectangle, damage_worth_partial};
-        let large = ScissorRectangle {
-            x: 0,
-            y: 0,
-            width: 300,
-            height: 400,
-        };
-        let small = ScissorRectangle {
-            width: 100,
-            height: 100,
-            ..large
-        };
-        let viewport = (400, 400);
-        assert!(!damage_worth_partial(large, viewport, false));
-        assert!(damage_worth_partial(large, viewport, true));
-        assert!(damage_worth_partial(small, viewport, false));
-        assert!(damage_worth_partial(small, viewport, true));
-    }
-
-    #[test]
     fn surface_changes_redraw_only_where_they_paint() {
         let surface_bounds = rect(20.0, 20.0, 20.0, 20.0);
         let quad_bounds = rect(300.0, 300.0, 10.0, 10.0);
