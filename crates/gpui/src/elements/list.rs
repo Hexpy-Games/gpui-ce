@@ -561,6 +561,17 @@ impl ListState {
         self.0.borrow_mut().scroll_handler = Some(Box::new(handler))
     }
 
+    /// Runs the scroll handler for `event` with the list state released, so the handler can
+    /// read or change the list through this `ListState`.
+    fn emit_scroll(&self, event: &ListScrollEvent, window: &mut Window, cx: &mut App) {
+        let Some(mut handler) = self.0.borrow_mut().scroll_handler.take() else {
+            return;
+        };
+        handler(event, window, cx);
+        // Keep a handler the callback installed in the meantime.
+        self.0.borrow_mut().scroll_handler.get_or_insert(handler);
+    }
+
     /// Get the current scroll offset, in terms of the list's items.
     pub fn logical_scroll_top(&self) -> ListOffset {
         self.0.borrow().logical_scroll_top()
@@ -911,13 +922,12 @@ impl StateInner {
         height: Pixels,
         delta: Point<Pixels>,
         current_view: EntityId,
-        window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Option<ListScrollEvent> {
         // Drop scroll events after a reset, since we can't calculate
         // the new logical scroll top without the item heights
         if self.reset {
-            return;
+            return None;
         }
 
         let padding = self.last_padding.unwrap_or_default();
@@ -949,24 +959,21 @@ impl StateInner {
             self.follow_state.stop_following();
         }
 
-        if let Some(handler) = self.scroll_handler.as_mut() {
+        let event = self.scroll_handler.is_some().then(|| {
             let visible_range = Self::visible_range(&self.items, height, scroll_top);
-            handler(
-                &ListScrollEvent {
-                    visible_range,
-                    count: self.items.summary().count,
-                    is_scrolled: self.logical_scroll_top.is_some(),
-                    is_following_tail: matches!(
-                        self.follow_state,
-                        FollowState::Tail { is_following: true }
-                    ),
-                },
-                window,
-                cx,
-            );
-        }
+            ListScrollEvent {
+                visible_range,
+                count: self.items.summary().count,
+                is_scrolled: self.logical_scroll_top.is_some(),
+                is_following_tail: matches!(
+                    self.follow_state,
+                    FollowState::Tail { is_following: true }
+                ),
+            }
+        });
 
         cx.notify(current_view);
+        event
     }
 
     fn logical_scroll_top(&self) -> ListOffset {
@@ -1552,21 +1559,29 @@ impl Element for List {
         window: &mut Window,
         cx: &mut App,
     ) -> ListPrepaintState {
-        let state = &mut *self.state.0.borrow_mut();
-        state.reset = false;
-        if let Some((slice, active)) = state.glide.step(cx.background_executor().now()) {
-            state.scroll(
-                &state.logical_scroll_top(),
-                bounds.size.height,
-                slice,
-                window.current_view(),
-                window,
-                cx,
-            );
-            if active {
-                window.request_animation_frame();
+        let scrolled = {
+            let state = &mut *self.state.0.borrow_mut();
+            state.reset = false;
+            if let Some((slice, active)) = state.glide.step(cx.background_executor().now()) {
+                let scrolled = state.scroll(
+                    &state.logical_scroll_top(),
+                    bounds.size.height,
+                    slice,
+                    window.current_view(),
+                    cx,
+                );
+                if active {
+                    window.request_animation_frame();
+                }
+                scrolled
+            } else {
+                None
             }
+        };
+        if let Some(event) = scrolled {
+            self.state.emit_scroll(&event, window, cx);
         }
+        let state = &mut *self.state.0.borrow_mut();
 
         let style = self.base_style();
         let content_mask = style.scroll_mask(bounds, window.rem_size());
@@ -1648,26 +1663,31 @@ impl Element for List {
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
-                let mut state = list_state.0.borrow_mut();
-                if !event.delta.precise() && wheel_glide::enabled(cx) {
-                    let top = state.scroll_top(&scroll_top);
-                    let max = state.max_scroll_offset();
-                    let room = (point(px(0.), max - top), point(px(0.), top));
-                    if state.glide.add(
-                        event.delta.pixel_delta(px(20.)),
-                        room,
-                        cx.background_executor().now(),
-                    ) {
-                        cx.notify(current_view);
+                let scrolled = {
+                    let mut state = list_state.0.borrow_mut();
+                    if !event.delta.precise() && wheel_glide::enabled(cx) {
+                        let top = state.scroll_top(&scroll_top);
+                        let max = state.max_scroll_offset();
+                        let room = (point(px(0.), max - top), point(px(0.), top));
+                        if state.glide.add(
+                            event.delta.pixel_delta(px(20.)),
+                            room,
+                            cx.background_executor().now(),
+                        ) {
+                            cx.notify(current_view);
+                        }
+                        return;
                     }
-                    return;
+                    if event.delta.precise() {
+                        state.glide.cancel();
+                    }
+                    accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
+                    let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                    state.scroll(&scroll_top, height, pixel_delta, current_view, cx)
+                };
+                if let Some(event) = scrolled {
+                    list_state.emit_scroll(&event, window, cx);
                 }
-                if event.delta.precise() {
-                    state.glide.cancel();
-                }
-                accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                state.scroll(&scroll_top, height, pixel_delta, current_view, window, cx)
             }
         });
 
@@ -1781,7 +1801,7 @@ impl sum_tree::SeekTarget<'_, ListItemSummary, ListItemSummary> for Height {
 #[cfg(test)]
 mod test {
 
-    use gpui::{ScrollDelta, ScrollWheelEvent};
+    use gpui::{InputEvent, ScrollDelta, ScrollWheelEvent};
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -1995,6 +2015,57 @@ mod test {
             .w_full()
             .h_full()
         }
+    }
+
+    #[gpui::test]
+    fn test_scroll_handler_can_read_the_list(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::WheelSmoothing(true)));
+        let state = ListState::new(50, crate::ListAlignment::Top, px(10.));
+        let seen: Rc<Cell<crate::Pixels>> = Rc::new(Cell::new(px(0.)));
+        state.set_scroll_handler({
+            let state = state.clone();
+            let seen = seen.clone();
+            move |_, _, _| seen.set(state.scroll_px_offset_for_scrollbar().y)
+        });
+        let window = cx.open_window(size(px(100.), px(100.)), move |_, _| TestListView(state));
+        let window = crate::AnyWindowHandle::from(window);
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(50.), px(10.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        let after_precise = seen.get();
+        assert!(after_precise < px(0.));
+
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(50.), px(10.)),
+                    delta: ScrollDelta::Lines(point(0., -3.)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.update_window(window, |_, window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert!(seen.get() < after_precise);
     }
 
     #[gpui::test]
