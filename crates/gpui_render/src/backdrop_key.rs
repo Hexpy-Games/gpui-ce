@@ -83,6 +83,10 @@ fn filter_key(
         }
         let mut hasher = DefaultHasher::new();
         if let Some(paint) = &lower.wallpaper {
+            // A clocked wallpaper changes with time, so what is behind this filter is never the same.
+            if paint.clock.is_some() {
+                return None;
+            }
             paint.key.hash(&mut hasher);
             paint.generation.hash(&mut hasher);
         } else {
@@ -251,5 +255,60 @@ mod tests {
         assert!(base.is_some());
         assert_ne!(base, key_of_filter(blue(), red()));
         assert_eq!(base, key_of_filter(red(), blue()));
+    }
+
+    #[test]
+    fn clocked_wallpaper_under_the_region_has_no_key() {
+        let keys_with_clock = |clock| {
+            let mask = ContentMask {
+                bounds: scaled_bounds(0.0, 0.0, 1000.0),
+                ..Default::default()
+            };
+            let mut scene = Scene::default();
+            scene.insert_primitive(BackdropFilter {
+                bounds: scaled_bounds(0.0, 0.0, 1000.0),
+                content_mask: mask,
+                wallpaper: Some(gpui::WallpaperPaint {
+                    key: 1,
+                    generation: 0,
+                    image: None,
+                    clock,
+                    passes: [gpui::WallpaperPass {
+                        module: 0,
+                        width: 8,
+                        height: 8,
+                        noise: 0,
+                        previous: false,
+                        image: false,
+                        uniforms: [[0.0; 4]; 15],
+                    }]
+                    .into_iter()
+                    .collect(),
+                }),
+                opacity: 1.0,
+                ..Default::default()
+            });
+            scene.insert_primitive(BackdropFilter {
+                bounds: scaled_bounds(100.0, 100.0, 100.0),
+                content_mask: mask,
+                filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
+                    .into_iter()
+                    .collect(),
+                opacity: 1.0,
+                ..Default::default()
+            });
+            scene.finish();
+            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)))
+        };
+        let keys = keys_with_clock(None);
+        assert!(keys[1].is_some());
+        let keys = keys_with_clock(Some(gpui::WallpaperClock {
+            start_ms: 0,
+            start_s: 0.0,
+            fps: 20,
+            period_s: 10.0,
+            animated_from: 0,
+        }));
+        assert!(keys[1].is_none());
     }
 }
