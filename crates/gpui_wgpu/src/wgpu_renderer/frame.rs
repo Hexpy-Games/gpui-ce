@@ -3,14 +3,14 @@ use super::{
     WgpuRenderer, begin_color_render_pass,
     buffers::{InstanceTransport, InstanceUpload},
     filters::{FILTER_UNIFORMS_PER_COMPOSITE, FrameUniformRequirements},
+    glass_layers::{LayerPanes, backdrop_parameters},
     path_types,
 };
 use gpui::{
     BackdropFilter, Bounds, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite,
-    Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements,
-    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters,
+    PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow,
+    Size, SubpixelSprite, Underline, backdrop_appear_parameters,
 };
-use gpui_render::TargetStack;
 use gpui_render::blur::{
     BlurKernel, FilterCompositeClip, FilterCompositeParameters,
     GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
@@ -19,6 +19,10 @@ use gpui_render::shaders::{
     blur::BlurUniforms,
     common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool},
     interface as shader_interface,
+};
+use gpui_render::{
+    TargetStack,
+    glass_layer::{GlassLayer, glass_layers, layered_commands},
 };
 
 /// Submits a complete scene. Animation fallbacks leave `release_unused` disabled.
@@ -31,7 +35,22 @@ pub(super) fn render_to_view(
 ) -> Option<wgpu::SubmissionIndex> {
     let mut planned = *scene.render_plan().requirements();
     planned.uses_offscreen_target |= scene.has_animations();
-    let commands = scene.render_commands();
+    let layers = glass_layers(
+        scene,
+        scene.render_commands(),
+        renderer.animation_time_ms,
+        renderer.target.width(),
+        renderer.target.height(),
+    );
+    let layered;
+    let commands = if layers.is_empty() {
+        scene.render_commands()
+    } else {
+        // Every pane of a glass layer samples the backdrop snapshot, lens or not.
+        planned.backdrop_lens_count += layers.iter().map(|layer| layer.panes.len()).sum::<usize>();
+        layered = layered_commands(scene.render_commands(), &layers);
+        &layered
+    };
     let Some(targets) = PreparedTargets::prepare(
         renderer,
         commands,
@@ -47,7 +66,7 @@ pub(super) fn render_to_view(
     // texture that reappears after an intervening primitive and recreate its platform view.
     renderer.retain_surface_cache(&scene.surfaces);
 
-    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    let encoder = FrameEncoder::new(renderer, scene, commands, &layers, None, None, targets);
     let offscreen = encoder.offscreen.is_some();
     let keys = encoder.backdrop_keys.clone();
     let submission = submit(renderer, encoder, readback);
@@ -75,7 +94,7 @@ pub(super) fn render_offscreen(
     if targets.offscreen.is_some() {
         renderer.retained = None;
     }
-    let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
+    let encoder = FrameEncoder::new(renderer, scene, commands, &[], None, None, targets);
     submit(renderer, encoder, None).is_some()
 }
 
@@ -382,19 +401,21 @@ impl FrameRequirements {
 }
 
 pub(super) struct FrameEncoder<'a> {
-    renderer: &'a WgpuRenderer,
-    scene: &'a Scene,
+    pub(super) renderer: &'a WgpuRenderer,
+    pub(super) scene: &'a Scene,
     /// The commands to encode: the whole scene, or a damage plan's restricted list.
     commands: &'a [RenderCommand],
     /// Set for a damage redraw over the retained frame.
     damage: Option<&'a DamageRedraw>,
     /// The damage rectangle every pass that writes the scene target is limited to.
     scissor: Option<ScissorRectangle>,
-    encoder: wgpu::CommandEncoder,
-    targets: TargetStack<wgpu::TextureView>,
+    pub(super) encoder: wgpu::CommandEncoder,
+    pub(super) targets: TargetStack<wgpu::TextureView>,
     offscreen: Option<wgpu::TextureView>,
     presentation: wgpu::TextureView,
     instances: InstanceUpload,
+    layers: &'a [GlassLayer],
+    pub(super) layer_panes: Option<LayerPanes>,
     backdrop_keys: Vec<Option<u64>>,
 }
 
@@ -408,6 +429,7 @@ impl<'a> FrameEncoder<'a> {
         renderer: &'a WgpuRenderer,
         scene: &'a Scene,
         commands: &'a [RenderCommand],
+        layers: &'a [GlassLayer],
         damage: Option<&'a DamageRedraw>,
         scissor: Option<ScissorRectangle>,
         targets: PreparedTargets,
@@ -439,6 +461,8 @@ impl<'a> FrameEncoder<'a> {
             presentation: targets.presentation,
             instances: targets.instances,
             backdrop_keys,
+            layers,
+            layer_panes: None,
         }
     }
 
@@ -536,6 +560,30 @@ impl<'a> FrameEncoder<'a> {
                 }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     for index in range.clone() {
+                        if let Some(layer) =
+                            self.layers.iter().find(|layer| layer.panes[0] == index)
+                        {
+                            if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
+                                self.scene_pass(&mut pass, &mut pending_load, scissor);
+                            }
+                            drop(pass.take());
+                            self.prepare_layer(layer);
+                        }
+                        let pane = self.layer_panes.as_ref().and_then(|layer| {
+                            layer.panes.iter().find(|(pane, _, _)| *pane == index).map(
+                                |(_, prepared, parameters)| {
+                                    (prepared.clone(), layer.snapshot.clone(), *parameters)
+                                },
+                            )
+                        });
+                        if let Some((prepared, snapshot, parameters)) = pane {
+                            let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
+                            if let Some(prepared) = prepared {
+                                self.renderer
+                                    .draw_composite(pass, &prepared, &snapshot, parameters);
+                            }
+                            continue;
+                        }
                         // The target must hold everything painted so far before a filter reads it;
                         // a pending clear is the only reason to open a pass that draws nothing.
                         if matches!(pending_load, wgpu::LoadOp::Clear(_)) {
@@ -607,27 +655,12 @@ impl<'a> FrameEncoder<'a> {
                             None
                         };
                         let source = snapshot.unwrap_or_else(|| self.targets.current().clone());
-                        let parameters = FilterCompositeParameters {
-                            bounds: filter.bounds,
-                            content_mask: filter.content_mask.bounds,
-                            corner_radii: filter.corner_radii,
-                            corner_smoothing: filter.corner_smoothing,
-                            blur_radius: radius,
-                            opacity: filter.opacity,
-                            scale: 1.0,
-                            scale_origin: Point::default(),
-                            composite_offset: Point::default(),
-                            composite_rotation: 0.0,
-                            clip: FilterCompositeClip::RoundedBounds,
-                            motion_clip: Bounds::default(),
-                            lens,
-                        };
-                        let prepared = self.renderer.prepare_composite(
-                            &mut self.encoder,
-                            &source,
-                            parameters,
-                            hit,
-                        );
+                        let parameters = backdrop_parameters(filter, lens, radius);
+                        let prepared = self
+                            .renderer
+                            .prepare_composites(&mut self.encoder, &source, &[parameters], hit)
+                            .pop()
+                            .flatten();
                         if let (false, Some(key)) = (hit, key) {
                             let resources = self.renderer.resources();
                             let blurred = BlurKernel::for_radius(radius)
@@ -752,12 +785,11 @@ impl<'a> FrameEncoder<'a> {
                         motion_clip: clip.map_or(Bounds::default(), |(rect, _)| rect),
                         lens: Default::default(),
                     };
-                    let prepared = self.renderer.prepare_composite(
-                        &mut self.encoder,
-                        &filtered,
-                        parameters,
-                        false,
-                    );
+                    let prepared = self
+                        .renderer
+                        .prepare_composites(&mut self.encoder, &filtered, &[parameters], false)
+                        .pop()
+                        .flatten();
                     if let Some(prepared) = prepared {
                         let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                         self.renderer

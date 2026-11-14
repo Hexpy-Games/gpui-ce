@@ -23,6 +23,7 @@ mod damage;
 mod drawing;
 mod filters;
 mod frame;
+mod glass_layers;
 #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
 mod headless;
 mod path_types;

@@ -3,6 +3,7 @@
 pub mod artifacts;
 pub mod backdrop_key;
 pub mod blur;
+pub mod glass_layer;
 mod instances;
 pub mod path_types;
 pub mod shaders;

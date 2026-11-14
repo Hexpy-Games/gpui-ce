@@ -73,6 +73,19 @@ pub(super) fn render_damage_to_view(
         return Some(resources.queue.submit([encoder.finish()]));
     }
     let scissor = damage_scissor(renderer, plan.rect)?;
+    let layers = gpui_render::glass_layer::glass_layers(
+        scene,
+        scene.render_commands(),
+        renderer.animation_time_ms,
+        renderer.target.width(),
+        renderer.target.height(),
+    );
+    if layers
+        .iter()
+        .any(|layer| layer.bounds.intersects(&plan.rect))
+    {
+        return None;
+    }
     if !gpui_render::damage_fits(scissor, renderer.target.viewport_size()) {
         return None;
     }
@@ -102,6 +115,7 @@ pub(super) fn render_damage_to_view(
         renderer,
         scene,
         &plan.commands,
+        &[],
         Some(plan),
         Some(scissor),
         targets,
