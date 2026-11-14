@@ -25,10 +25,38 @@ pub fn backdrop_sampling_region(
     } else {
         0.0
     };
+    let refracted_reach = if lens.is_active() {
+        let fold_depth = lens.fold_depth.max(0.0) * short;
+        let fold_slope = fold_depth * lens.fold.max(0.0) / (lens.fold_band * short).max(1.0);
+        let bezel = lens.bezel.min(short).max(1.0);
+        // filters.rs:236-240: the steepest bevel slope is bezel / sqrt(0.0001).
+        // filters.rs:352-378: cap that pull, or use the rim's maximum fold shift;
+        // the tangential bend is bounded by twice refraction * LENS_BEND.
+        let pull = lens.refraction.max(0.0) * bezel / 0.01;
+        let bevel_shift = pull / (1.0 + pull / lens.depth.max(0.0001));
+        let shift = if lens.fold > 0.0 {
+            fold_depth
+        } else {
+            bevel_shift + 2.0 * lens.refraction.max(0.0) * 0.18
+        };
+        // filters.rs:384-395: fold_rest <= 1, so fold_slope is maximal at the rim;
+        // across <= max(1, |1 - fold_slope|), and along_ratio <= 1 / 0.05.
+        // lens_source (244-261) reads a disc of this effective frost radius.
+        let footprint = if lens.fold > 0.0 {
+            (1.0 - fold_slope).abs().max(1.0)
+        } else {
+            1.0
+        }
+        .max(20.0);
+        shift * (1.0 + lens.dispersion.abs()) + lens.frost.max(0.35 * (footprint - 1.0))
+    } else {
+        0.0
+    };
     let margin = GAUSSIAN_CUTOFF * blur_radius
         + lens.sampling_margin()
         + lens.depth.max(0.0)
         + fold_reach
+        + refracted_reach
         + 4.0;
     let factor = BLUR_DOWNSAMPLE_FACTOR as f32;
     let floor = |value: f32| (value / factor).floor() * factor;

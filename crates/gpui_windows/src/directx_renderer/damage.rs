@@ -64,7 +64,16 @@ impl DirectXRenderer {
             DevicePixels(self.width as i32),
             DevicePixels(self.height as i32),
         );
-        if !gpui_render::damage_fits(scissor, target) {
+        let blurred_filters = scene
+            .backdrop_filters
+            .iter()
+            .filter(|filter| filter.wallpaper.is_none() && uses_blurred_backdrop(filter))
+            .count();
+        if !gpui_render::damage_worth_partial(
+            scissor,
+            (target.width.0, target.height.0),
+            plan.reblur.len() < blurred_filters,
+        ) {
             return Ok(false);
         }
         if self.frame_keys.0 != generation {

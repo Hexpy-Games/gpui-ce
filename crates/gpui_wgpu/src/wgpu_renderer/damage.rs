@@ -73,7 +73,16 @@ pub(super) fn render_damage_to_view(
         return Some(resources.queue.submit([encoder.finish()]));
     }
     let scissor = damage_scissor(renderer, plan.rect)?;
-    if !gpui_render::damage_fits(scissor, renderer.target.viewport_size()) {
+    let blurred_filters = scene
+        .backdrop_filters
+        .iter()
+        .filter(|filter| filter.wallpaper.is_none() && uses_blurred_backdrop(filter))
+        .count();
+    if !gpui_render::damage_worth_partial(
+        scissor,
+        (renderer.target.width() as i32, renderer.target.height() as i32),
+        plan.reblur.len() < blurred_filters,
+    ) {
         return None;
     }
     if renderer.frame_keys.0 != generation {

@@ -373,7 +373,7 @@ fn round_out(bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
     )
 }
 
-/// The damaged area and the glass whose backdrop it changes, or `None` when a lens is hit.
+/// The damaged area and the glass whose backdrop it changes.
 fn changed_area(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
@@ -463,9 +463,6 @@ fn changed_area(
                     .any(|(bounds, order)| *order < filter.order && hits(*bounds, &region))
             {
                 continue;
-            }
-            if filter.lens.is_active() {
-                return None;
             }
             reblur.push(index);
             changed.push((BackdropFilter::painted_bounds(filter), filter.order));
@@ -772,6 +769,91 @@ mod tests {
         ] {
             assert!((a - e).abs() < 1e-3, "{actual:?} != {expected:?}");
         }
+    }
+
+    #[test]
+    fn lens_sampling_region_bounds_refracted_reads() {
+        let filter = BackdropFilter {
+            bounds: rect(1000.0, 1000.0, 200.0, 200.0),
+            lens: BackdropLens {
+                bezel: 1.0,
+                fold: 4.0,
+                fold_band: 0.01,
+                fold_depth: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(filter.sampling_region().origin.x.0 <= 983.0);
+    }
+
+    #[test]
+    fn wallpaper_slot_under_lens_reblurs_lens_partially() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(BackdropFilter {
+            bounds: rect(0.0, 0.0, 200.0, 200.0),
+            content_mask: mask(),
+            wallpaper: Some(crate::WallpaperPaint {
+                key: 1,
+                generation: 0,
+                image: None,
+                clock: Some(crate::WallpaperClock {
+                    start_ms: 0,
+                    start_s: 0.0,
+                    fps: 30,
+                    period_s: 1.0,
+                    animated_from: 0,
+                }),
+                passes: SmallVec::new(),
+            }),
+            ..Default::default()
+        });
+        scene.insert_primitive(BackdropFilter {
+            lens: BackdropLens {
+                bezel: 4.0,
+                ..Default::default()
+            },
+            ..glass(rect(50.0, 50.0, 40.0, 40.0))
+        });
+        scene.insert_primitive(glass(rect(300.0, 300.0, 40.0, 40.0)));
+        scene.finish();
+        let damage = scene
+            .damage_plan_with_wallpapers(Some(scene.generation()), |paint| {
+                paint
+                    .clock
+                    .is_some_and(|clock| clock.slot(34) != clock.slot(0))
+            })
+            .expect("retained scene");
+        let DamagePlan::Partial(plan) = damage.as_ref() else {
+            panic!("expected a partial redraw");
+        };
+        let lens_index = scene
+            .backdrop_filters
+            .iter()
+            .position(|filter| filter.lens.is_active())
+            .expect("lens filter");
+        assert_eq!(plan.reblur.as_slice(), &[lens_index]);
+    }
+
+    #[test]
+    fn damage_worth_partial_when_blur_is_skipped() {
+        use gpui_render::{blur::ScissorRectangle, damage_worth_partial};
+        let large = ScissorRectangle {
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 400,
+        };
+        let small = ScissorRectangle {
+            width: 100,
+            height: 100,
+            ..large
+        };
+        let viewport = (400, 400);
+        assert!(!damage_worth_partial(large, viewport, false));
+        assert!(damage_worth_partial(large, viewport, true));
+        assert!(damage_worth_partial(small, viewport, false));
+        assert!(damage_worth_partial(small, viewport, true));
     }
 
     #[test]

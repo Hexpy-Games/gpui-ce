@@ -153,6 +153,7 @@ windows-061 = { workspace = true, features = ["Win32_Graphics_Direct3D11"] }
 
 
 [dev-dependencies]
+gpui_render.workspace = true
 accesskit_consumer.workspace = true
 backtrace.workspace = true
 smol.workspace = true

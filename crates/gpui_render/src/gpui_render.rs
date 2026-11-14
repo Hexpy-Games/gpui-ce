@@ -19,3 +19,13 @@ pub fn damage_fits(
     u64::from(scissor.width) * u64::from(scissor.height) * 4
         <= target.width.0 as u64 * target.height.0 as u64
 }
+
+/// Whether the damage area is small or the redraw avoids some backdrop blur work.
+pub fn damage_worth_partial(
+    scissor: blur::ScissorRectangle,
+    viewport: (i32, i32),
+    plan_skips_blur: bool,
+) -> bool {
+    let target = gpui::size(gpui::DevicePixels(viewport.0), gpui::DevicePixels(viewport.1));
+    damage_fits(scissor, target) || plan_skips_blur
+}
