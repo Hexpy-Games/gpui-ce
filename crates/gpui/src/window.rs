@@ -3026,10 +3026,14 @@ impl Window {
         self.a11y.set_window_title(title.to_string());
     }
 
-    /// Sets the position of the macOS traffic light buttons.
-    #[cfg(target_os = "macos")]
+    /// Sets the position of the macOS traffic light buttons; does nothing on other platforms.
     pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
         self.platform_window.set_traffic_light_position(position);
+    }
+
+    /// Sets the smallest size the user can resize the window's content to.
+    pub fn set_window_min_size(&self, size: Size<Pixels>) {
+        self.platform_window.set_window_min_size(size);
     }
 
     /// Sets the application identifier.
