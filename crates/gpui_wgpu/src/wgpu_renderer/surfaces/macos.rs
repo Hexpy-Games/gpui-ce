@@ -34,8 +34,7 @@ impl SurfaceCache {
 }
 
 struct CachedSurface {
-    _luma_texture: wgpu::Texture,
-    _chroma_texture: wgpu::Texture,
+    _textures: Vec<wgpu::Texture>,
     binding: SurfaceBinding,
 }
 
@@ -73,7 +72,9 @@ pub(super) fn draw_surfaces(
     surfaces: &[PaintSurface],
     pass: &mut wgpu::RenderPass<'_>,
 ) -> frame::DrawResult {
-    use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    use core_video::pixel_buffer::{
+        kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    };
 
     let resources = renderer.resources();
     let mut cache = resources.surface_cache.borrow_mut();
@@ -81,18 +82,22 @@ pub(super) fn draw_surfaces(
     for surface in surfaces {
         match &surface.source {
             gpui::SurfaceSource::Surface(image_buffer) => {
-                if image_buffer.get_pixel_format() != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-                {
+                let pixel_format = image_buffer.get_pixel_format();
+                let color_format = if pixel_format == kCVPixelFormatType_32BGRA {
+                    SurfaceColorFormat::Rgba
+                } else if pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+                    SurfaceColorFormat::Yuv
+                } else {
                     log::error!("unsupported CoreVideo surface pixel format");
                     return Err(frame::DrawError::ExternalSurface);
-                }
+                };
                 let key = core_video_surface_key(image_buffer)?;
                 let mut imported = cache.surfaces.remove(&key).map(Ok).unwrap_or_else(|| {
                     create_core_video_surface(renderer, &cache.texture_cache, image_buffer)
                 })?;
                 renderer.draw_surface_binding(
                     surface,
-                    SurfaceColorFormat::Yuv,
+                    color_format,
                     &mut imported.binding,
                     pass,
                 )?;
@@ -149,6 +154,43 @@ fn create_core_video_surface(
     use core_video::metal_texture::CVMetalTextureGetTexture;
 
     let resources = renderer.resources();
+    if image_buffer.get_pixel_format() == core_video::pixel_buffer::kCVPixelFormatType_32BGRA {
+        let width = image_buffer.get_width();
+        let height = image_buffer.get_height();
+        let color = texture_cache
+            .create_texture_from_image(
+                image_buffer.as_concrete_TypeRef(),
+                None,
+                metal::MTLPixelFormat::BGRA8Unorm,
+                width,
+                height,
+                0,
+            )
+            .map_err(|error| {
+                log::error!("failed to create CoreVideo BGRA texture: {error}");
+                frame::DrawError::ExternalSurface
+            })?;
+        // SAFETY: CoreVideo created a live BGRA Metal texture with the buffer's dimensions.
+        // The import retains the texture beyond the lifetime of the CoreVideo wrapper.
+        let texture = unsafe {
+            import_core_video_texture(
+                &resources.device,
+                CVMetalTextureGetTexture(color.as_concrete_TypeRef()).cast(),
+                wgpu::TextureFormat::Bgra8Unorm,
+                wgpu::Extent3d {
+                    width: width as u32,
+                    height: height as u32,
+                    depth_or_array_layers: 1,
+                },
+            )
+        }
+        .ok_or(frame::DrawError::ExternalSurface)?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        return Ok(CachedSurface {
+            _textures: vec![texture],
+            binding: SurfaceBinding::new(renderer, view.clone(), view),
+        });
+    }
     let luma = texture_cache
         .create_texture_from_image(
             image_buffer.as_concrete_TypeRef(),
@@ -196,8 +238,7 @@ fn create_core_video_surface(
     let luma_view = luma_texture.create_view(&wgpu::TextureViewDescriptor::default());
     let chroma_view = chroma_texture.create_view(&wgpu::TextureViewDescriptor::default());
     Ok(CachedSurface {
-        _luma_texture: luma_texture,
-        _chroma_texture: chroma_texture,
+        _textures: vec![luma_texture, chroma_texture],
         binding: SurfaceBinding::new(renderer, luma_view, chroma_view),
     })
 }
@@ -327,6 +368,7 @@ mod tests {
                 bounds: bounds(2.0),
                 content_mask: ContentMask {
                     bounds: bounds(4.0),
+                    fade_out: Default::default(),
                 },
                 source,
             });
@@ -358,6 +400,57 @@ mod tests {
         let texture = solid_texture(&renderer, RED);
 
         let image = renderer.render_to_image(&scene([texture_source(&texture)]))?;
+
+        assert_eq!(image.get_pixel(0, 0).0, RED);
+        assert_eq!(image.get_pixel(1, 1).0, RED);
+        assert_eq!(image.get_pixel(2, 0).0, clear);
+        assert_eq!(image.get_pixel(3, 1).0, clear);
+        Ok(())
+    }
+
+    #[test]
+    fn bgra_core_video_surfaces_composite_within_their_bounds() -> anyhow::Result<()> {
+        use core_foundation::{
+            base::TCFType as _, boolean::CFBoolean, dictionary::CFDictionary, string::CFString,
+        };
+        use core_video::pixel_buffer::{
+            CVPixelBuffer, CVPixelBufferKeys, kCVPixelFormatType_32BGRA,
+        };
+
+        let mut renderer = renderer()?;
+        let clear = renderer.render_to_image(&scene([]))?.get_pixel(3, 1).0;
+        assert_ne!(clear, RED);
+        let options = CFDictionary::from_CFType_pairs(&[
+            (
+                CFString::from(CVPixelBufferKeys::IOSurfaceProperties),
+                CFDictionary::<CFString, CFString>::from_CFType_pairs(&[]).as_CFType(),
+            ),
+            (
+                CFString::from(CVPixelBufferKeys::MetalCompatibility),
+                CFBoolean::true_value().as_CFType(),
+            ),
+        ]);
+        let buffer = CVPixelBuffer::new(kCVPixelFormatType_32BGRA, 4, 4, Some(&options))
+            .map_err(|error| anyhow::anyhow!("failed to create BGRA pixel buffer: {error}"))?;
+        assert_eq!(buffer.lock_base_address(0), 0);
+        let bytes_per_row = buffer.get_bytes_per_row();
+        // SAFETY: The 4x4 BGRA buffer is locked for CPU writes. Each row contains
+        // at least four pixels, and the row stride accounts for CoreVideo padding.
+        unsafe {
+            let base = buffer.get_base_address().cast::<u8>();
+            for y in 0..4 {
+                for x in 0..4 {
+                    std::ptr::copy_nonoverlapping(
+                        [RED[2], RED[1], RED[0], RED[3]].as_ptr(),
+                        base.add(y * bytes_per_row + x * 4),
+                        4,
+                    );
+                }
+            }
+        }
+        assert_eq!(buffer.unlock_base_address(0), 0);
+
+        let image = renderer.render_to_image(&scene([SurfaceSource::Surface(buffer)]))?;
 
         assert_eq!(image.get_pixel(0, 0).0, RED);
         assert_eq!(image.get_pixel(1, 1).0, RED);
