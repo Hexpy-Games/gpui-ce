@@ -1004,8 +1004,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn is_simple_fullscreen(&self) -> bool {
         false
     }
-    #[cfg(target_os = "macos")]
     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
+    /// Sets the smallest size the user can resize the window's content to.
+    fn set_window_min_size(&self, _size: Size<Pixels>) {}
     /// Show the platform character palette.
     ///
     /// The default implementation logs a warning when the backend does not

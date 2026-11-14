@@ -1721,6 +1721,16 @@ impl PlatformWindow for MacWindow {
         state.move_traffic_light();
     }
 
+    fn set_window_min_size(&self, size: Size<Pixels>) {
+        let native_window = self.0.lock().native_window;
+        unsafe {
+            native_window.setContentMinSize_(NSSize {
+                width: size.width.to_f64(),
+                height: size.height.to_f64(),
+            });
+        }
+    }
+
     fn scale_factor(&self) -> f32 {
         self.0.as_ref().lock().scale_factor()
     }

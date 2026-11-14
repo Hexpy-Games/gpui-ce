@@ -45,7 +45,7 @@ impl std::ops::Deref for WindowsWindow {
 pub struct WindowsWindowState {
     pub origin: Cell<Point<Pixels>>,
     pub logical_size: Cell<Size<Pixels>>,
-    pub min_size: Option<Size<Pixels>>,
+    pub min_size: Cell<Option<Size<Pixels>>>,
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
     pub appearance: Cell<WindowAppearance>,
@@ -164,7 +164,7 @@ impl WindowsWindowState {
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
-            min_size,
+            min_size: Cell::new(min_size),
             callbacks,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
@@ -607,6 +607,10 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn set_window_min_size(&self, size: Size<Pixels>) {
+        self.state.min_size.set(Some(size));
+    }
+
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         if matches!(
             change,
