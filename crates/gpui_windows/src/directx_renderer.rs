@@ -1,6 +1,7 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use std::{
     cell::RefCell,
+    os::windows::io::AsRawHandle as _,
     slice,
     sync::{Arc, OnceLock},
 };
@@ -27,7 +28,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HMODULE, HWND, POINT},
+        Foundation::{FreeLibrary, HANDLE, HMODULE, HWND, POINT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -139,6 +140,10 @@ struct DirectXResources {
     // underlying texture alive makes its COM pointer a stable cache key.
     surface_views: FxHashMap<usize, CachedSurfaceView>,
 
+    // Opened shared textures referenced by the current scene, keyed by texture handle. Each
+    // entry holds a frame clone so the handle stays open and its value cannot be reused.
+    shared_surfaces: FxHashMap<usize, CachedSharedSurface>,
+
     // Cached viewport
     viewport: D3D11_VIEWPORT,
 }
@@ -147,6 +152,76 @@ struct CachedSurfaceView {
     #[expect(dead_code)]
     texture: ID3D11Texture2D,
     srv: Option<ID3D11ShaderResourceView>,
+}
+
+struct CachedSharedSurface {
+    frame: WindowsSharedTextureFrame,
+    srv: Option<ID3D11ShaderResourceView>,
+    fence: ID3D11Fence,
+}
+
+impl CachedSharedSurface {
+    fn open(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Result<Self> {
+        let device1: ID3D11Device1 = device
+            .cast()
+            .context("D3D11 shared NT handles are unavailable")?;
+        // SAFETY: the frame owns the handle and keeps it open for this call.
+        let texture: ID3D11Texture2D =
+            unsafe { device1.OpenSharedResource1(HANDLE(frame.texture_handle().as_raw_handle())) }
+                .context("opening shared surface texture")?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a valid out-pointer for the duration of the call.
+        unsafe { texture.GetDesc(&mut desc) };
+        anyhow::ensure!(
+            matches!(
+                desc.Format,
+                DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_TYPELESS
+            ),
+            "shared surface texture has unsupported format {:?}",
+            desc.Format
+        );
+        anyhow::ensure!(
+            desc.Width == frame.size().width.0 as u32
+                && desc.Height == frame.size().height.0 as u32,
+            "shared surface texture is {}x{}, frame says {:?}",
+            desc.Width,
+            desc.Height,
+            frame.size()
+        );
+        let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: 1,
+                },
+            },
+        };
+        let mut srv = None;
+        // SAFETY: `texture` and `srv_desc` are valid and `srv` is a valid out-pointer.
+        unsafe { device.CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv)) }
+            .context("creating shared surface view")?;
+        Ok(Self {
+            frame: frame.clone(),
+            srv,
+            fence: Self::open_fence(device, frame)?,
+        })
+    }
+
+    fn open_fence(device: &ID3D11Device, frame: &WindowsSharedTextureFrame) -> Result<ID3D11Fence> {
+        let device5: ID3D11Device5 = device
+            .cast()
+            .context("D3D11 shared fences are unavailable")?;
+        let mut fence: Option<ID3D11Fence> = None;
+        // SAFETY: the frame owns the handle and keeps it open for this call; `fence` is a valid
+        // out-pointer.
+        unsafe {
+            device5.OpenSharedFence(HANDLE(frame.fence_handle().as_raw_handle()), &mut fence)
+        }
+        .context("opening shared surface fence")?;
+        fence.context("D3D11 returned no shared surface fence")
+    }
 }
 
 struct PathResources {
@@ -1667,33 +1742,64 @@ impl DirectXRenderer {
         let sampler = [self.globals.sampler.clone()];
 
         for surface in surfaces {
-            let gpui::SurfaceSource::WindowsCapture(frame) = &surface.source else {
-                log::error!("DirectX renderer cannot import this surface source");
-                anyhow::bail!("unsupported surface source");
+            let texture_srv = match &surface.source {
+                gpui::SurfaceSource::WindowsCapture(frame) => {
+                    let key = frame.texture().as_raw() as usize;
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        resources.surface_views.entry(key)
+                    {
+                        let mut srv = None;
+                        // Screen capture uses windows 0.61 while this renderer uses 0.62. COM
+                        // interface pointers are ABI-stable; transferring an owned clone keeps
+                        // the texture alive.
+                        let texture = unsafe {
+                            ID3D11Texture2D::from_raw(frame.texture().clone().into_raw())
+                        };
+                        unsafe {
+                            devices.device.CreateShaderResourceView(
+                                &texture,
+                                None,
+                                Some(&mut srv),
+                            )?
+                        };
+                        entry.insert(CachedSurfaceView { texture, srv });
+                    }
+                    resources
+                        .surface_views
+                        .get(&key)
+                        .context("capture surface view cache insertion failed")?
+                        .srv
+                        .clone()
+                }
+                gpui::SurfaceSource::WindowsSharedTexture(frame) => {
+                    let key = frame.texture_handle().as_raw_handle() as usize;
+                    let shared = match resources.shared_surfaces.entry(key) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(CachedSharedSurface::open(&devices.device, frame)?)
+                        }
+                    };
+                    if shared.frame.fence_handle().as_raw_handle()
+                        != frame.fence_handle().as_raw_handle()
+                    {
+                        shared.fence = CachedSharedSurface::open_fence(&devices.device, frame)?;
+                    }
+                    shared.frame = frame.clone();
+                    let ctx4: ID3D11DeviceContext4 =
+                        ctx.cast().context("D3D11 fence waits are unavailable")?;
+                    // Sampling must not start before the producer's writes complete.
+                    // SAFETY: the fence is a live COM object owned by the cache entry.
+                    unsafe { ctx4.Wait(&shared.fence, frame.fence_value()) }
+                        .context("waiting for shared surface fence")?;
+                    shared.srv.clone()
+                }
+                _ => {
+                    log::error!("DirectX renderer cannot import this surface source");
+                    anyhow::bail!("unsupported surface source");
+                }
             };
-            let key = frame.texture().as_raw() as usize;
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                resources.surface_views.entry(key)
-            {
-                let mut srv = None;
-                // Screen capture uses windows 0.61 while this renderer uses 0.62. COM interface
-                // pointers are ABI-stable; transferring an owned clone keeps the texture alive.
-                let texture =
-                    unsafe { ID3D11Texture2D::from_raw(frame.texture().clone().into_raw()) };
-                unsafe {
-                    devices
-                        .device
-                        .CreateShaderResourceView(&texture, None, Some(&mut srv))?
-                };
-                entry.insert(CachedSurfaceView { texture, srv });
-            }
-            let texture_srv = &resources
-                .surface_views
-                .get(&key)
-                .context("capture surface view cache insertion failed")?
-                .srv;
             // The surface shader declares both planes; RGBA captures bind one view to both.
-            let texture_srvs = [texture_srv.clone(), texture_srv.clone()];
+            let texture_srvs = [texture_srv.clone(), texture_srv];
 
             let uniforms = SurfaceUniforms {
                 bounds: surface.bounds.into(),
@@ -2259,6 +2365,7 @@ impl DirectXResources {
             path: None,
             blur: None,
             surface_views: FxHashMap::default(),
+            shared_surfaces: FxHashMap::default(),
             viewport,
         })
     }
@@ -2368,6 +2475,17 @@ impl DirectXResources {
             .collect::<SmallVec<[usize; 4]>>();
         self.surface_views
             .retain(|key, _| active_keys.contains(key));
+        let active_shared = surfaces
+            .iter()
+            .filter_map(|surface| match &surface.source {
+                gpui::SurfaceSource::WindowsSharedTexture(frame) => {
+                    Some(frame.texture_handle().as_raw_handle() as usize)
+                }
+                _ => None,
+            })
+            .collect::<SmallVec<[usize; 4]>>();
+        self.shared_surfaces
+            .retain(|key, _| active_shared.contains(key));
     }
 }
 
@@ -3615,6 +3733,19 @@ mod tests {
     };
     use windows::core::w;
 
+    use anyhow::Context as _;
+    use gpui::{PaintSurface, WindowsSharedTextureFrame};
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+    use std::sync::Arc;
+    use windows::Win32::Foundation::{GENERIC_ALL, HMODULE};
+    use windows::Win32::Graphics::Direct3D::{
+        D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    };
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::IDXGIResource1;
+    use windows::core::Interface as _;
+
     struct HiddenWindow(HWND);
 
     impl HiddenWindow {
@@ -3962,6 +4093,171 @@ mod tests {
         renderer.render(&ordinary, WindowBackgroundAppearance::Opaque, true)?;
         assert_eq!(allocations(&renderer), None);
 
+        Ok(())
+    }
+
+    /// A producer on its own D3D11 device, sharing a BGRA texture and a fence like a browser's
+    /// accelerated off-screen paint does.
+    struct SharedTextureProducer {
+        context: ID3D11DeviceContext4,
+        target: ID3D11RenderTargetView,
+        fence: ID3D11Fence,
+        // Every frame reuses one handle per object, as a producer with a texture pool would.
+        texture_handle: Arc<OwnedHandle>,
+        fence_handle: Arc<OwnedHandle>,
+        size: Size<DevicePixels>,
+    }
+
+    impl SharedTextureProducer {
+        fn new(devices: &DirectXDevices, width: u32, height: u32) -> Result<Self> {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            // SAFETY: the adapter is live and the out-pointers are valid for the call.
+            unsafe {
+                D3D11CreateDevice(
+                    &devices.adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            }?;
+            let device = device.context("no producer device")?;
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0)
+                    as u32,
+            };
+            let mut texture = None;
+            // SAFETY: `desc` is valid and `texture` is a valid out-pointer.
+            unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }?;
+            let texture = texture.context("no producer texture")?;
+            let mut target = None;
+            // SAFETY: `texture` is a live render-target texture; `target` is a valid out-pointer.
+            unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut target)) }?;
+            let device5 = device.cast::<ID3D11Device5>()?;
+            let mut fence: Option<ID3D11Fence> = None;
+            // SAFETY: `fence` is a valid out-pointer.
+            unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence) }?;
+            let fence = fence.context("no producer fence")?;
+            let resource = texture.cast::<IDXGIResource1>()?;
+            // SAFETY: both objects were created shareable; each call returns a new NT handle
+            // that the `OwnedHandle` takes sole ownership of.
+            let (texture_handle, fence_handle) = unsafe {
+                let texture = resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?;
+                let fence = fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?;
+                (
+                    OwnedHandle::from_raw_handle(texture.0),
+                    OwnedHandle::from_raw_handle(fence.0),
+                )
+            };
+            Ok(Self {
+                context: context.context("no producer context")?.cast()?,
+                target: target.context("no producer target")?,
+                fence,
+                texture_handle: Arc::new(texture_handle),
+                fence_handle: Arc::new(fence_handle),
+                size: Size {
+                    width: DevicePixels(width as i32),
+                    height: DevicePixels(height as i32),
+                },
+            })
+        }
+
+        /// Paints `color` (premultiplied RGBA), signals `fence_value`, and returns the frame.
+        fn paint(&self, color: [f32; 4], fence_value: u64) -> Result<WindowsSharedTextureFrame> {
+            // SAFETY: every object is live and owned by this producer.
+            unsafe {
+                self.context.ClearRenderTargetView(&self.target, &color);
+                self.context.Signal(&self.fence, fence_value)?;
+                self.context.Flush();
+            }
+            Ok(WindowsSharedTextureFrame::new(
+                self.texture_handle.clone(),
+                self.fence_handle.clone(),
+                fence_value,
+                self.size,
+            ))
+        }
+    }
+
+    fn surface_scene(frame: Option<WindowsSharedTextureFrame>) -> Scene {
+        let mut scene = Scene::default();
+        if let Some(frame) = frame {
+            scene.insert_primitive(PaintSurface {
+                order: 0,
+                bounds: scaled(10.0, 10.0, 40.0, 20.0),
+                content_mask: full_mask(),
+                source: frame.into(),
+            });
+        }
+        scene.finish();
+        scene
+    }
+
+    #[test]
+    fn shared_d3d11_textures_wait_on_their_fence_and_evict_when_unused() -> Result<()> {
+        let window = HiddenWindow::new()?;
+        let devices = DirectXDevices::new()?;
+        let mut renderer = DirectXRenderer::new(window.0, &devices, true)?;
+        renderer.resize(Size {
+            width: DevicePixels(64),
+            height: DevicePixels(40),
+        })?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20)?;
+
+        let expect = |image: &image::RgbaImage, name: &str, x: u32, y: u32, wanted: [u8; 3]| {
+            let [r, g, b, _] = image.get_pixel(x, y).0;
+            let close = |actual: u8, wanted: u8| actual.abs_diff(wanted) <= 8;
+            assert!(
+                close(r, wanted[0]) && close(g, wanted[1]) && close(b, wanted[2]),
+                "{name} at ({x},{y}) rendered ({r},{g},{b}), expected {wanted:?}"
+            );
+        };
+        let shared_entries =
+            |renderer: &DirectXRenderer| renderer.resources.as_ref().unwrap().shared_surfaces.len();
+
+        let red = producer.paint([1.0, 0.0, 0.0, 1.0], 1)?;
+        let image = renderer.render_to_image(
+            &surface_scene(Some(red)),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        expect(&image, "first frame top-left", 11, 11, [255, 0, 0]);
+        expect(&image, "first frame bottom-right", 48, 28, [255, 0, 0]);
+        expect(&image, "left of surface", 8, 20, [255, 255, 255]);
+        expect(&image, "below surface", 30, 32, [255, 255, 255]);
+        expect(&image, "right of surface", 52, 20, [255, 255, 255]);
+        assert_eq!(shared_entries(&renderer), 1);
+
+        // Same texture handle, higher fence value: the cached texture is sampled again.
+        let blue = producer.paint([0.0, 0.0, 1.0, 1.0], 2)?;
+        let image = renderer.render_to_image(
+            &surface_scene(Some(blue)),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        expect(&image, "second frame", 30, 20, [0, 0, 255]);
+        expect(&image, "outside second frame", 5, 5, [255, 255, 255]);
+        assert_eq!(shared_entries(&renderer), 1);
+
+        let image =
+            renderer.render_to_image(&surface_scene(None), WindowBackgroundAppearance::Opaque)?;
+        expect(&image, "removed surface", 30, 20, [255, 255, 255]);
+        assert_eq!(shared_entries(&renderer), 0);
         Ok(())
     }
 }

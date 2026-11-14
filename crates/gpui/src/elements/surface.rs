@@ -1,9 +1,9 @@
-#[cfg(target_os = "windows")]
-use crate::WindowsScreenCaptureFrame;
 use crate::{
     App, Bounds, DevicePixels, Element, ElementId, GlobalElementId, InspectorElementId,
     IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, StyleRefinement, Styled, Window,
 };
+#[cfg(target_os = "windows")]
+use crate::{WindowsScreenCaptureFrame, WindowsSharedTextureFrame};
 #[cfg(target_os = "macos")]
 use core_foundation::base::TCFType;
 #[cfg(target_os = "macos")]
@@ -11,10 +11,13 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use refineable::Refineable;
 use std::hash::Hash;
 #[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawHandle as _;
+#[cfg(target_os = "windows")]
 use windows_061::core::Interface;
 
 /// A source of a surface's content.
 /// A new frame must use a new handle: drawing new content into an already painted handle is not seen as a change.
+/// Shared D3D11 textures may instead keep their handle and signal a higher fence value.
 #[derive(Clone)]
 pub enum SurfaceSource {
     /// A macOS image buffer from CoreVideo
@@ -42,6 +45,9 @@ pub enum SurfaceSource {
     /// A native Windows Graphics Capture texture.
     #[cfg(target_os = "windows")]
     WindowsCapture(WindowsScreenCaptureFrame),
+    /// A texture another Direct3D 11 device shared through NT handles.
+    #[cfg(target_os = "windows")]
+    WindowsSharedTexture(WindowsSharedTextureFrame),
     /// A placeholder for platforms that cannot import native surfaces.
     #[doc(hidden)]
     Unsupported(Size<DevicePixels>),
@@ -64,6 +70,8 @@ impl std::fmt::Debug for SurfaceSource {
                 .finish_non_exhaustive(),
             #[cfg(target_os = "windows")]
             SurfaceSource::WindowsCapture(ref frame) => frame.fmt(_f),
+            #[cfg(target_os = "windows")]
+            SurfaceSource::WindowsSharedTexture(ref frame) => frame.fmt(_f),
             SurfaceSource::Unsupported(size) => _f.debug_tuple("Unsupported").field(&size).finish(),
         }
     }
@@ -91,6 +99,11 @@ impl SurfaceSource {
                 (frame.texture().as_raw() as usize).hash(state);
                 frame.display_time().hash(state);
             }
+            #[cfg(target_os = "windows")]
+            SurfaceSource::WindowsSharedTexture(frame) => {
+                (frame.texture_handle().as_raw_handle() as usize).hash(state);
+                frame.fence_value().hash(state);
+            }
             SurfaceSource::Unsupported(size) => size.hash(state),
         }
     }
@@ -110,6 +123,8 @@ impl SurfaceSource {
             SurfaceSource::Texture { size, .. } => *size,
             #[cfg(target_os = "windows")]
             SurfaceSource::WindowsCapture(frame) => frame.size(),
+            #[cfg(target_os = "windows")]
+            SurfaceSource::WindowsSharedTexture(frame) => frame.size(),
             SurfaceSource::Unsupported(size) => *size,
         }
     }
@@ -126,6 +141,13 @@ impl From<CVPixelBuffer> for SurfaceSource {
 impl From<WindowsScreenCaptureFrame> for SurfaceSource {
     fn from(value: WindowsScreenCaptureFrame) -> Self {
         SurfaceSource::WindowsCapture(value)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl From<WindowsSharedTextureFrame> for SurfaceSource {
+    fn from(value: WindowsSharedTextureFrame) -> Self {
+        SurfaceSource::WindowsSharedTexture(value)
     }
 }
 
