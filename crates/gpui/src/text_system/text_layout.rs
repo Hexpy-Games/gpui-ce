@@ -69,6 +69,8 @@ impl From<ResolvedDirection> for ParagraphDirection {
 pub struct TextLayoutOptions {
     /// Optional soft-wrap width.
     pub wrap_width: Option<Pixels>,
+    /// How wrapped text is distributed across lines.
+    pub text_wrap: TextWrap,
     /// Optional maximum number of visual rows.
     pub line_clamp: Option<usize>,
     /// Width used for horizontal alignment, independently of wrapping.

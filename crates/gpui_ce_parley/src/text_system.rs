@@ -1746,6 +1746,7 @@ impl ParleyTextSystem {
             options,
         } = request;
         let TextLayoutOptions {
+            text_wrap: _,
             wrap_width,
             line_clamp,
             text_align,

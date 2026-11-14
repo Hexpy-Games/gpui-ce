@@ -631,7 +631,6 @@ struct TextLayoutInner {
     line_height: Pixels,
     truncate_width: Option<Pixels>,
     options: TextLayoutOptions,
-    text_wrap: TextWrap,
     size: Size<Pixels>,
     bounds: Option<Bounds<Pixels>>,
 }
@@ -660,6 +659,33 @@ fn balance_width(
     }
 
     balanced
+}
+
+pub(crate) fn balanced<T>(
+    options: &TextLayoutOptions,
+    greedy: T,
+    lines: impl Fn(&T) -> usize,
+    mut shape_at: impl FnMut(Pixels) -> Option<T>,
+) -> T {
+    if options.text_wrap != TextWrap::Balance || options.line_clamp.is_some() {
+        return greedy;
+    }
+    let Some(width) = options.wrap_width else {
+        return greedy;
+    };
+    let line_count = lines(&greedy);
+    if !(2..=6).contains(&line_count) {
+        return greedy;
+    }
+
+    let balanced = balance_width(width, line_count, |width| {
+        shape_at(width).is_some_and(|candidate| lines(&candidate) == line_count)
+    });
+    if balanced < width {
+        shape_at(balanced).unwrap_or(greedy)
+    } else {
+        greedy
+    }
 }
 
 fn apply_text_transform_preserving_byte_len(
@@ -890,6 +916,7 @@ impl TextLayout {
                 WhiteSpace::Normal => alignment_width,
                 WhiteSpace::Nowrap => None,
             },
+            text_wrap: text_style.text_wrap,
             line_clamp: text_style.line_clamp,
             alignment_width,
             text_align: text_style.text_align,
@@ -991,7 +1018,6 @@ impl TextLayout {
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                     && text_layout.options == options
-                    && text_layout.text_wrap == text_style.text_wrap
                 {
                     return text_layout.size;
                 }
@@ -1014,48 +1040,32 @@ impl TextLayout {
                     .shape_text_with_options(text.clone(), font_size, &runs, options)
                     .log_err();
 
-                if text_style.text_wrap == TextWrap::Balance
-                    && text_style.white_space == WhiteSpace::Normal
-                    && text_style.text_overflow.is_none()
-                    && options.line_clamp.is_none()
+                if text_style.text_overflow.is_none()
                     && !text.chars().any(|character| {
                         crate::is_paragraph_separator(character) || character == '\u{2028}'
                     })
-                    && let Some(width) = options.wrap_width
-                    && let Some(shaped) = document.as_ref()
-                    && (2..=6).contains(&shaped.line_count())
                 {
-                    let line_count = shaped.line_count();
-                    let balanced = balance_width(width, line_count, |balanced_width| {
-                        window
-                            .text_system()
-                            .shape_text_with_options(
-                                text.clone(),
-                                font_size,
-                                &runs,
-                                TextLayoutOptions {
-                                    wrap_width: Some(balanced_width),
-                                    ..options
-                                },
-                            )
-                            .log_err()
-                            .is_some_and(|candidate| candidate.line_count() == line_count)
+                    document = document.map(|document| {
+                        balanced(
+                            &options,
+                            document,
+                            |document| document.line_count(),
+                            |width| {
+                                window
+                                    .text_system()
+                                    .shape_text_with_options(
+                                        text.clone(),
+                                        font_size,
+                                        &runs,
+                                        TextLayoutOptions {
+                                            wrap_width: Some(width),
+                                            ..options
+                                        },
+                                    )
+                                    .log_err()
+                            },
+                        )
                     });
-
-                    if balanced < width {
-                        document = window
-                            .text_system()
-                            .shape_text_with_options(
-                                text,
-                                font_size,
-                                &runs,
-                                TextLayoutOptions {
-                                    wrap_width: Some(balanced),
-                                    ..options
-                                },
-                            )
-                            .log_err();
-                    }
                 }
 
                 let size = document
@@ -1077,7 +1087,6 @@ impl TextLayout {
                         line_height,
                         truncate_width,
                         options,
-                        text_wrap: text_style.text_wrap,
                         size,
                         bounds: None,
                     });
