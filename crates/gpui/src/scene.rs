@@ -650,6 +650,10 @@ impl Scene {
                 filter
                     .appear
                     .is_some_and(|appear| appear.motion.is_animated())
+                    || filter
+                        .wallpaper
+                        .as_ref()
+                        .is_some_and(|paint| paint.clock.is_some())
             });
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.change = None;
@@ -779,6 +783,20 @@ impl Scene {
                 demand.animating = true;
             }
         }
+        for clock in self.backdrop_filters.iter().filter_map(|filter| {
+            filter
+                .wallpaper
+                .as_ref()
+                .and_then(|paint| paint.clock.as_ref())
+        }) {
+            let next = clock.next_slot_ms(now_ms);
+            if demand
+                .next_start_ms
+                .is_none_or(|start| next.wrapping_sub(now_ms) < start.wrapping_sub(now_ms))
+            {
+                demand.next_start_ms = Some(next);
+            }
+        }
         demand
     }
 
@@ -815,6 +833,11 @@ impl Scene {
                 filter
                     .appear
                     .is_some_and(|appear| appear.motion.changes_between(a_ms, b_ms))
+                    || filter
+                        .wallpaper
+                        .as_ref()
+                        .and_then(|paint| paint.clock.as_ref())
+                        .is_some_and(|clock| clock.slot(a_ms) != clock.slot(b_ms))
             })
     }
 
@@ -863,6 +886,38 @@ impl Scene {
                 .change_damage
                 .get_or_init(|| damage::plan_over(self, change.rect)),
         )
+    }
+
+    /// Damage over a retained frame, including wallpaper slots not yet drawn by the renderer.
+    pub fn damage_plan_with_wallpapers(
+        &self,
+        retained: Option<u64>,
+        changed: impl Fn(&WallpaperPaint) -> bool,
+    ) -> Option<std::borrow::Cow<'_, DamagePlan>> {
+        if !self.backdrop_filters.iter().any(|filter| {
+            filter
+                .wallpaper
+                .as_ref()
+                .is_some_and(|paint| paint.clock.is_some())
+        }) {
+            return self
+                .damage_plan_over(retained)
+                .map(std::borrow::Cow::Borrowed);
+        }
+        let retained = retained?;
+        let seed = if retained == self.generation() {
+            None
+        } else {
+            Some(
+                self.change
+                    .as_ref()
+                    .filter(|change| change.base == retained)?
+                    .rect?,
+            )
+        };
+        Some(std::borrow::Cow::Owned(damage::plan_with_wallpapers(
+            self, seed, changed,
+        )))
     }
 
     #[cfg_attr(
@@ -1640,9 +1695,43 @@ impl WallpaperImage {
     }
 }
 
+/// A capped clock for wallpaper passes that read time. `fps` and `period_s` must be positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallpaperClock {
+    /// Animation clock at which the time is `start_s`.
+    pub start_ms: u32,
+    /// Time in seconds at slot zero.
+    pub start_s: f32,
+    /// Maximum frames per second.
+    pub fps: u32,
+    /// Loop period in seconds.
+    pub period_s: f32,
+    /// First pass that reads time; earlier passes depend only on generation.
+    pub animated_from: usize,
+}
+
+impl WallpaperClock {
+    /// Frame slot at this wrapping animation clock value.
+    pub fn slot(&self, now_ms: u32) -> u32 {
+        (u64::from(now_ms.wrapping_sub(self.start_ms)) * u64::from(self.fps) / 1000) as u32
+    }
+
+    /// Non-negative looping shader time at a frame slot.
+    pub fn time_s(&self, slot: u32) -> f32 {
+        (self.start_s + slot as f32 / self.fps as f32).rem_euclid(self.period_s)
+    }
+
+    /// First slot boundary strictly after this animation clock value.
+    pub fn next_slot_ms(&self, now_ms: u32) -> u32 {
+        let next = u64::from(self.slot(now_ms)) + 1;
+        self.start_ms
+            .wrapping_add((next * 1000).div_ceil(u64::from(self.fps)) as u32)
+    }
+}
+
 /// A wallpaper: a chain of fullscreen shader passes into cached textures, the last one
-/// composited into the primitive's rounded bounds. The renderer re-runs the passes only when
-/// `generation` changes for `key`, so frames that redraw other content reuse the textures.
+/// composited into the primitive's rounded bounds. A generation change re-runs every pass;
+/// clock slots re-run only the time-dependent passes, reusing earlier textures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WallpaperPaint {
     /// Cache identity of the wallpaper's textures.
@@ -1651,6 +1740,8 @@ pub struct WallpaperPaint {
     pub generation: u64,
     /// Optional image uploaded once per id and retained with this cache entry.
     pub image: Option<WallpaperImage>,
+    /// Optional clock for passes that read time.
+    pub clock: Option<WallpaperClock>,
     /// The passes, in order; the last one is composited.
     pub passes: SmallVec<[WallpaperPass; 2]>,
 }
@@ -2231,6 +2322,30 @@ impl PathVertex<Pixels> {
 mod tests {
     use super::*;
     use crate::{AtlasTextureKind, DevicePixels, Point, ShaderBool, Size, SurfaceSource, TileId};
+
+    // test-category: pure-logic
+    #[test]
+    fn wallpaper_clock_slots_and_wakes() {
+        let clock = WallpaperClock {
+            start_ms: 1000,
+            start_s: 2.0,
+            fps: 20,
+            period_s: 10.0,
+            animated_from: 0,
+        };
+        assert_eq!(clock.slot(1000), 0);
+        assert_eq!(clock.slot(1049), 0);
+        assert_eq!(clock.slot(1050), 1);
+        assert_eq!(clock.time_s(1), 2.05);
+        assert_eq!(clock.time_s(160), 0.0);
+        assert_eq!(clock.next_slot_ms(1049), 1050);
+        assert_eq!(clock.next_slot_ms(1050), 1100);
+        let clock = WallpaperClock {
+            start_ms: u32::MAX - 10,
+            ..clock
+        };
+        assert_eq!(clock.slot(clock.start_ms.wrapping_add(60)), 1);
+    }
 
     fn scaled(value: f32) -> ScaledPixels {
         ScaledPixels(value)

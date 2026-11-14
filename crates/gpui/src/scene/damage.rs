@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::ops::Range;
 
 /// What to redraw over a retained frame.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DamagePlan {
     /// Redraw over the retained frame.
     Partial(DamageRedraw),
@@ -19,7 +19,7 @@ pub enum DamagePlan {
 }
 
 /// A partial redraw.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DamageRedraw {
     /// Scissor in device pixels: whole-pixel edges, not clamped to the target.
     pub rect: Bounds<ScaledPixels>,
@@ -283,6 +283,14 @@ pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
                             .as_ref()
                             .map(|image| image.id)
                             .hash(&mut hash);
+                        wallpaper.clock.is_some().hash(&mut hash);
+                        if let Some(clock) = wallpaper.clock {
+                            clock.start_ms.hash(&mut hash);
+                            bytes!(hash, clock.start_s);
+                            clock.fps.hash(&mut hash);
+                            bytes!(hash, clock.period_s);
+                            clock.animated_from.hash(&mut hash);
+                        }
                         wallpaper.passes.len().hash(&mut hash);
                         for pass in &wallpaper.passes {
                             pass.module.hash(&mut hash);
@@ -369,6 +377,7 @@ fn round_out(bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
 fn changed_area(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
+    wallpaper_changed: impl Fn(&super::WallpaperPaint) -> bool,
 ) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize; 4]>)> {
     let mut changed: Vec<(Bounds<ScaledPixels>, DrawOrder)> = Vec::new();
     for sprite in scene
@@ -419,6 +428,9 @@ fn changed_area(
     }
     let mut reblur = SmallVec::<[usize; 4]>::new();
     for (index, filter) in scene.backdrop_filters.iter().enumerate() {
+        if filter.wallpaper.as_ref().is_some_and(&wallpaper_changed) {
+            changed.push((filter.painted_bounds(), filter.order));
+        }
         if filter
             .appear
             .is_some_and(|appear| appear.motion.is_animated())
@@ -475,7 +487,7 @@ fn changed_area(
 }
 
 pub(super) fn plan(scene: &Scene) -> DamagePlan {
-    let Some((rect, reblur)) = changed_area(scene, None) else {
+    let Some((rect, reblur)) = changed_area(scene, None, |_| false) else {
         return DamagePlan::Full;
     };
     if rect.is_empty() {
@@ -490,7 +502,19 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
 }
 
 pub(super) fn plan_over(scene: &Scene, rect: Option<Bounds<ScaledPixels>>) -> DamagePlan {
-    let Some((rect, reblur)) = rect.and_then(|rect| changed_area(scene, Some(rect))) else {
+    let Some((rect, reblur)) = rect.and_then(|rect| changed_area(scene, Some(rect), |_| false))
+    else {
+        return DamagePlan::Full;
+    };
+    select_commands(scene, rect, reblur)
+}
+
+pub(super) fn plan_with_wallpapers(
+    scene: &Scene,
+    seed: Option<Bounds<ScaledPixels>>,
+    changed: impl Fn(&super::WallpaperPaint) -> bool,
+) -> DamagePlan {
+    let Some((rect, reblur)) = changed_area(scene, seed, changed) else {
         return DamagePlan::Full;
     };
     select_commands(scene, rect, reblur)

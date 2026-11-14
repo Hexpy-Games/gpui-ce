@@ -1,6 +1,6 @@
 // Added by HexpyGames for Butler (2026), under the Apache License 2.0; see NOTICE.
 //! Procedural wallpapers ([`gpui::WallpaperPaint`]): each pass runs the `wallpaper` pipeline into
-//! a cached texture of its own size (the passes re-run only when the paint's generation changes),
+//! a cached texture of its own size (time-dependent passes re-run when their clock slot changes),
 //! and the last texture is composited into the rounded bounds with the blur-composite pipeline.
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -40,6 +40,7 @@ pub(super) fn wallpaper_noise(print: bool) -> Vec<u8> {
 
 struct Entry {
     generation: u64,
+    slot: Option<u32>,
     passes: Vec<(u32, u32, wgpu::Texture, wgpu::TextureView)>,
     image: Option<(u64, wgpu::TextureView)>,
     last_used: u64,
@@ -104,7 +105,8 @@ impl WgpuRenderer {
         }
         let format = self.target.format();
         // Collect the views to render into / sample (cloned out, so the cache borrow ends here).
-        let (noise, views, image, sampler, stale) = {
+        let slot = paint.clock.map(|clock| clock.slot(self.animation_time_ms));
+        let (noise, views, image, sampler, redraw_from) = {
             let resources = self.resources();
             let mut cache = resources.wallpapers.borrow_mut();
             if cache.noise.is_none() {
@@ -166,6 +168,7 @@ impl WgpuRenderer {
             };
             let entry = cache.entries.entry(paint.key).or_insert_with(|| Entry {
                 generation: u64::MAX,
+                slot: None,
                 passes: Vec::new(),
                 image: None,
                 last_used: 0,
@@ -197,8 +200,17 @@ impl WgpuRenderer {
                     .collect();
                 entry.generation = u64::MAX;
             }
-            let stale = entry.generation != paint.generation;
+            let redraw_from = if entry.generation != paint.generation {
+                0
+            } else if entry.slot != slot {
+                paint
+                    .clock
+                    .map_or(paint.passes.len(), |clock| clock.animated_from)
+            } else {
+                paint.passes.len()
+            };
             entry.generation = paint.generation;
+            entry.slot = slot;
             let views: Vec<wgpu::TextureView> = entry.passes.iter().map(|e| e.3.clone()).collect();
             let image = entry.image.as_ref().map(|image| image.1.clone());
             (
@@ -206,79 +218,77 @@ impl WgpuRenderer {
                 views,
                 image,
                 cache.sampler.clone().expect("sampler"),
-                stale,
+                redraw_from,
             )
         };
-        if stale {
-            for (index, pass) in paint.passes.iter().enumerate() {
-                let noise_view = &noise[pass.noise as usize];
-                let previous = if pass.previous {
-                    &views[index - 1]
-                } else {
-                    noise_view
-                };
-                let image_view = if pass.image {
-                    image.as_ref().expect("wallpaper image")
-                } else {
-                    noise_view
-                };
-                let resources = self.resources();
-                let uniform_offset = resources
-                    .filter_uniforms
-                    .write(&BlurUniforms::wallpaper_pass(pass));
-                let bind_group = resources
-                    .device
-                    .create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("wallpaper_inputs"),
-                        layout: &resources.bind_group_layouts.wallpaper,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &resources.filter_uniforms.buffer,
-                                    offset: 0,
-                                    size: std::num::NonZeroU64::new(
-                                        std::mem::size_of::<BlurUniforms>() as u64,
-                                    ),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(noise_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(
-                                    &resources.surface_sampler,
-                                ),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(previous),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::TextureView(image_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: wgpu::BindingResource::Sampler(&sampler),
-                            },
-                        ],
-                    });
-                let pipeline = &resources.pipelines.wallpaper;
-                let mut draw = super::begin_color_render_pass(
-                    encoder,
-                    "wallpaper",
-                    &views[index],
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    None,
-                );
-                draw.set_pipeline(pipeline);
-                draw.set_bind_group(0, &resources.globals_bind_group, &[]);
-                draw.set_bind_group(1, &bind_group, &[uniform_offset]);
-                draw.draw(0..3, 0..1);
+        for (index, pass) in paint.passes.iter().enumerate().skip(redraw_from) {
+            let mut uniforms = BlurUniforms::wallpaper_pass(pass);
+            if let Some(clock) = paint.clock.filter(|clock| index >= clock.animated_from) {
+                uniforms.wp_frame.w = clock.time_s(slot.expect("wallpaper slot"));
             }
+            let noise_view = &noise[pass.noise as usize];
+            let previous = if pass.previous {
+                &views[index - 1]
+            } else {
+                noise_view
+            };
+            let image_view = if pass.image {
+                image.as_ref().expect("wallpaper image")
+            } else {
+                noise_view
+            };
+            let resources = self.resources();
+            let uniform_offset = resources.filter_uniforms.write(&uniforms);
+            let bind_group = resources
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("wallpaper_inputs"),
+                    layout: &resources.bind_group_layouts.wallpaper,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &resources.filter_uniforms.buffer,
+                                offset: 0,
+                                size: std::num::NonZeroU64::new(
+                                    std::mem::size_of::<BlurUniforms>() as u64,
+                                ),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(noise_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&resources.surface_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(previous),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(image_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                    ],
+                });
+            let pipeline = &resources.pipelines.wallpaper;
+            let mut draw = super::begin_color_render_pass(
+                encoder,
+                "wallpaper",
+                &views[index],
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                None,
+            );
+            draw.set_pipeline(pipeline);
+            draw.set_bind_group(0, &resources.globals_bind_group, &[]);
+            draw.set_bind_group(1, &bind_group, &[uniform_offset]);
+            draw.draw(0..3, 0..1);
         }
         let last = paint.passes.last().expect("passes");
         let size = [last.width as f32, last.height as f32];
@@ -385,6 +395,12 @@ fn image_mip(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 }
 
 impl WallpaperCache {
+    pub(super) fn slot_changed(&self, paint: &WallpaperPaint, now_ms: u32) -> bool {
+        paint.clock.is_some_and(|clock| {
+            self.entries.get(&paint.key).and_then(|entry| entry.slot) != Some(clock.slot(now_ms))
+        })
+    }
+
     fn release_image(&mut self, id: u64) {
         let image = self.images.get_mut(&id).expect("cached image");
         image.0 -= 1;

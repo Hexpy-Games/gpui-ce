@@ -57,6 +57,7 @@ fn intro_resting_print_clears_card_and_keeps_edge_ink() {
         wallpaper: Some(WallpaperPaint {
             key: 1,
             generation: 0,
+            clock: None,
             image: None,
             passes: smallvec![
                 WallpaperPass {
@@ -385,6 +386,7 @@ fn every_module_renders_a_finite_varied_still() {
             wallpaper: Some(WallpaperPaint {
                 key: module as u64,
                 generation: 0,
+                clock: None,
                 image: Some(image.clone()),
                 passes,
             }),
