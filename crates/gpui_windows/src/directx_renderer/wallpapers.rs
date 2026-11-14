@@ -10,6 +10,7 @@ use super::*;
 struct DxEntry {
     generation: u64,
     passes: Vec<(u32, u32, ColorTarget)>,
+    image: Option<(u64, Option<ID3D11ShaderResourceView>)>,
     last_used: u64,
 }
 
@@ -17,6 +18,7 @@ struct DxEntry {
 pub(super) struct DxWallpaperCache {
     noise: Option<[Option<ID3D11ShaderResourceView>; 2]>,
     entries: HashMap<u64, DxEntry>,
+    images: HashMap<u64, (usize, Option<ID3D11ShaderResourceView>)>,
     tick: u64,
 }
 
@@ -96,7 +98,7 @@ impl DirectXRenderer {
         }
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
-        let (noise, targets, stale) = {
+        let (noise, targets, image, stale) = {
             let mut cache = self.wallpapers.borrow_mut();
             if cache.noise.is_none() {
                 cache.noise = Some([
@@ -113,15 +115,50 @@ impl DirectXRenderer {
                     .min_by_key(|(_, e)| e.last_used)
                     .map(|(k, _)| *k)
                 {
-                    cache.entries.remove(&oldest);
+                    let removed = cache.entries.remove(&oldest).expect("oldest wallpaper");
+                    if let Some((id, _)) = removed.image {
+                        cache.release_image(id);
+                    }
                 }
             }
+            let previous_image_id = cache
+                .entries
+                .get(&paint.key)
+                .and_then(|entry| entry.image.as_ref().map(|image| image.0));
+            let image_changed = previous_image_id != paint.image.as_ref().map(|image| image.id);
+            let image = if image_changed {
+                let uploaded = match &paint.image {
+                    Some(image) => {
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            cache.images.entry(image.id)
+                        {
+                            let view = image_view(devices, image)?;
+                            slot.insert((0, view));
+                        }
+                        let cached = cache.images.get_mut(&image.id).expect("uploaded image");
+                        cached.0 += 1;
+                        Some((image.id, cached.1.clone()))
+                    }
+                    None => None,
+                };
+                if let Some(id) = previous_image_id {
+                    cache.release_image(id);
+                }
+                uploaded
+            } else {
+                None
+            };
             let entry = cache.entries.entry(paint.key).or_insert_with(|| DxEntry {
                 generation: u64::MAX,
                 passes: Vec::new(),
+                image: None,
                 last_used: 0,
             });
             entry.last_used = tick;
+            if image_changed {
+                entry.image = image;
+                entry.generation = u64::MAX;
+            }
             let fits = entry.passes.len() == paint.passes.len()
                 && entry
                     .passes
@@ -150,15 +187,23 @@ impl DirectXRenderer {
                 .iter()
                 .map(|e| (e.2.target.clone(), e.2.source.clone()))
                 .collect();
-            (cache.noise.clone().expect("noise"), targets, stale)
+            let image = entry.image.as_ref().and_then(|image| image.1.clone());
+            (cache.noise.clone().expect("noise"), targets, image, stale)
         };
         if stale {
             for (index, pass) in paint.passes.iter().enumerate() {
-                let source = match pass.source {
-                    0 => &noise[0],
-                    1 => &noise[1],
-                    _ => &targets[index.saturating_sub(1)].1,
+                let source = &noise[pass.noise as usize];
+                let previous = if pass.previous {
+                    &targets[index - 1].1
+                } else {
+                    source
                 };
+                let image = if pass.image { &image } else { source };
+                let ctx = &devices.device_context;
+                unsafe {
+                    ctx.PSSetShaderResources(5, Some(&[previous.clone(), image.clone()]));
+                    ctx.PSSetSamplers(7, Some(slice::from_ref(&self.globals.sampler)));
+                }
                 let viewport = D3D11_VIEWPORT {
                     TopLeftX: 0.0,
                     TopLeftY: 0.0,
@@ -179,6 +224,9 @@ impl DirectXRenderer {
                     3,
                     true,
                 )?;
+                unsafe {
+                    ctx.PSSetShaderResources(5, Some(&[None, None]));
+                }
             }
         }
         let last = paint.passes.last().expect("passes");
@@ -206,5 +254,60 @@ impl DirectXRenderer {
             4,
             false,
         )
+    }
+}
+
+fn image_view(
+    devices: &DirectXRendererDevices,
+    image: &gpui::WallpaperImage,
+) -> Result<Option<ID3D11ShaderResourceView>> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: image.width,
+        Height: image.height,
+        MipLevels: 0,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+    };
+    let mut texture = None;
+    let mut view = None;
+    let rgba = image.premultiplied_bottom_up_rgba();
+    unsafe {
+        devices
+            .device
+            .CreateTexture2D(&desc, None, Some(&mut texture))?;
+        let texture = texture.context("wallpaper image texture")?;
+        devices.device_context.UpdateSubresource(
+            &texture,
+            0,
+            None,
+            rgba.as_ptr().cast(),
+            image.width * 4,
+            0,
+        );
+        devices
+            .device
+            .CreateShaderResourceView(&texture, None, Some(&mut view))?;
+        devices
+            .device_context
+            .GenerateMips(view.as_ref().context("wallpaper image view")?);
+    }
+    Ok(view)
+}
+
+impl DxWallpaperCache {
+    fn release_image(&mut self, id: u64) {
+        let image = self.images.get_mut(&id).expect("cached image");
+        image.0 -= 1;
+        if image.0 == 0 {
+            self.images.remove(&id);
+        }
     }
 }

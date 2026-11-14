@@ -278,12 +278,19 @@ pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
                     if let Some(wallpaper) = &filter.wallpaper {
                         wallpaper.key.hash(&mut hash);
                         wallpaper.generation.hash(&mut hash);
+                        wallpaper
+                            .image
+                            .as_ref()
+                            .map(|image| image.id)
+                            .hash(&mut hash);
                         wallpaper.passes.len().hash(&mut hash);
                         for pass in &wallpaper.passes {
                             pass.module.hash(&mut hash);
                             pass.width.hash(&mut hash);
                             pass.height.hash(&mut hash);
-                            pass.source.hash(&mut hash);
+                            pass.noise.hash(&mut hash);
+                            pass.previous.hash(&mut hash);
+                            pass.image.hash(&mut hash);
                             bytes!(hash, pass.uniforms);
                         }
                     }

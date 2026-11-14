@@ -21,7 +21,7 @@ mod shadows;
 mod sprites;
 
 pub use emoji::emoji_rasterization;
-pub use filters::{blur, surface};
+pub use filters::{blur, surface, wallpaper};
 pub use linkage::base;
 pub use paths::{path, path_rasterization};
 pub use quads::quad;

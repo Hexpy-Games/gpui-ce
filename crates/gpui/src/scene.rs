@@ -1600,11 +1600,44 @@ pub struct WallpaperPass {
     pub width: u32,
     /// Height of the pass's target, in device pixels.
     pub height: u32,
-    /// What the pass samples: 0 the engine noise texture, 1 the print noise texture, 2 the
-    /// previous pass's output.
-    pub source: u32,
+    /// Always-bound noise: 0 engine noise, 1 print noise.
+    pub noise: u32,
+    /// Sample the preceding pass as density, base, or a pre-fitted image.
+    pub previous: bool,
+    /// Sample the paint's uploaded image as u_image.
+    pub image: bool,
     /// The pass's shader uniforms (`wp_mode` .. `wp_p5`, see gpui_render's `BlurUniforms`).
     pub uniforms: [[f32; 4]; 15],
+}
+
+/// A decoded image, with straight-alpha RGBA8 rows, top row first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallpaperImage {
+    /// Stable upload identity; changing pixels requires a new id.
+    pub id: u64,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Four bytes per pixel, without row padding.
+    pub rgba: Arc<[u8]>,
+}
+
+impl WallpaperImage {
+    /// Pixels for the wallpaper engine's texture: premultiplied alpha, bottom row first.
+    /// Matches Electron's decodeWallpaperImage flipY/premultiply bitmap conversion.
+    pub fn premultiplied_bottom_up_rgba(&self) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(self.rgba.len());
+        for row in self.rgba.chunks_exact(self.width as usize * 4).rev() {
+            for pixel in row.chunks_exact(4) {
+                for &channel in &pixel[..3] {
+                    rgba.push(((channel as u16 * pixel[3] as u16 + 127) / 255) as u8);
+                }
+                rgba.push(pixel[3]);
+            }
+        }
+        rgba
+    }
 }
 
 /// A wallpaper: a chain of fullscreen shader passes into cached textures, the last one
@@ -1616,6 +1649,8 @@ pub struct WallpaperPaint {
     pub key: u64,
     /// The passes re-run when this changes for `key`.
     pub generation: u64,
+    /// Optional image uploaded once per id and retained with this cache entry.
+    pub image: Option<WallpaperImage>,
     /// The passes, in order; the last one is composited.
     pub passes: SmallVec<[WallpaperPass; 2]>,
 }
