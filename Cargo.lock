@@ -667,6 +667,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+dependencies = [
+ "bit-vec 0.9.1",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3992,6 +4001,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "naga"
+version = "30.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd0dd362bf26c0ffdd143df6da66a25d287e196eff482f117771010b207ad163"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.10.0",
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "codespan-reporting 0.13.1",
+ "half",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "libm",
+ "log",
+ "naga-types",
+ "num-traits",
+ "once_cell",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.20",
+ "unicode-ident",
+]
+
+[[package]]
+name = "naga-types"
+version = "30.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14474170feb673cfb18b3565111a9869797cc1d290fb9ec969c53f5e1e231c6d"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "nanorand"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7196,12 +7242,12 @@ dependencies = [
 
 [[package]]
 name = "wgsl-rs"
-version = "0.1.0"
-source = "git+https://github.com/schell/wgsl-rs?rev=b2de16a1b81e67d76bc265c296184f882864badb#b2de16a1b81e67d76bc265c296184f882864badb"
+version = "0.1.0-beta.5"
+source = "git+https://github.com/schell/wgsl-rs?rev=8181a6c4340be228a6a5878fd3bc60d60ed67f7d#8181a6c4340be228a6a5878fd3bc60d60ed67f7d"
 dependencies = [
  "glam",
  "half",
- "naga 29.0.4",
+ "naga 30.0.2",
  "paste",
  "snafu",
  "wgsl-rs-ir",
@@ -7210,13 +7256,13 @@ dependencies = [
 
 [[package]]
 name = "wgsl-rs-ir"
-version = "0.1.0"
-source = "git+https://github.com/schell/wgsl-rs?rev=b2de16a1b81e67d76bc265c296184f882864badb#b2de16a1b81e67d76bc265c296184f882864badb"
+version = "0.1.0-beta.5"
+source = "git+https://github.com/schell/wgsl-rs?rev=8181a6c4340be228a6a5878fd3bc60d60ed67f7d#8181a6c4340be228a6a5878fd3bc60d60ed67f7d"
 
 [[package]]
 name = "wgsl-rs-macros"
-version = "0.1.0"
-source = "git+https://github.com/schell/wgsl-rs?rev=b2de16a1b81e67d76bc265c296184f882864badb#b2de16a1b81e67d76bc265c296184f882864badb"
+version = "0.1.0-beta.5"
+source = "git+https://github.com/schell/wgsl-rs?rev=8181a6c4340be228a6a5878fd3bc60d60ed67f7d#8181a6c4340be228a6a5878fd3bc60d60ed67f7d"
 dependencies = [
  "itertools 0.14.0",
  "proc-macro2",
