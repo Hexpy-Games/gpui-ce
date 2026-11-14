@@ -799,6 +799,7 @@ impl PrelayoutState {
                 };
                 let options = TextLayoutOptions {
                     wrap_width,
+                    text_wrap: text_style.text_wrap,
                     line_clamp: text_style.line_clamp,
                     alignment_width,
                     text_align: text_style.text_align,

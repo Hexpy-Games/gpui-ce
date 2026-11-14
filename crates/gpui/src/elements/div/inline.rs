@@ -1,6 +1,6 @@
 use crate::elements::div::ScrollHandle;
 use crate::elements::text::{
-    TruncationCandidate, text_layout_fits, truncate_with_measured_candidates,
+    TruncationCandidate, balanced, text_layout_fits, truncate_with_measured_candidates,
 };
 use crate::{
     App, AvailableSpace, Bounds, Display, InlineBidiScope, InlineBoxRequest, InlineLayout,
@@ -77,7 +77,29 @@ impl InlineDocument {
     ) -> (Rc<Self>, Arc<InlineLayout>) {
         // Removing embedded widgets also requires suppressing their painting and hit regions.
         let Some(width) = truncation.width.filter(|_width| self.boxes.is_empty()) else {
-            return (self.clone(), text_system.layout_inline(request));
+            let mut layout = text_system.layout_inline(request);
+            if truncation.width.is_none()
+                && self.boxes.is_empty()
+                && !self.text.chars().any(|character| {
+                    crate::is_paragraph_separator(character) || character == '\u{2028}'
+                })
+            {
+                layout = balanced(
+                    &request.options,
+                    layout,
+                    |layout| layout.lines.len(),
+                    |width| {
+                        Some(text_system.layout_inline(InlineLayoutRequest {
+                            options: crate::TextLayoutOptions {
+                                wrap_width: Some(width),
+                                ..request.options
+                            },
+                            ..request
+                        }))
+                    },
+                );
+            }
+            return (self.clone(), layout);
         };
 
         let max_lines = request.options.line_clamp;
