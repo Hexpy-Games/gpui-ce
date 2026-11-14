@@ -4,7 +4,8 @@ use crate::{
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length,
     OverflowWrap, PaintQuad, Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size,
-    SizeRefinement, Styled, TextRun, Window, WordBreak, black, phi, point, px, rems, size,
+    SizeRefinement, Styled, TextRun, TextWrap, Window, WordBreak, black, phi, point, px, rems,
+    size,
 };
 use collections::HashSet;
 use palette::{Hsla, IntoColor, rgb::Rgba};
@@ -703,6 +704,9 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How wrapped text is distributed across lines.
+    pub text_wrap: TextWrap,
+
     /// How words may break across lines.
     pub word_break: WordBreak,
 
@@ -744,6 +748,7 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            text_wrap: TextWrap::Wrap,
             word_break: WordBreak::Normal,
             overflow_wrap: OverflowWrap::Normal,
             text_overflow: None,

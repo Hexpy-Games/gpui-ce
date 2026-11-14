@@ -5,8 +5,8 @@ use crate::{
     FontStyle, FontWeight, FontWidth, GridPlacement, GridTemplate, GridTemplateMinSize,
     JustifyContent, LayoutDirection, Length, OverflowWrap, Pixels, SharedString,
     StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
-    TextTransform, UnderlineStyle, UnicodeBidi, VerticalAlign, WhiteSpace, WordBreak, px, relative,
-    rems,
+    TextTransform, TextWrap, UnderlineStyle, UnicodeBidi, VerticalAlign, WhiteSpace, WordBreak, px,
+    relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -242,6 +242,17 @@ pub trait Styled: Sized {
     fn whitespace_nowrap(mut self) -> Self {
         self.text_style().white_space = Some(WhiteSpace::Nowrap);
         self
+    }
+
+    /// Sets how wrapped text is distributed across lines.
+    fn text_wrap(mut self, text_wrap: TextWrap) -> Self {
+        self.text_style().text_wrap = Some(text_wrap);
+        self
+    }
+
+    /// Balances the widths of wrapped text lines.
+    fn text_wrap_balance(self) -> Self {
+        self.text_wrap(TextWrap::Balance)
     }
 
     /// Sets how words may break across lines.

@@ -4,8 +4,8 @@ use crate::{
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
     LayoutId, LineLayout, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParagraphDirection, Pixels,
     Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign, TextLayoutOptions,
-    TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TooltipId, UnicodeBidi,
-    WhiteSpace, Window, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap, TooltipId,
+    UnicodeBidi, WhiteSpace, Window, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -631,8 +631,35 @@ struct TextLayoutInner {
     line_height: Pixels,
     truncate_width: Option<Pixels>,
     options: TextLayoutOptions,
+    text_wrap: TextWrap,
     size: Size<Pixels>,
     bounds: Option<Bounds<Pixels>>,
+}
+
+fn balance_width(
+    width: Pixels,
+    line_count: usize,
+    mut same_lines: impl FnMut(Pixels) -> bool,
+) -> Pixels {
+    let mut low = width / line_count as f32;
+    let mut high = width;
+    let mut balanced = width;
+
+    for _ in 0..12 {
+        if high - low <= px(1.) {
+            break;
+        }
+
+        let mid = (low + high) / 2.;
+        if same_lines(mid) {
+            high = mid;
+            balanced = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    balanced
 }
 
 fn apply_text_transform_preserving_byte_len(
@@ -964,6 +991,7 @@ impl TextLayout {
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                     && text_layout.options == options
+                    && text_layout.text_wrap == text_style.text_wrap
                 {
                     return text_layout.size;
                 }
@@ -981,10 +1009,54 @@ impl TextLayout {
                     window,
                     cx,
                 );
-                let document = window
+                let mut document = window
                     .text_system()
-                    .shape_text_with_options(text, font_size, &runs, options)
+                    .shape_text_with_options(text.clone(), font_size, &runs, options)
                     .log_err();
+
+                if text_style.text_wrap == TextWrap::Balance
+                    && text_style.white_space == WhiteSpace::Normal
+                    && text_style.text_overflow.is_none()
+                    && options.line_clamp.is_none()
+                    && !text.chars().any(|character| {
+                        crate::is_paragraph_separator(character) || character == '\u{2028}'
+                    })
+                    && let Some(width) = options.wrap_width
+                    && let Some(shaped) = document.as_ref()
+                    && (2..=6).contains(&shaped.line_count())
+                {
+                    let line_count = shaped.line_count();
+                    let balanced = balance_width(width, line_count, |balanced_width| {
+                        window
+                            .text_system()
+                            .shape_text_with_options(
+                                text.clone(),
+                                font_size,
+                                &runs,
+                                TextLayoutOptions {
+                                    wrap_width: Some(balanced_width),
+                                    ..options
+                                },
+                            )
+                            .log_err()
+                            .is_some_and(|candidate| candidate.line_count() == line_count)
+                    });
+
+                    if balanced < width {
+                        document = window
+                            .text_system()
+                            .shape_text_with_options(
+                                text,
+                                font_size,
+                                &runs,
+                                TextLayoutOptions {
+                                    wrap_width: Some(balanced),
+                                    ..options
+                                },
+                            )
+                            .log_err();
+                    }
+                }
 
                 let size = document
                     .as_ref()
@@ -1005,6 +1077,7 @@ impl TextLayout {
                         line_height,
                         truncate_width,
                         options,
+                        text_wrap: text_style.text_wrap,
                         size,
                         bounds: None,
                     });
@@ -2064,6 +2137,43 @@ mod tests {
 
             div()
         });
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn balance_width_evens_greedy_lines() {
+        let greedy_wrap = |width: Pixels| {
+            let mut lines = Vec::new();
+            let mut words_on_line = 0;
+            let mut line_width = px(0.);
+
+            for _ in 0..8 {
+                let space_width = if words_on_line == 0 { px(0.) } else { px(4.) };
+                if words_on_line > 0 && line_width + space_width + px(10.) > width {
+                    lines.push(words_on_line);
+                    words_on_line = 0;
+                    line_width = px(0.);
+                }
+
+                if words_on_line > 0 {
+                    line_width += px(4.);
+                }
+                line_width += px(10.);
+                words_on_line += 1;
+            }
+
+            lines.push(words_on_line);
+            lines
+        };
+        let greedy_line_count = |width| greedy_wrap(width).len();
+
+        assert_eq!(greedy_line_count(px(80.)), 2);
+
+        let balanced = balance_width(px(80.), 2, |width| greedy_line_count(width) == 2);
+        assert!(balanced < px(80.));
+        assert!(balanced >= px(52.));
+        assert!(balanced < px(66.));
+        assert_eq!(greedy_wrap(balanced), [4, 4]);
     }
 
     struct CenteredTextView {

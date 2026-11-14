@@ -1,6 +1,18 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{Pixels, ResolvedDirection, TextAlign, TextRun, UnicodeBidi};
 
+/// Controls how wrapped text is distributed across lines.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
+)]
+pub enum TextWrap {
+    /// Wrap text using the available width.
+    #[default]
+    Wrap,
+    /// Balance the widths of wrapped lines.
+    Balance,
+}
+
 /// Controls whether line breaking is allowed within words.
 #[derive(
     Clone, Copy, Debug, Default, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize,
