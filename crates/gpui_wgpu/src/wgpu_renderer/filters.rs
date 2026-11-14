@@ -8,6 +8,7 @@ use gpui_render::{
     },
     shaders::blur::BlurUniforms,
 };
+use smallvec::SmallVec;
 
 use super::{WgpuRenderer, begin_color_render_pass, pipelines};
 
@@ -63,98 +64,118 @@ impl WgpuRenderer {
         pass.draw(0..pipeline.fixed_vertex_count(), 0..1);
     }
 
-    /// Runs the blur passes of a filter composite (unless `blurred_ready`) and returns the
-    /// texture the composite reads; `None` when the composite draws nothing.
-    pub(super) fn prepare_composite(
+    /// Prepares composites with one pass per blur stage for all blurred items.
+    pub(super) fn prepare_composites(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
-        parameters: FilterCompositeParameters,
+        parameters: &[FilterCompositeParameters],
         blurred_ready: bool,
-    ) -> Option<wgpu::TextureView> {
-        if parameters.blur_radius <= 0.0
-            && !parameters.lens.is_active()
-            && matches!(parameters.clip, FilterCompositeClip::RoundedBounds)
-        {
-            return None;
-        }
-
-        let Some(kernel) = BlurKernel::for_radius(parameters.blur_radius) else {
-            return Some(source.clone());
-        };
-        let full_width = self.target.width();
-        let full_height = self.target.height();
-        let blur_size = [
-            downsampled_dimension(full_width) as f32,
-            downsampled_dimension(full_height) as f32,
-        ];
-        let dilation = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * parameters.blur_radius;
-        let scissor = ScissorRectangle::for_blurred_bounds(
-            parameters.bounds,
-            dilation,
-            full_width,
-            full_height,
+    ) -> SmallVec<[Option<wgpu::TextureView>; 4]> {
+        debug_assert!(
+            parameters
+                .windows(2)
+                .all(|pair| std::mem::discriminant(&pair[0].clip)
+                    == std::mem::discriminant(&pair[1].clip))
         );
-        if scissor.is_empty() {
-            return None;
+        let mut blurred = SmallVec::<[_; 4]>::new();
+        let prepared = parameters
+            .iter()
+            .map(|parameters| {
+                if parameters.blur_radius <= 0.0
+                    && !parameters.lens.is_active()
+                    && matches!(parameters.clip, FilterCompositeClip::RoundedBounds)
+                {
+                    return None;
+                }
+                let Some(kernel) = BlurKernel::for_radius(parameters.blur_radius) else {
+                    return Some(source.clone());
+                };
+                let scissor = ScissorRectangle::for_blurred_bounds(
+                    parameters.bounds,
+                    GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * parameters.blur_radius,
+                    self.target.width(),
+                    self.target.height(),
+                );
+                if scissor.is_empty() {
+                    return None;
+                }
+                let resources = self.resources();
+                let (Some(horizontal), Some(_)) =
+                    (&resources.blur_ping_view, &resources.blur_pong_view)
+                else {
+                    return None;
+                };
+                blurred.push((scissor, kernel));
+                Some(horizontal.clone())
+            })
+            .collect();
+        if !blurred_ready && !blurred.is_empty() {
+            let load = match parameters[0].clip {
+                FilterCompositeClip::RoundedBounds => wgpu::LoadOp::Load,
+                FilterCompositeClip::ContentShape | FilterCompositeClip::MotionRounded => {
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                }
+            };
+            self.prepare_blurs(encoder, source, &blurred, load);
         }
-        let load = match parameters.clip {
-            FilterCompositeClip::RoundedBounds => wgpu::LoadOp::Load,
-            FilterCompositeClip::ContentShape | FilterCompositeClip::MotionRounded => {
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-            }
-        };
+        prepared
+    }
 
-        let (horizontal_target, vertical_target) = {
-            let resources = self.resources();
-            match (
-                resources.blur_ping_view.as_ref(),
-                resources.blur_pong_view.as_ref(),
-            ) {
-                (Some(horizontal), Some(vertical)) => (horizontal.clone(), vertical.clone()),
-                _ => return None,
-            }
-        };
-
-        if !blurred_ready {
-            self.draw_filter_pass(
-                encoder,
+    fn prepare_blurs(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        items: &[(ScissorRectangle, BlurKernel)],
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) {
+        let resources = self.resources();
+        let horizontal = resources
+            .blur_ping_view
+            .as_ref()
+            .expect("blur target was prepared");
+        let vertical = resources
+            .blur_pong_view
+            .as_ref()
+            .expect("blur target was prepared");
+        let full_size = [self.target.width() as f32, self.target.height() as f32];
+        let blur_size = [
+            downsampled_dimension(self.target.width()) as f32,
+            downsampled_dimension(self.target.height()) as f32,
+        ];
+        for (label, pipeline, target, source, axis) in [
+            (
                 "blur_downsample",
-                &self.resources().pipelines.blur_downsample,
-                &horizontal_target,
+                &resources.pipelines.blur_downsample,
+                horizontal,
                 source,
-                BlurUniforms::downsample([full_width as f32, full_height as f32], blur_size),
-                // No clear for backdrops: each pass writes its whole scissor, and the composite only
-                // reads texels the passes wrote (the bounds lie 3 sigma inside the scissor), so
-                // whatever an earlier lens left outside it is never sampled; a full clear per pass
-                // per lens cost more than the passes. Content blurs composite out to the scissor's
-                // edge, so they keep the clear (transparent outside).
-                load,
-                Some(scissor),
-            );
-            self.draw_filter_pass(
-                encoder,
+                None,
+            ),
+            (
                 "blur_horizontal",
-                &self.resources().pipelines.blur,
-                &vertical_target,
-                &horizontal_target,
-                BlurUniforms::gaussian(BlurAxis::Horizontal, blur_size, kernel),
-                load,
-                Some(scissor),
-            );
-            self.draw_filter_pass(
-                encoder,
+                &resources.pipelines.blur,
+                vertical,
+                horizontal,
+                Some(BlurAxis::Horizontal),
+            ),
+            (
                 "blur_vertical",
-                &self.resources().pipelines.blur,
-                &horizontal_target,
-                &vertical_target,
-                BlurUniforms::gaussian(BlurAxis::Vertical, blur_size, kernel),
-                load,
-                Some(scissor),
-            );
+                &resources.pipelines.blur,
+                horizontal,
+                vertical,
+                Some(BlurAxis::Vertical),
+            ),
+        ] {
+            let mut pass = begin_color_render_pass(encoder, label, target, load, None);
+            for (scissor, kernel) in items {
+                pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
+                let uniforms = axis.map_or_else(
+                    || BlurUniforms::downsample(full_size, blur_size),
+                    |axis| BlurUniforms::gaussian(axis, blur_size, *kernel),
+                );
+                self.draw_filter(&mut pass, pipeline, source, uniforms);
+            }
         }
-
-        Some(horizontal_target)
     }
 
     /// Draws a prepared composite, then a lens's sharp rim, into `pass`, an open pass on
@@ -299,6 +320,48 @@ impl WgpuRenderer {
             );
         }
 
+        target
+    }
+
+    /// Copies all pane sampling regions into the snapshot in one render pass.
+    pub(super) fn snapshot_backdrops(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        regions: &[Bounds<ScaledPixels>],
+    ) -> wgpu::TextureView {
+        let resources = self.resources();
+        let target = resources
+            .backdrop_snapshot_view
+            .as_ref()
+            .expect("backdrop snapshot was prepared")
+            .clone();
+        let full_size = [self.target.width() as f32, self.target.height() as f32];
+        let mut pass = begin_color_render_pass(
+            encoder,
+            "copy_backdrop_snapshot",
+            &target,
+            wgpu::LoadOp::Load,
+            None,
+        );
+        for region in regions {
+            if region.is_empty() {
+                continue;
+            }
+            pass.set_scissor_rect(
+                region.origin.x.0 as u32,
+                region.origin.y.0 as u32,
+                region.size.width.0 as u32,
+                region.size.height.0 as u32,
+            );
+            self.draw_filter(
+                &mut pass,
+                &resources.pipelines.blur_downsample,
+                source,
+                BlurUniforms::copy(full_size),
+            );
+        }
+        drop(pass);
         target
     }
 

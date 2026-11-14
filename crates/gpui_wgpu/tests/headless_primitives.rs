@@ -655,3 +655,40 @@ fn scale_group_matches_prescaled_quad_about_external_origin() {
         .expect("render scale group");
     assert_eq!(grouped, reference);
 }
+
+#[test]
+fn sibling_panes_do_not_sample_each_other() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let mut scene = Scene::default();
+    scene.insert_primitive(Quad {
+        bounds: full_mask().bounds,
+        content_mask: full_mask(),
+        background: solid_background(gpui::black()),
+        ..Default::default()
+    });
+    scene.insert_primitive(BackdropFilter {
+        bounds: bounds(20.0, 20.0, 100.0, 60.0),
+        content_mask: full_mask(),
+        filters: smallvec![ScaledFilter::Blur(ScaledPixels(8.0))],
+        opacity: 1.0,
+        ..Default::default()
+    });
+    scene.insert_primitive(Quad {
+        bounds: bounds(100.0, 30.0, 16.0, 40.0),
+        content_mask: full_mask(),
+        background: solid_background(gpui::white()),
+        ..Default::default()
+    });
+    scene.insert_primitive(BackdropFilter {
+        bounds: bounds(124.0, 20.0, 100.0, 60.0),
+        content_mask: full_mask(),
+        filters: smallvec![ScaledFilter::Blur(ScaledPixels(8.0))],
+        opacity: 1.0,
+        ..Default::default()
+    });
+    scene.finish();
+    let image = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("valid glass layer frame");
+    assert_eq!(image.get_pixel(128, 50).0, [0, 0, 0, 255]);
+}
