@@ -265,6 +265,12 @@ fn shared_textures_render_release_skip_and_evict() -> Result<()> {
     let info = context.adapter.get_info();
     eprintln!("headless wgpu backend: {:?} ({})", info.backend, info.name);
     if info.backend != wgpu::Backend::Dx12 {
+        // CI sets this so the test cannot pass there without exercising the import.
+        anyhow::ensure!(
+            std::env::var_os("GPUI_REQUIRE_DX12").is_none(),
+            "GPUI_REQUIRE_DX12 is set but wgpu picked {:?}",
+            info.backend
+        );
         eprintln!("skipping: shared textures are imported only on Direct3D 12");
         return Ok(());
     }
@@ -285,20 +291,19 @@ fn shared_textures_render_release_skip_and_evict() -> Result<()> {
     // shows blue only if the renderer's queue waited for the acquire fence.
     let gate = producer.gate_on_d3d12(&renderer)?;
     let frame = producer.paint(BLUE, 2, Some(1))?;
-    let delay = Duration::from_millis(300);
     let opener = std::thread::spawn(move || {
-        std::thread::sleep(delay);
+        std::thread::sleep(Duration::from_millis(300));
+        let opened_at = Instant::now();
         // SAFETY: the fence is live; D3D12 fences are free-threaded.
-        unsafe { gate.Signal(1) }
+        unsafe { gate.Signal(1) }.map(|()| opened_at)
     });
-    let started = Instant::now();
     let image = renderer.render_to_image(&surface_scene(Some(frame)))?;
-    let elapsed = started.elapsed();
-    opener.join().expect("gate thread panicked")?;
+    let rendered_at = Instant::now();
+    let opened_at = opener.join().expect("gate thread panicked")?;
     expect_pixel(&image, "gated frame", 30, 20, [0, 0, 255]);
     assert!(
-        elapsed >= delay - Duration::from_millis(50),
-        "the render returned after {elapsed:?}, before the gate opened"
+        rendered_at > opened_at,
+        "the render returned before the gate opened"
     );
     // The pool's first texture stays imported while its release fence is in use.
     assert_eq!(shared_state(&renderer), (2, 2));

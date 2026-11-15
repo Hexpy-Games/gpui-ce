@@ -11,7 +11,7 @@ use gpui_render::shaders::common::SurfaceColorFormat;
 use smallvec::SmallVec;
 use std::os::windows::io::{AsRawHandle as _, BorrowedHandle};
 use windows::Win32::{
-    Foundation::{CompareObjectHandles, HANDLE},
+    Foundation::{CloseHandle, CompareObjectHandles, HANDLE, WAIT_OBJECT_0},
     Graphics::{
         Direct3D12::{
             D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_FENCE_FLAG_NONE, D3D12_RESOURCE_BARRIER,
@@ -26,6 +26,7 @@ use windows::Win32::{
         },
         Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM},
     },
+    System::Threading::{CreateEventW, WaitForSingleObject},
 };
 use windows::core::Interface as _;
 
@@ -36,6 +37,8 @@ const POOL_GRACE_SCENES: u64 = 8;
 /// The shared surfaces of the window's scene and the release signals of the frame being encoded.
 #[derive(Default)]
 pub(super) struct SharedSurfaces {
+    // Declared first so it drops first: its drop waits for the pending transitions.
+    transitions: CommonTransitions,
     // Keyed by texture handle.
     surfaces: FxHashMap<usize, SharedSurface>,
     release_fences: ReleaseFences,
@@ -43,7 +46,6 @@ pub(super) struct SharedSurfaces {
     pending_releases: Vec<(usize, ID3D12Fence, u64)>,
     // Textures sampled by the frame being encoded that must return to COMMON after it.
     pending_transitions: SmallVec<[usize; 4]>,
-    transitions: CommonTransitions,
     // Counts the window's scenes; `SharedSurface::last_drawn` is measured in it.
     scene_count: u64,
     // Set while rasterizing a scene other than the window's own, which can only be older.
@@ -116,6 +118,13 @@ impl SharedSurfaces {
         }
         let queue = d3d12.map(|(_, queue)| queue);
         for (key, fence, value) in self.pending_releases.drain(..) {
+            let shared = self.surfaces.get(&key);
+            if shared
+                .and_then(|shared| shared.texture.as_ref())
+                .is_some_and(|t| t.stuck_in_read_state)
+            {
+                continue;
+            }
             let result = queue
                 .as_ref()
                 .context("wgpu is not running on Direct3D 12")
@@ -156,49 +165,62 @@ impl SharedSurfaces {
         if textures.is_empty() {
             return;
         }
-        let result = (self.transitions).execute(device, queue, textures.iter().map(|(_, r)| r));
+        let resources = textures
+            .iter()
+            .map(|(_, resource)| resource.clone())
+            .collect();
+        let result = self.transitions.execute(device, queue, resources);
         for (key, _) in &textures {
             let Some(shared) = self.surfaces.get_mut(key) else {
                 continue;
             };
-            match &result {
-                Ok(()) => {
-                    if let Some(texture) = &mut shared.texture {
-                        texture.return_to_common = false;
-                    }
-                }
-                Err(error) => {
-                    shared.settle::<()>(Err(anyhow::anyhow!("{error:#}")));
-                }
+            if let Some(texture) = &mut shared.texture {
+                texture.return_to_common = result.is_err();
+                texture.stuck_in_read_state = result.is_err();
+            }
+            if let Err(error) = &result {
+                shared.settle::<()>(Err(anyhow::anyhow!("{error:#}")));
             }
         }
     }
 }
 
-/// Command lists that move shared textures back to COMMON on wgpu's queue, kept alive until the
-/// queue has executed them.
+/// Command lists that move shared textures back to COMMON on wgpu's queue, kept alive with the
+/// textures they name until the queue has executed them.
 #[derive(Default)]
 struct CommonTransitions {
     fence: Option<ID3D12Fence>,
     value: u64,
-    in_flight: Vec<(ID3D12CommandAllocator, ID3D12GraphicsCommandList, u64)>,
+    in_flight: Vec<InFlightTransition>,
 }
 
+struct InFlightTransition {
+    _allocator: ID3D12CommandAllocator,
+    _list: ID3D12GraphicsCommandList,
+    _resources: SmallVec<[ID3D12Resource; 4]>,
+    value: u64,
+}
+
+/// How long dropping the renderer waits for pending transitions (like wgpu's `Queue::drop`).
+const TRANSITION_DROP_TIMEOUT_MS: u32 = 6000;
+
 impl CommonTransitions {
-    fn execute<'a>(
+    fn execute(
         &mut self,
         device: &ID3D12Device,
         queue: &ID3D12CommandQueue,
-        resources: impl Iterator<Item = &'a ID3D12Resource>,
+        resources: SmallVec<[ID3D12Resource; 4]>,
     ) -> Result<()> {
         let barriers = resources
+            .iter()
             .map(|resource| D3D12_RESOURCE_BARRIER {
                 Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
                 Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
                 Anonymous: D3D12_RESOURCE_BARRIER_0 {
                     Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
                         // SAFETY: copies the interface pointer without taking a reference; the
-                        // barrier never releases it and `resource` outlives the barrier.
+                        // barrier never releases it, and `resources` keeps it alive until the
+                        // queue has executed the list.
                         pResource: unsafe { std::mem::transmute_copy(resource) },
                         Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                         // wgpu's state for `TextureUses::RESOURCE`.
@@ -218,7 +240,8 @@ impl CommonTransitions {
         };
         // SAFETY: the fence is a live COM object.
         let completed = unsafe { fence.GetCompletedValue() };
-        self.in_flight.retain(|(_, _, value)| *value > completed);
+        self.in_flight
+            .retain(|transition| transition.value > completed);
         // SAFETY: the objects are created on the live device, the list is recorded, closed and
         // executed on that device's direct queue, and kept alive until the fence passes it.
         unsafe {
@@ -233,24 +256,53 @@ impl CommonTransitions {
             list.ResourceBarrier(&barriers);
             list.Close()?;
             queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>()?)]);
+            // Kept before signaling: if the signal fails the list may still run, so its entry
+            // stays until a later signal on the same queue passes its value.
             self.value += 1;
+            self.in_flight.push(InFlightTransition {
+                _allocator: allocator,
+                _list: list,
+                _resources: resources,
+                value: self.value,
+            });
             queue.Signal(&fence, self.value)?;
-            self.in_flight.push((allocator, list, self.value));
         }
         Ok(())
+    }
+
+    /// Waits up to `TRANSITION_DROP_TIMEOUT_MS` for the queue to execute every pending list.
+    fn wait_for_queue(&self, fence: &ID3D12Fence) -> Result<()> {
+        // SAFETY: an unnamed auto-reset event, closed below.
+        let event = unsafe { CreateEventW(None, false, false, windows::core::PCWSTR::null()) }
+            .context("creating event")?;
+        // SAFETY: the fence and the event are live; the wait is bounded.
+        let waited = unsafe { fence.SetEventOnCompletion(self.value, event) }
+            .context("setting the transition fence event")
+            .and_then(|()| {
+                // SAFETY: the event is live.
+                let status = unsafe { WaitForSingleObject(event, TRANSITION_DROP_TIMEOUT_MS) };
+                anyhow::ensure!(status == WAIT_OBJECT_0, "the queue did not finish in time");
+                Ok(())
+            });
+        // SAFETY: the event was created above and is not used afterwards.
+        unsafe { CloseHandle(event) }.ok();
+        waited
     }
 }
 
 impl Drop for CommonTransitions {
     fn drop(&mut self) {
-        if let (Some(fence), false) = (&self.fence, self.in_flight.is_empty()) {
-            // SAFETY: the fence is live; a null event makes the call block until the queue has
-            // executed every list, so none is released while in use.
-            let waited = unsafe { fence.SetEventOnCompletion(self.value, HANDLE::default()) };
-            if let Err(error) = waited {
-                log::error!("waiting for shared surface transitions failed: {error}");
-                std::mem::forget(std::mem::take(&mut self.in_flight));
-            }
+        let Some(fence) = &self.fence else {
+            return;
+        };
+        // SAFETY: the fence is a live COM object.
+        if self.in_flight.is_empty() || unsafe { fence.GetCompletedValue() } >= self.value {
+            return;
+        }
+        if let Err(error) = self.wait_for_queue(fence) {
+            // Freeing lists or textures the queue may still use is worse than leaking them.
+            log::error!("leaking pending shared surface transitions: {error:#}");
+            std::mem::forget(std::mem::take(&mut self.in_flight));
         }
     }
 }
@@ -371,6 +423,10 @@ struct ImportedTexture {
     resource: ID3D12Resource,
     // wgpu left the texture in a shader-resource state that must return to COMMON.
     return_to_common: bool,
+    // Returning to COMMON failed, so the queue still holds the texture in a read state: its
+    // frames are not released (the producer's own release timeout then applies) until a later
+    // return succeeds.
+    stuck_in_read_state: bool,
     _texture: wgpu::Texture,
 }
 
@@ -501,11 +557,14 @@ fn import_texture(
         desc.Flags.0 & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE.0 == 0,
         "shared surface texture denies shader-resource views"
     );
+    // One mip only: wgpu transitions just the subresources its view covers, so the return to
+    // COMMON (which names every subresource) is exact only for a single-subresource texture.
     anyhow::ensure!(
-        desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1,
-        "shared surface texture has {} slices and {} samples, expected one of each",
+        desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 && desc.MipLevels == 1,
+        "shared surface texture has {} slices, {} samples and {} mips, expected one of each",
         desc.DepthOrArraySize,
-        desc.SampleDesc.Count
+        desc.SampleDesc.Count,
+        desc.MipLevels
     );
     let width = u32::try_from(desc.Width).context("shared surface texture is too wide")?;
     let extent = wgpu::Extent3d {
@@ -513,16 +572,15 @@ fn import_texture(
         height: desc.Height,
         depth_or_array_layers: 1,
     };
-    let mip_level_count = u32::from(desc.MipLevels).max(1);
-    // SAFETY: the resource is a single-sample, single-slice 2D BGRA texture of `extent` and
-    // `mip_level_count` mips, as checked above.
+    // SAFETY: the resource is a single-sample, single-slice, single-mip 2D BGRA texture of
+    // `extent`, as checked above.
     let hal_texture = unsafe {
         wgpu::hal::dx12::Device::texture_from_raw(
             resource.clone(),
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureDimension::D2,
             extent,
-            mip_level_count,
+            1,
             1,
         )
     };
@@ -535,7 +593,7 @@ fn import_texture(
             &wgpu::TextureDescriptor {
                 label: Some("windows_shared_texture"),
                 size: extent,
-                mip_level_count,
+                mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Bgra8Unorm,
@@ -544,11 +602,7 @@ fn import_texture(
             },
         )
     };
-    // Only mip 0 is shown.
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        mip_level_count: Some(1),
-        ..Default::default()
-    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     Ok(ImportedTexture {
         binding: SurfaceBinding::new(renderer, view.clone(), view),
         size: Size {
@@ -557,6 +611,7 @@ fn import_texture(
         },
         resource,
         return_to_common: desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS.0 == 0,
+        stuck_in_read_state: false,
         _texture: texture,
     })
 }
