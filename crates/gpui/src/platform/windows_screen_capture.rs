@@ -69,11 +69,16 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// release fence's completed value is greater than K: the renderer has then drawn a newer frame,
 /// so frame K is no longer in the scene. A producer therefore needs a pool of at least two
 /// textures. A frame is released when it is drawn; a surface left entirely outside a damage
-/// redraw is not drawn, so its frame is released when the surface is next drawn.
+/// redraw is not drawn, so its frame is released when the surface is next drawn. The release
+/// fence never moves backwards: if a stale scene (such as a compositor group rasterized from an
+/// older scene) still holds a frame older than one already drawn with the same release fence,
+/// the renderer draws and releases that newer frame in its place.
 ///
 /// A surface the renderer cannot import (for example a texture of another format, or handles
 /// from another adapter) is skipped and logged once; the renderer still signals its release
 /// fence when it can open it, and retries the import when a frame brings other fence handles.
+/// A frame whose `size` differs from its texture's size is skipped and released on its own;
+/// the next frame is drawn normally.
 /// If the release fence itself cannot be used, frames are never released, so a producer should
 /// treat a release that does not arrive within its own timeout as a failure and fall back, for
 /// example by recreating its textures and fences.
