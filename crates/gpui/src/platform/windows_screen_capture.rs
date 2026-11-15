@@ -52,11 +52,16 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 }
 
 /// A frame that another Direct3D 11 device rendered into a shared texture, such as a browser's
-/// accelerated off-screen paint. Only the Direct3D 11 renderer imports it.
+/// accelerated off-screen paint. The Direct3D 11 renderer imports it, and so does the wgpu
+/// renderer when it runs on Direct3D 12 with the `wgpu-surfaces` feature: it opens the handles
+/// on its D3D12 device, makes its queue wait on the acquire fence before the submission that
+/// samples the frame, and signals the release fence after that submission. Both follow the
+/// protocol below.
 ///
 /// The producer creates the texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` and no keyed
 /// mutex, as a single-sample, single-slice `DXGI_FORMAT_B8G8R8A8_UNORM` or
-/// `DXGI_FORMAT_B8G8R8A8_TYPELESS` texture of premultiplied-alpha pixels (only mip 0 is shown).
+/// `DXGI_FORMAT_B8G8R8A8_TYPELESS` texture of premultiplied-alpha pixels (only mip 0 is shown;
+/// the wgpu renderer accepts only single-mip textures).
 /// It also creates two shared `ID3D11Fence`s:
 ///
 /// - the acquire fence: after writing the frame the producer signals it with `fence_value` and
@@ -85,9 +90,13 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// fence when it can open it, and retries the import when a frame brings other fence handles.
 /// A frame whose `size` differs from its texture's size is skipped and released on its own;
 /// the next frame is drawn normally.
-/// If the release fence itself cannot be used, frames are never released, so a producer should
-/// treat a release that does not arrive within its own timeout as a failure and fall back, for
-/// example by recreating its textures and fences.
+/// If the release fence itself cannot be used, or the wgpu renderer cannot return a sampled
+/// texture to the `COMMON` state, frames are never released, so a producer should treat a
+/// release that does not arrive within its own timeout as a failure and fall back, for example
+/// by recreating its textures and fences.
+/// The renderer's GPU queue waits for the acquire fence without a timeout: a producer that never
+/// signals `fence_value` stalls every later submission of the renderer, and a caller that waits
+/// for one of them (such as a headless render reading pixels back) blocks with it.
 ///
 /// A frame is identified by its texture handle and fence value, so a new frame must use a new
 /// texture handle or a higher fence value, otherwise damage tracking treats it as unchanged.

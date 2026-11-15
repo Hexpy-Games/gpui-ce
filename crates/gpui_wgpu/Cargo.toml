@@ -48,6 +48,10 @@ objc2-metal = "0.3"
 windows = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Graphics_Direct3D12",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Security",
+  "Win32_System_Threading",
 ] }
 windows-061 = { workspace = true, features = [
   "Win32_Foundation",

@@ -45,8 +45,10 @@ pub enum SurfaceSource {
     /// A native Windows Graphics Capture texture.
     #[cfg(target_os = "windows")]
     WindowsCapture(WindowsScreenCaptureFrame),
-    /// A texture another Direct3D 11 device shared through NT handles. Only the Direct3D 11
-    /// renderer can draw it; the wgpu renderer fails every frame that contains it.
+    /// A texture another Direct3D 11 device shared through NT handles. The Direct3D 11 renderer
+    /// and the wgpu renderer with the `wgpu-surfaces` feature draw it (the latter only on
+    /// Direct3D 12; on another backend it skips the surface and logs once). A wgpu renderer
+    /// without that feature fails every frame that contains it.
     #[cfg(target_os = "windows")]
     WindowsSharedTexture(WindowsSharedTextureFrame),
     /// A placeholder for platforms that cannot import native surfaces.

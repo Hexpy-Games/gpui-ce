@@ -8,20 +8,25 @@ use windows_061::{
 
 #[path = "windows/shared.rs"]
 mod shared;
+#[path = "windows/shared_frame.rs"]
+mod shared_frame;
 #[path = "windows/upload.rs"]
 mod upload;
 
 use shared::SharedTexture;
+use shared_frame::SharedSurfaces;
 use upload::UploadedTexture;
 
 pub(in crate::wgpu_renderer) struct SurfaceCache {
     textures: FxHashMap<CaptureFrameKey, CachedTexture>,
+    shared: SharedSurfaces,
 }
 
 impl SurfaceCache {
     pub(in crate::wgpu_renderer) fn new(_device: &wgpu::Device) -> Result<Self> {
         Ok(Self {
             textures: FxHashMap::default(),
+            shared: SharedSurfaces::default(),
         })
     }
 }
@@ -31,12 +36,23 @@ pub(super) fn retain_surface_cache(renderer: &WgpuRenderer, surfaces: &[PaintSur
         .iter()
         .filter_map(|surface| capture_frame(surface).map(CaptureFrameKey::from_frame))
         .collect::<smallvec::SmallVec<[CaptureFrameKey; 4]>>();
+    let mut cache = renderer.resources().surface_cache.borrow_mut();
+    cache.textures.retain(|key, _| active_keys.contains(key));
+    cache.shared.retain(surfaces);
+}
+
+pub(super) fn set_detached_scene(renderer: &WgpuRenderer, detached: bool) {
     renderer
         .resources()
         .surface_cache
         .borrow_mut()
-        .textures
-        .retain(|key, _| active_keys.contains(key));
+        .shared
+        .detached = detached;
+}
+
+pub(super) fn signal_surface_releases(renderer: &WgpuRenderer, submitted: bool) {
+    let mut cache = renderer.resources().surface_cache.borrow_mut();
+    cache.shared.signal_releases(renderer, submitted);
 }
 
 pub(super) fn draw_surfaces(
@@ -47,9 +63,16 @@ pub(super) fn draw_surfaces(
     let resources = renderer.resources();
     let mut cache = resources.surface_cache.borrow_mut();
     for surface in surfaces {
-        let Some(frame) = capture_frame(surface) else {
-            log::error!("surface source cannot be imported by the Windows renderer");
-            return Err(frame::DrawError::ExternalSurface);
+        let frame = match &surface.source {
+            gpui::SurfaceSource::WindowsCapture(frame) => frame,
+            gpui::SurfaceSource::WindowsSharedTexture(frame) => {
+                cache.shared.draw(renderer, surface, frame, pass)?;
+                continue;
+            }
+            _ => {
+                log::error!("surface source cannot be imported by the Windows renderer");
+                return Err(frame::DrawError::ExternalSurface);
+            }
         };
         let source = frame.texture();
         let key = CaptureFrameKey::from_frame(frame);

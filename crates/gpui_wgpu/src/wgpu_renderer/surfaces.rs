@@ -87,6 +87,19 @@ impl WgpuRenderer {
         platform::retain_surface_cache(self, surfaces);
     }
 
+    /// Marks the scenes encoded next as detached from the window's scene (older than it), or not.
+    pub(super) fn set_detached_surface_scene(&self, _detached: bool) {
+        #[cfg(all(target_os = "windows", feature = "wgpu-surfaces"))]
+        platform::set_detached_scene(self, _detached);
+    }
+
+    /// Runs after a frame's submission, or after its encoding failed: shared surfaces signal
+    /// their release fences behind the work that sampled them.
+    pub(super) fn after_surface_submit(&self, _submitted: bool) {
+        #[cfg(all(target_os = "windows", feature = "wgpu-surfaces"))]
+        platform::signal_surface_releases(self, _submitted);
+    }
+
     #[cfg(any(
         all(target_family = "wasm", feature = "custom-gpu"),
         target_os = "macos",
