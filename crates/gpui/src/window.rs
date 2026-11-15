@@ -9,13 +9,14 @@ use crate::{
     InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, LiveLayer, LivePaint, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, PaintOperation, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PopupMenuItem,
-    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
-    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    MouseUpEvent, NativeKeyData, PaintOperation, PaintSurface, Path, PendingKeystrokes, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, PopupMenuItem, Priority, PromptButton, PromptLevel, Quad,
+    RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, Replay, ResizeEdge, ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels, Scene, Shadow,
+    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
     TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
     Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
@@ -1491,7 +1492,7 @@ pub(crate) enum DrawPhase {
 
 #[derive(Default, Debug)]
 struct PendingInput {
-    keystrokes: SmallVec<[Keystroke; 1]>,
+    keystrokes: PendingKeystrokes,
     focus: Option<FocusId>,
     timer: Option<Task<()>>,
     needs_timeout: bool,
@@ -6554,6 +6555,7 @@ impl Window {
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
+                native: None,
             }),
             cx,
         );
@@ -7014,6 +7016,7 @@ impl Window {
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
         let mut keystroke: Option<Keystroke> = None;
+        let mut native: Option<NativeKeyData> = None;
 
         if let Some(event) = event.downcast_ref::<ModifiersChangedEvent>() {
             if event.modifiers.number_of_modifiers() == 0
@@ -7048,6 +7051,7 @@ impl Window {
         } else if let Some(key_down_event) = event.downcast_ref::<KeyDownEvent>() {
             self.pending_modifier.saw_other_input = true;
             keystroke = Some(key_down_event.keystroke.clone());
+            native = key_down_event.native;
             if key_down_event.keystroke.key_char.is_some()
                 && matches!(
                     cx.cursor_hide_mode,
@@ -7078,6 +7082,7 @@ impl Window {
         let match_result = self.rendered_frame.dispatch_tree.dispatch_key(
             currently_pending.keystrokes,
             keystroke,
+            native,
             &dispatch_path,
         );
 
@@ -7292,7 +7297,7 @@ impl Window {
     /// Returns the currently pending input keystrokes that might result in a multi-stroke key binding.
     pub fn pending_input_keystrokes(&self) -> Option<&[Keystroke]> {
         self.active_pending_input()
-            .map(|pending_input| pending_input.keystrokes.as_slice())
+            .map(|pending_input| pending_input.keystrokes.keystrokes())
     }
 
     fn replay_pending_input(&mut self, replays: SmallVec<[Replay; 1]>, cx: &mut App) {
@@ -7304,6 +7309,7 @@ impl Window {
                 keystroke: replay.keystroke.clone(),
                 is_held: false,
                 prefer_character_input: true,
+                native: replay.native,
             };
 
             cx.propagate_event = true;

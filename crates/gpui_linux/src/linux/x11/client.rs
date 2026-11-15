@@ -1122,6 +1122,7 @@ impl X11Client {
                     keystroke,
                     is_held: false,
                     prefer_character_input: false,
+                    native: None,
                 }));
             }
             Event::KeyRelease(event) => {
@@ -1144,7 +1145,10 @@ impl X11Client {
                     keystroke
                 };
                 drop(state);
-                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
+                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke,
+                    native: None,
+                }));
             }
             Event::XinputButtonPress(event) => {
                 let window = self.get_window(event.event)?;

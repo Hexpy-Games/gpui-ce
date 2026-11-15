@@ -131,9 +131,11 @@ pub(crate) unsafe fn platform_input_from_native(
                 keystroke: parse_keystroke(native_event),
                 is_held: native_event.isARepeat(),
                 prefer_character_input: false,
+                native: None,
             })),
             NSEventType::KeyUp => Some(PlatformInput::KeyUp(KeyUpEvent {
                 keystroke: parse_keystroke(native_event),
+                native: None,
             })),
             NSEventType::LeftMouseDown
             | NSEventType::RightMouseDown

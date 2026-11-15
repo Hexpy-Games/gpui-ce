@@ -31,6 +31,8 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_APPEARANCE_CHANGED: u32 = WM_USER + 10;
+/// `WM_GPUI_KEYDOWN` for a `WM_SYSKEYDOWN`, so the key event can report `system_key`.
+pub(crate) const WM_GPUI_SYSKEYDOWN: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -153,7 +155,8 @@ impl WindowsWindowInner {
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
             WM_SYSKEYUP => self.handle_syskeyup_msg(wparam, lparam),
             WM_KEYUP => self.handle_keyup_msg(wparam, lparam),
-            WM_GPUI_KEYDOWN => self.handle_keydown_msg(wparam, lparam),
+            WM_GPUI_KEYDOWN => self.handle_keydown_msg(wparam, lparam, false),
+            WM_GPUI_SYSKEYDOWN => self.handle_keydown_msg(wparam, lparam, true),
             WM_CHAR => self.handle_char_msg(wparam),
             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
@@ -424,7 +427,7 @@ impl WindowsWindowInner {
 
     fn handle_syskeyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let input = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
-            PlatformInput::KeyUp(KeyUpEvent { keystroke })
+            key_up_input(keystroke, wparam, lparam, true)
         })?;
         let mut func = self.state.callbacks.input.take()?;
 
@@ -437,17 +440,24 @@ impl WindowsWindowInner {
 
     // It's a known bug that you can't trigger `ctrl-shift-0`. See:
     // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
-    fn handle_keydown_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_keydown_msg(
+        &self,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        system_key: bool,
+    ) -> Option<isize> {
         let Some(input) = handle_key_event(
             wparam,
             lparam,
             &self.state,
             |keystroke, prefer_character_input| {
-                PlatformInput::KeyDown(KeyDownEvent {
+                key_down_input(
                     keystroke,
-                    is_held: lparam.0 & (0x1 << 30) > 0,
                     prefer_character_input,
-                })
+                    wparam,
+                    lparam,
+                    system_key,
+                )
             },
         ) else {
             return Some(1);
@@ -466,7 +476,7 @@ impl WindowsWindowInner {
 
     fn handle_keyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let Some(input) = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
-            PlatformInput::KeyUp(KeyUpEvent { keystroke })
+            key_up_input(keystroke, wparam, lparam, false)
         }) else {
             return Some(1);
         };
@@ -1584,6 +1594,37 @@ where
     }
 }
 
+fn native_key_data(wparam: WPARAM, lparam: LPARAM, system_key: bool) -> NativeKeyData {
+    NativeKeyData::Windows(WindowsKeyData::from_message(wparam.0, lparam.0, system_key))
+}
+
+fn key_down_input(
+    keystroke: Keystroke,
+    prefer_character_input: bool,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    system_key: bool,
+) -> PlatformInput {
+    PlatformInput::KeyDown(KeyDownEvent {
+        keystroke,
+        is_held: lparam.0 & (0x1 << 30) > 0,
+        prefer_character_input,
+        native: Some(native_key_data(wparam, lparam, system_key)),
+    })
+}
+
+fn key_up_input(
+    keystroke: Keystroke,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    system_key: bool,
+) -> PlatformInput {
+    PlatformInput::KeyUp(KeyUpEvent {
+        keystroke,
+        native: Some(native_key_data(wparam, lparam, system_key)),
+    })
+}
+
 fn parse_immutable(vkey: VIRTUAL_KEY) -> Option<String> {
     Some(
         match vkey {
@@ -1847,5 +1888,83 @@ fn notify_frame_changed(handle: HWND) {
                 | SWP_NOZORDER,
         )
         .log_err();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `use super::*`: that glob brings in `gpui::test`, which shadows the built-in `#[test]`.
+    use super::{key_down_input, key_up_input, parse_normal_key};
+    use gpui::{Modifiers, PlatformInput, WindowsKeyData};
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        UI::Input::KeyboardAndMouse::{VK_F4, VK_RIGHT},
+    };
+
+    fn windows_data(input: &PlatformInput) -> WindowsKeyData {
+        let native = match input {
+            PlatformInput::KeyDown(event) => event.native,
+            PlatformInput::KeyUp(event) => event.native,
+            _ => panic!("expected a key event, got {input:?}"),
+        };
+        *native
+            .expect("Windows key events carry native data")
+            .windows()
+            .expect("Windows native data")
+    }
+
+    #[test]
+    fn key_down_reports_the_message_lparam() {
+        // WM_KEYDOWN for Right arrow, auto-repeated: repeat count 1, scan code 0x4D,
+        // extended, previous state down.
+        let lparam = LPARAM(0x0000_0001 | (0x4D << 16) | (1 << 24) | (1 << 30));
+        let wparam = WPARAM(VK_RIGHT.0 as usize);
+        let (keystroke, prefer_character_input) =
+            parse_normal_key(VK_RIGHT, lparam, Modifiers::none()).expect("right is a named key");
+        assert_eq!(keystroke.key, "right");
+
+        let input = key_down_input(keystroke, prefer_character_input, wparam, lparam, false);
+        let PlatformInput::KeyDown(event) = &input else {
+            panic!("expected KeyDown, got {input:?}");
+        };
+        assert!(event.is_held);
+        let data = windows_data(&input);
+        assert_eq!(data.virtual_key, VK_RIGHT.0);
+        assert_eq!(data.scan_code, 0x4D);
+        assert!(data.extended);
+        assert_eq!(data.lparam, lparam.0);
+        assert!(!data.system_key);
+        assert_eq!(
+            data,
+            WindowsKeyData::from_message(wparam.0, lparam.0, false)
+        );
+    }
+
+    #[test]
+    fn sys_key_messages_report_system_key() {
+        // WM_SYSKEYDOWN for Alt+F4: scan code 0x3E, context code (Alt held) set.
+        let lparam = LPARAM(0x0000_0001 | (0x3E << 16) | (1 << 29));
+        let wparam = WPARAM(VK_F4.0 as usize);
+        let (keystroke, prefer_character_input) =
+            parse_normal_key(VK_F4, lparam, Modifiers::none()).expect("f4 is a named key");
+
+        let down = key_down_input(
+            keystroke.clone(),
+            prefer_character_input,
+            wparam,
+            lparam,
+            true,
+        );
+        let data = windows_data(&down);
+        assert!(data.system_key);
+        assert!(!data.extended);
+        assert_eq!((data.virtual_key, data.scan_code), (VK_F4.0, 0x3E));
+
+        // WM_SYSKEYUP: previous state and transition state bits set.
+        let up_lparam = LPARAM(lparam.0 | (1 << 30) | (1 << 31));
+        let up = key_up_input(keystroke, wparam, up_lparam, true);
+        let data = windows_data(&up);
+        assert!(data.system_key);
+        assert_eq!(data.lparam, up_lparam.0);
     }
 }
