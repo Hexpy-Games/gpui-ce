@@ -28,7 +28,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HANDLE, HMODULE, HWND, POINT},
+        Foundation::{CompareObjectHandles, FreeLibrary, HANDLE, HMODULE, HWND, POINT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -145,6 +145,12 @@ struct DirectXResources {
     // Shared textures referenced by the current scene, keyed by texture handle.
     shared_surfaces: FxHashMap<usize, CachedSharedSurface>,
 
+    // The newest frame drawn for each release fence of the current scene.
+    release_fences: ReleaseFences,
+
+    // Set while rasterizing a scene other than the window's own, which can only be older.
+    rasterizing_detached_scene: bool,
+
     // Cached viewport
     viewport: D3D11_VIEWPORT,
 }
@@ -153,6 +159,137 @@ struct CachedSurfaceView {
     #[expect(dead_code)]
     texture: ID3D11Texture2D,
     srv: Option<ID3D11ShaderResourceView>,
+}
+
+/// The newest frame drawn with one release fence, which a producer may pass under several
+/// handles to the same kernel object (for example a duplicated handle per frame).
+struct ReleaseFenceRecord {
+    // A frame for each release handle of the window's scene that refers to this fence. Holding
+    // the frames keeps the handles open, so their values identify only this fence.
+    handles: SmallVec<[WindowsSharedTextureFrame; 1]>,
+    newest: WindowsSharedTextureFrame,
+}
+
+impl ReleaseFenceRecord {
+    fn has_handle(&self, key: usize) -> bool {
+        self.handles.iter().any(|frame| release_key(frame) == key)
+    }
+
+    /// Whether `frame`'s release handle refers to this record's fence object.
+    fn is_fence_of(&self, frame: &WindowsSharedTextureFrame) -> bool {
+        // SAFETY: both frames own their handles and keep them open for this call.
+        unsafe {
+            CompareObjectHandles(
+                HANDLE(self.newest.release_handle().as_raw_handle()),
+                HANDLE(frame.release_handle().as_raw_handle()),
+            )
+        }
+        .as_bool()
+    }
+}
+
+/// The newest frame drawn with each release fence of the window's scene.
+#[derive(Default)]
+struct ReleaseFences {
+    records: Vec<ReleaseFenceRecord>,
+}
+
+impl ReleaseFences {
+    /// Keeps the records of the release fences that the window's scene `surfaces` uses.
+    fn retain(&mut self, surfaces: &[PaintSurface]) {
+        let active_releases = surfaces
+            .iter()
+            .filter_map(|surface| match &surface.source {
+                gpui::SurfaceSource::WindowsSharedTexture(frame) => Some(frame),
+                _ => None,
+            })
+            .collect::<SmallVec<[&WindowsSharedTextureFrame; 4]>>();
+        // A handle new to the scene joins the record of the same kernel object, so a duplicated
+        // handle keeps the newest value seen under the old one. A second `CreateSharedHandle`
+        // makes a distinct object that cannot be matched; its old handle's record is dropped,
+        // and stale scenes holding that handle are then skipped.
+        for frame in &active_releases {
+            let key = release_key(frame);
+            if !self.records.iter().any(|record| record.has_handle(key))
+                && let Some(record) = self
+                    .records
+                    .iter_mut()
+                    .find(|record| record.is_fence_of(frame))
+            {
+                record.handles.push((*frame).clone());
+            }
+        }
+        self.records.retain_mut(|record| {
+            record.handles.retain(|frame| {
+                let key = release_key(frame);
+                active_releases
+                    .iter()
+                    .any(|active| release_key(active) == key)
+            });
+            !record.handles.is_empty()
+        });
+    }
+
+    /// Returns the frame to draw for `frame`, or `None` to skip the surface.
+    ///
+    /// That is `frame` itself, or the newest frame already drawn with the same release fence
+    /// when `frame` is older. An older frame comes from a stale scene, such as a compositor
+    /// group rasterized from the scene that held frame N-1 after the window drew frame N.
+    /// Drawing it would signal N-1 after N, moving the release fence backwards, and would sample
+    /// a texture the producer may already be writing again (seeing N released frees every
+    /// texture of a frame below N). The newest frame's texture is still held, since releasing N
+    /// frees only older frames, so the stale scene shows that frame instead and its release
+    /// signal repeats N.
+    ///
+    /// A scene rasterized apart from the window's own is older than it, so a fence the window
+    /// has no record of (because its surface left the window's scene) is skipped there: neither
+    /// drawn nor released.
+    fn newest(
+        &mut self,
+        frame: &WindowsSharedTextureFrame,
+        detached_scene: bool,
+    ) -> Option<WindowsSharedTextureFrame> {
+        let key = release_key(frame);
+        let found = self
+            .records
+            .iter()
+            .position(|record| record.has_handle(key))
+            .or_else(|| {
+                self.records
+                    .iter()
+                    .position(|record| record.is_fence_of(frame))
+            });
+        let Some(index) = found else {
+            if detached_scene {
+                return None;
+            }
+            self.records.push(ReleaseFenceRecord {
+                handles: smallvec::smallvec![frame.clone()],
+                newest: frame.clone(),
+            });
+            return Some(frame.clone());
+        };
+        let record = &mut self.records[index];
+        if !detached_scene {
+            // Holding the latest frame per handle lets older textures of the producer close.
+            match record
+                .handles
+                .iter_mut()
+                .find(|held| release_key(held) == key)
+            {
+                Some(held) => *held = frame.clone(),
+                None => record.handles.push(frame.clone()),
+            }
+        }
+        if record.newest.fence_value() < frame.fence_value() {
+            record.newest = frame.clone();
+        }
+        Some(record.newest.clone())
+    }
+}
+
+fn release_key(frame: &WindowsSharedTextureFrame) -> usize {
+    frame.release_handle().as_raw_handle() as usize
 }
 
 /// A shared texture referenced by the current scene.
@@ -167,6 +304,9 @@ struct CachedSharedSurface {
     // Importing or using the current (texture, acquire, release) handles failed: the failure was
     // logged once and the surface is skipped until a frame brings other fence handles.
     failed: bool,
+    // The last frame's size disagreed with the texture and was logged; reset by a frame that
+    // agrees, so a run of mismatched frames logs once.
+    size_mismatch_logged: bool,
 }
 
 impl CachedSharedSurface {
@@ -177,6 +317,7 @@ impl CachedSharedSurface {
             acquire: None,
             release: None,
             failed: false,
+            size_mismatch_logged: false,
         }
     }
 
@@ -200,15 +341,40 @@ impl CachedSharedSurface {
         if self.failed {
             return None;
         }
-        let result = self.import_and_wait(device, context);
-        self.settle(result)
+        let imported = self.import(device);
+        let (srv, size, acquire) = self.settle(imported)?;
+        // The size is per-frame data, not a property of the handles: a frame that disagrees with
+        // the texture is skipped on its own and the next frame is tried normally.
+        if size != self.frame.size() {
+            if !self.size_mismatch_logged {
+                log::error!(
+                    "skipping shared surface frame {:?}: the texture is {size:?}",
+                    self.frame
+                );
+            }
+            self.size_mismatch_logged = true;
+            return None;
+        }
+        self.size_mismatch_logged = false;
+        let waited = context
+            .context("D3D11 fence waits are unavailable")
+            .and_then(|context| {
+                // SAFETY: the fence is a live COM object owned by this entry.
+                unsafe { context.Wait(&acquire, self.frame.fence_value()) }
+                    .context("waiting for the shared surface's acquire fence")
+            });
+        self.settle(waited).map(|()| srv)
     }
 
-    fn import_and_wait(
+    /// Opens the handles of the current frame that are not open yet.
+    fn import(
         &mut self,
         device: &ID3D11Device,
-        context: Option<&ID3D11DeviceContext4>,
-    ) -> Result<Option<ID3D11ShaderResourceView>> {
+    ) -> Result<(
+        Option<ID3D11ShaderResourceView>,
+        Size<DevicePixels>,
+        ID3D11Fence,
+    )> {
         // The release fence comes first so that a surface whose texture fails can still be
         // released.
         if self.release.is_none() {
@@ -228,16 +394,7 @@ impl CachedSharedSurface {
                 .insert(open_shared_fence(device, self.frame.fence_handle())?)
                 .clone(),
         };
-        anyhow::ensure!(
-            size == self.frame.size(),
-            "shared surface texture is {size:?}, frame says {:?}",
-            self.frame.size()
-        );
-        let context = context.context("D3D11 fence waits are unavailable")?;
-        // SAFETY: the fence is a live COM object owned by this entry.
-        unsafe { context.Wait(&acquire, self.frame.fence_value()) }
-            .context("waiting for the shared surface's acquire fence")?;
-        Ok(srv)
+        Ok((srv, size, acquire))
     }
 
     /// Signals the frame's value on the release fence, GPU-ordered after any draw that sampled
@@ -1371,10 +1528,12 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut()?;
         let previous_texture = resources.render_target.replace(texture.clone());
         let previous_view = std::mem::replace(&mut resources.render_target_view, view);
+        resources.rasterizing_detached_scene = true;
         // Rasterizing reuses the retained scene target and scene buffers.
         let rendered = self.render(scene, WindowBackgroundAppearance::Transparent, false);
         self.retained = None;
         let resources = self.resources.as_mut()?;
+        resources.rasterizing_detached_scene = false;
         resources.render_target = previous_texture;
         resources.render_target_view = previous_view;
         rendered.ok()?;
@@ -1898,6 +2057,11 @@ impl DirectXRenderer {
                         .clone()
                 }
                 gpui::SurfaceSource::WindowsSharedTexture(frame) => {
+                    let detached = resources.rasterizing_detached_scene;
+                    let Some(frame) = &resources.release_fences.newest(frame, detached) else {
+                        // Only an older scene holds a fence the window has not drawn.
+                        continue;
+                    };
                     let key = frame.texture_handle().as_raw_handle() as usize;
                     let shared = resources
                         .shared_surfaces
@@ -2490,6 +2654,8 @@ impl DirectXResources {
             blur: None,
             surface_views: FxHashMap::default(),
             shared_surfaces: FxHashMap::default(),
+            release_fences: ReleaseFences::default(),
+            rasterizing_detached_scene: false,
             viewport,
         })
     }
@@ -2610,6 +2776,7 @@ impl DirectXResources {
             .collect::<SmallVec<[usize; 4]>>();
         self.shared_surfaces
             .retain(|key, _| active_shared.contains(key));
+        self.release_fences.retain(surfaces);
     }
 }
 
@@ -3859,9 +4026,9 @@ mod tests {
 
     use anyhow::Context as _;
     use gpui::{PaintSurface, WindowsSharedTextureFrame};
-    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use std::sync::Arc;
-    use windows::Win32::Foundation::{GENERIC_ALL, HMODULE};
+    use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, HMODULE};
     use windows::Win32::Graphics::Direct3D::{
         D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
     };
@@ -4222,6 +4389,16 @@ mod tests {
         Ok(())
     }
 
+    /// Takes sole ownership of a new NT handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be an open handle that nothing else closes.
+    unsafe fn owned(handle: HANDLE) -> Arc<OwnedHandle> {
+        // SAFETY: guaranteed by the caller.
+        Arc::new(unsafe { OwnedHandle::from_raw_handle(handle.0) })
+    }
+
     /// A producer on its own D3D11 device, sharing a texture and two fences like a browser's
     /// accelerated off-screen paint does.
     struct SharedTextureProducer {
@@ -4291,14 +4468,13 @@ mod tests {
             let (fence, release) = (shared_fence()?, shared_fence()?);
             let resource = texture.cast::<IDXGIResource1>()?;
             // SAFETY: the objects were created shareable; each call returns a new NT handle that
-            // the `OwnedHandle` takes sole ownership of.
+            // is owned at once, so a later failure closes the handles created before it.
             let handles = unsafe {
                 [
-                    resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
-                    fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
-                    release.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                    owned(resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
+                    owned(fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
+                    owned(release.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
                 ]
-                .map(|handle| Arc::new(OwnedHandle::from_raw_handle(handle.0)))
             };
             Ok(Self {
                 context: context.context("no producer context")?.cast()?,
@@ -4343,16 +4519,32 @@ mod tests {
             })
         }
 
+        /// The release fence's completed value.
+        fn release_value(&self) -> u64 {
+            // SAFETY: the fence is live and owned by this producer.
+            unsafe { self.release.GetCompletedValue() }
+        }
+
+        /// Passes both fences on under duplicated handles, as a producer that hands each frame
+        /// its own copy of the handles does. The duplicates refer to the same kernel objects.
+        fn duplicate_fences(&mut self) -> Result<()> {
+            let duplicate = |handle: &Arc<OwnedHandle>| -> Result<Arc<OwnedHandle>> {
+                Ok(Arc::new(handle.try_clone()?))
+            };
+            self.handles[1] = duplicate(&self.handles[1])?;
+            self.handles[2] = duplicate(&self.handles[2])?;
+            Ok(())
+        }
+
         /// Shares both fences again under new handles, as a producer recovering from a failure.
         fn reshare_fences(&mut self) -> Result<()> {
             // SAFETY: the fences were created shareable; each call returns a new NT handle that
-            // the `OwnedHandle` takes sole ownership of.
+            // is owned at once, so a failure of the second closes the first.
             let [fence, release] = unsafe {
                 [
-                    self.fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
-                    self.release.CreateSharedHandle(None, GENERIC_ALL.0, None)?,
+                    owned(self.fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
+                    owned(self.release.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
                 ]
-                .map(|handle| Arc::new(OwnedHandle::from_raw_handle(handle.0)))
             };
             self.handles[1] = fence;
             self.handles[2] = release;
@@ -4389,6 +4581,33 @@ mod tests {
             close(r, wanted[0]) && close(g, wanted[1]) && close(b, wanted[2]),
             "{name} at ({x},{y}) rendered ({r},{g},{b}), expected {wanted:?}"
         );
+    }
+
+    /// Waits until the renderer's GPU has executed every command submitted so far, including
+    /// its fence waits and signals.
+    ///
+    /// A fence signal queued after them is used rather than an event query, which was seen to
+    /// report completion before preceding shared-fence signals were visible.
+    fn wait_for_gpu(devices: &DirectXDevices) -> Result<()> {
+        let device5 = devices.device.cast::<ID3D11Device5>()?;
+        let mut probe = None;
+        // SAFETY: `probe` is a valid out-pointer.
+        unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut probe) }?;
+        let probe: ID3D11Fence = probe.context("no probe fence")?;
+        let context = devices.device_context.cast::<ID3D11DeviceContext4>()?;
+        // SAFETY: the fence and context are live.
+        unsafe {
+            context.Signal(&probe, 1)?;
+            context.Flush();
+        }
+        for _ in 0..200 {
+            // SAFETY: the fence is live.
+            if unsafe { probe.GetCompletedValue() } >= 1 {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        anyhow::bail!("the GPU did not finish within two seconds")
     }
 
     /// Cached shared surfaces, and how many of them are drawable.
@@ -4503,8 +4722,8 @@ mod tests {
             "the texture must not be imported again"
         );
 
-        // A frame whose size disagrees with its texture is skipped but released, and stays
-        // skipped while frames bring the same fence handles.
+        // A frame whose size disagrees with its texture is skipped but released; the size is
+        // per-frame data, so the next frame with the same handles draws.
         producer.paint(GREEN, 3)?;
         let [texture, fence, release] = producer.handles.clone();
         let tiny = Size {
@@ -4514,27 +4733,232 @@ mod tests {
         let wrong_size = WindowsSharedTextureFrame::new(texture, fence, 3, release, tiny);
         let image = renderer.render_to_image(&surface_scene(Some(wrong_size), false), opaque)?;
         expect_pixel(&image, "wrong-size frame", 30, 20, [255, 255, 255]);
+        assert_eq!(shared_state(&renderer), (1, 1));
+        flush();
+        assert!(producer.released(3), "a wrong-size frame must be released");
         let green = producer.paint(GREEN, 4)?;
         let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
         expect_pixel(
             &image,
-            "frame with the failed fence handles",
+            "frame after a wrong-size frame",
             30,
             20,
-            [255, 255, 255],
+            [0, 255, 0],
         );
-        assert_eq!(shared_state(&renderer), (1, 0));
+        assert_eq!(shared_state(&renderer), (1, 1));
         flush();
-        assert!(producer.released(4), "skipped frames must be released");
+        assert!(producer.released(4), "the next frame must be released");
+
+        // An acquire handle that is not a fence fails the import, which stays failed while
+        // frames bring the same fence handles.
+        let [texture, _, release] = producer.handles.clone();
+        let not_a_fence = texture.clone();
+        for value in 5..=6 {
+            producer.paint(BLUE, value)?;
+            let frame = WindowsSharedTextureFrame::new(
+                texture.clone(),
+                not_a_fence.clone(),
+                value,
+                release.clone(),
+                producer.size,
+            );
+            let image = renderer.render_to_image(&surface_scene(Some(frame), false), opaque)?;
+            expect_pixel(&image, "frame with a failed fence", 30, 20, [255, 255, 255]);
+            assert_eq!(shared_state(&renderer), (1, 0));
+            flush();
+            assert!(producer.released(value), "skipped frames must be released");
+        }
 
         // New fence handles retry the import.
         producer.reshare_fences()?;
-        let green = producer.paint(GREEN, 5)?;
+        let green = producer.paint(GREEN, 7)?;
         let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
         expect_pixel(&image, "recovered frame", 30, 20, [0, 255, 0]);
         assert_eq!(shared_state(&renderer), (1, 1));
         flush();
-        assert!(producer.released(5), "the recovered frame must be released");
+        assert!(producer.released(7), "the recovered frame must be released");
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_scene_never_moves_the_release_fence_backwards() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+        let cached_value = |renderer: &DirectXRenderer| {
+            let surfaces = &renderer.resources.as_ref().unwrap().shared_surfaces;
+            surfaces
+                .values()
+                .next()
+                .map(|surface| surface.frame.fence_value())
+        };
+
+        let red = producer.paint(RED, 1)?;
+        renderer.render_to_image(&surface_scene(Some(red.clone()), false), opaque)?;
+        let blue = producer.paint(BLUE, 2)?;
+        let image = renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+        expect_pixel(&image, "newer frame", 30, 20, [0, 0, 255]);
+        wait_for_gpu(&devices)?;
+        assert_eq!(producer.release_value(), 2);
+
+        // A group rasterized from the scene that still holds frame 1 shows frame 2 instead, and
+        // signals 2 again rather than 1.
+        assert_eq!(
+            rasterized_surface_pixel(&mut renderer, red)?,
+            [0, 0, 255, 255],
+            "the stale scene shows the newer frame"
+        );
+        wait_for_gpu(&devices)?;
+        assert_eq!(
+            producer.release_value(),
+            2,
+            "the release fence must not move back to the stale frame"
+        );
+        assert_eq!(cached_value(&renderer), Some(2));
+
+        // The window's own next frame is drawn and released as usual.
+        let green = producer.paint(GREEN, 3)?;
+        let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
+        expect_pixel(&image, "frame after the stale scene", 30, 20, [0, 255, 0]);
+        wait_for_gpu(&devices)?;
+        assert_eq!(producer.release_value(), 3);
+        Ok(())
+    }
+
+    /// Rasterizes a detached scene holding `frame` and returns the RGBA pixel inside the surface.
+    fn rasterized_surface_pixel(
+        renderer: &mut DirectXRenderer,
+        frame: WindowsSharedTextureFrame,
+    ) -> Result<[u8; 4]> {
+        let (size, pixels) = renderer
+            .rasterize(
+                &surface_scene(Some(frame), false),
+                scaled(0.0, 0.0, 64.0, 40.0),
+            )
+            .context("rasterizing the stale scene")?;
+        // Rows are tightly packed BGRA; (30, 20) lies inside the surface.
+        let at = ((20 * size.width.0 + 30) * 4) as usize;
+        let &[b, g, r, a] = &pixels[at..at + 4] else {
+            unreachable!("four bytes per pixel")
+        };
+        Ok([r, g, b, a])
+    }
+
+    #[test]
+    fn a_stale_scene_skips_a_fence_the_window_no_longer_draws() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+
+        let red = producer.paint(RED, 1)?;
+        renderer.render_to_image(&surface_scene(Some(red.clone()), false), opaque)?;
+        let blue = producer.paint(BLUE, 2)?;
+        renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+        // The surface leaves the window's scene for one frame, which drops its record.
+        renderer.render_to_image(&surface_scene(None, false), opaque)?;
+        assert_eq!(shared_state(&renderer), (0, 0));
+        wait_for_gpu(&devices)?;
+        assert_eq!(producer.release_value(), 2);
+
+        // An older scene still holding frame 1 can only be stale: the surface is neither drawn
+        // (its texture may be rewritten) nor released.
+        assert_eq!(
+            rasterized_surface_pixel(&mut renderer, red)?,
+            [0, 0, 0, 0],
+            "the stale surface must not be drawn"
+        );
+        assert_eq!(shared_state(&renderer), (0, 0));
+        wait_for_gpu(&devices)?;
+        assert_eq!(
+            producer.release_value(),
+            2,
+            "the release fence must not move back to the stale frame"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_duplicated_release_handle_keeps_the_fence_newest_value() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let mut producer =
+            SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+
+        let red = producer.paint(RED, 1)?;
+        renderer.render_to_image(&surface_scene(Some(red.clone()), false), opaque)?;
+        let blue = producer.paint(BLUE, 2)?;
+        renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+
+        // The window's scene now holds only a duplicate of the release handle.
+        producer.duplicate_fences()?;
+        let green = producer.paint(GREEN, 3)?;
+        assert_ne!(
+            green.release_handle().as_raw_handle(),
+            red.release_handle().as_raw_handle()
+        );
+        let image = renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
+        expect_pixel(
+            &image,
+            "frame under the duplicated handles",
+            30,
+            20,
+            [0, 255, 0],
+        );
+        wait_for_gpu(&devices)?;
+        assert_eq!(producer.release_value(), 3);
+
+        // A stale scene signaling through the old handle reaches the same fence, so it shows
+        // and releases the newest frame rather than frame 1.
+        assert_eq!(
+            rasterized_surface_pixel(&mut renderer, red)?,
+            [0, 255, 0, 255],
+            "the stale scene shows the newest frame"
+        );
+        wait_for_gpu(&devices)?;
+        assert_eq!(
+            producer.release_value(),
+            3,
+            "the release fence must not move back through the old handle"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_scene_skips_a_release_fence_shared_again() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let mut producer =
+            SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let opaque = WindowBackgroundAppearance::Opaque;
+
+        let red = producer.paint(RED, 1)?;
+        renderer.render_to_image(&surface_scene(Some(red.clone()), false), opaque)?;
+        let blue = producer.paint(BLUE, 2)?;
+        renderer.render_to_image(&surface_scene(Some(blue), false), opaque)?;
+
+        // `CreateSharedHandle` again yields a distinct kernel object for the same fence, which
+        // the renderer cannot match to the old handle; the old handle's record is dropped.
+        producer.reshare_fences()?;
+        let green = producer.paint(GREEN, 3)?;
+        renderer.render_to_image(&surface_scene(Some(green), false), opaque)?;
+        wait_for_gpu(&devices)?;
+        assert_eq!(producer.release_value(), 3);
+
+        // A stale scene still holding the old handle is skipped: neither drawn nor released.
+        assert_eq!(
+            rasterized_surface_pixel(&mut renderer, red)?,
+            [0, 0, 0, 0],
+            "the stale surface must not be drawn"
+        );
+        wait_for_gpu(&devices)?;
+        assert_eq!(
+            producer.release_value(),
+            3,
+            "the release fence must not move back through the old handle"
+        );
         Ok(())
     }
 }
