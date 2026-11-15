@@ -274,11 +274,24 @@ fn shared_textures_render_release_skip_and_evict() -> Result<()> {
         eprintln!("skipping: shared textures are imported only on Direct3D 12");
         return Ok(());
     }
-    // Producers that create their device without naming an adapter use the default adapter.
+    // Producers that create their device without naming an adapter use the default adapter, so
+    // headless uses it too whenever wgpu exposes it (it hides the non-software Basic Render
+    // Driver that is adapter 0 on hosts without a GPU). The producer below follows wgpu's
+    // adapter by LUID either way.
     let headless_luid = crate::adapter_luid(&context.adapter).context("no adapter LUID")?;
     let default_luid = crate::default_adapter_luid()?;
     eprintln!("headless adapter LUID {headless_luid:016x}, default {default_luid:016x}");
-    if std::env::var_os(crate::HEADLESS_ADAPTER_LUID_ENV).is_none() {
+    let exposed = gpui::block_on(context.instance.enumerate_adapters(wgpu::Backends::DX12))
+        .iter()
+        .any(|adapter| crate::adapter_luid(adapter) == Some(default_luid));
+    if std::env::var_os(crate::HEADLESS_ADAPTER_LUID_ENV).is_some() {
+        eprintln!(
+            "not checking the default adapter: {}",
+            crate::HEADLESS_ADAPTER_LUID_ENV
+        );
+    } else if !exposed {
+        eprintln!("not checking the default adapter: wgpu does not expose it");
+    } else {
         assert_eq!(
             headless_luid, default_luid,
             "headless must use the default adapter"

@@ -505,8 +505,9 @@ impl WgpuContext {
                 Some(adapter) => adapter,
                 None => {
                     gpui::block_on(instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
-                        // LowPower avoids waking a discrete GPU just for snapshots on dual-GPU
-                        // systems.
+                        // The fallback when the default adapter is not used (another backend,
+                        // or wgpu hides it): LowPower avoids waking a discrete GPU just for
+                        // snapshots on dual-GPU systems.
                         power_preference: wgpu::PowerPreference::LowPower,
                         compatible_surface: None,
                         force_fallback_adapter: false,
