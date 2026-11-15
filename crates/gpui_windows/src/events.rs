@@ -1928,15 +1928,15 @@ mod tests {
             panic!("expected KeyDown, got {input:?}");
         };
         assert!(event.is_held);
+        let data = windows_data(&input);
+        assert_eq!(data.virtual_key, VK_RIGHT.0);
+        assert_eq!(data.scan_code, 0x4D);
+        assert!(data.extended);
+        assert_eq!(data.lparam, lparam.0);
+        assert!(!data.system_key);
         assert_eq!(
-            windows_data(&input),
-            WindowsKeyData {
-                virtual_key: VK_RIGHT.0,
-                scan_code: 0x4D,
-                extended: true,
-                lparam: lparam.0,
-                system_key: false,
-            }
+            data,
+            WindowsKeyData::from_message(wparam.0, lparam.0, false)
         );
     }
 

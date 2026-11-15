@@ -51,7 +51,7 @@
 
 use crate::{
     Action, ActionRegistry, App, DispatchPhase, EntityId, FocusId, KeyBinding, KeyContext, Keymap,
-    Keystroke, ModifiersChangedEvent, Window,
+    Keystroke, ModifiersChangedEvent, NativeKeyData, Window,
 };
 use collections::FxHashMap;
 use smallvec::SmallVec;
@@ -115,12 +115,53 @@ impl ReusedSubtree {
 #[derive(Default, Debug)]
 pub(crate) struct Replay {
     pub(crate) keystroke: Keystroke,
+    /// The native key data of the key down that produced `keystroke`.
+    pub(crate) native: Option<NativeKeyData>,
     pub(crate) bindings: SmallVec<[KeyBinding; 1]>,
+}
+
+/// Keystrokes awaiting a multi-stroke binding, each with the native key data of its key down,
+/// so a keystroke replayed after the binding fails to match still reaches embedded views intact.
+#[derive(Default, Debug)]
+pub(crate) struct PendingKeystrokes {
+    keystrokes: SmallVec<[Keystroke; 1]>,
+    natives: SmallVec<[Option<NativeKeyData>; 1]>,
+}
+
+impl PendingKeystrokes {
+    pub(crate) fn keystrokes(&self) -> &[Keystroke] {
+        &self.keystrokes
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.keystrokes.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keystrokes.is_empty()
+    }
+
+    fn push(&mut self, keystroke: Keystroke, native: Option<NativeKeyData>) {
+        self.keystrokes.push(keystroke);
+        self.natives.push(native);
+    }
+
+    fn pop(&mut self) {
+        self.keystrokes.pop();
+        self.natives.pop();
+    }
+
+    /// Removes the first `count` keystrokes and returns the last of them.
+    fn take_prefix(&mut self, count: usize) -> (Keystroke, Option<NativeKeyData>) {
+        let keystroke = self.keystrokes.drain(0..count).next_back().unwrap();
+        let native = self.natives.drain(0..count).next_back().unwrap();
+        (keystroke, native)
+    }
 }
 
 #[derive(Default, Debug)]
 pub(crate) struct DispatchResult {
-    pub(crate) pending: SmallVec<[Keystroke; 1]>,
+    pub(crate) pending: PendingKeystrokes,
     pub(crate) pending_has_binding: bool,
     pub(crate) bindings: SmallVec<[KeyBinding; 1]>,
     pub(crate) to_replay: SmallVec<[Replay; 1]>,
@@ -482,12 +523,14 @@ impl DispatchTree {
     ///   these should be replayed first.
     pub fn dispatch_key(
         &mut self,
-        mut input: SmallVec<[Keystroke; 1]>,
+        mut input: PendingKeystrokes,
         keystroke: Keystroke,
+        native: Option<NativeKeyData>,
         dispatch_path: &SmallVec<[DispatchNodeId; 32]>,
     ) -> DispatchResult {
-        input.push(keystroke.clone());
-        let (bindings, pending, context_stack) = self.bindings_for_input(&input, dispatch_path);
+        input.push(keystroke.clone(), native);
+        let (bindings, pending, context_stack) =
+            self.bindings_for_input(input.keystrokes(), dispatch_path);
 
         if pending {
             return DispatchResult {
@@ -512,7 +555,7 @@ impl DispatchTree {
 
         let (suffix, mut to_replay) = self.replay_prefix(input, dispatch_path);
 
-        let mut result = self.dispatch_key(suffix, keystroke, dispatch_path);
+        let mut result = self.dispatch_key(suffix, keystroke, native, dispatch_path);
         to_replay.extend(result.to_replay);
         result.to_replay = to_replay;
         result
@@ -522,7 +565,7 @@ impl DispatchTree {
     /// flush_dispatch() converts any previously pending input to replay events.
     pub fn flush_dispatch(
         &mut self,
-        input: SmallVec<[Keystroke; 1]>,
+        input: PendingKeystrokes,
         dispatch_path: &SmallVec<[DispatchNodeId; 32]>,
     ) -> SmallVec<[Replay; 1]> {
         let (suffix, mut to_replay) = self.replay_prefix(input, dispatch_path);
@@ -537,23 +580,28 @@ impl DispatchTree {
     /// Converts the longest prefix of input to a replay event and returns the rest.
     fn replay_prefix(
         &self,
-        mut input: SmallVec<[Keystroke; 1]>,
+        mut input: PendingKeystrokes,
         dispatch_path: &SmallVec<[DispatchNodeId; 32]>,
-    ) -> (SmallVec<[Keystroke; 1]>, SmallVec<[Replay; 1]>) {
+    ) -> (PendingKeystrokes, SmallVec<[Replay; 1]>) {
         let mut to_replay: SmallVec<[Replay; 1]> = Default::default();
         for last in (0..input.len()).rev() {
-            let (bindings, _, _) = self.bindings_for_input(&input[0..=last], dispatch_path);
+            let (bindings, _, _) =
+                self.bindings_for_input(&input.keystrokes()[0..=last], dispatch_path);
             if !bindings.is_empty() {
+                let (keystroke, native) = input.take_prefix(last + 1);
                 to_replay.push(Replay {
-                    keystroke: input.drain(0..=last).next_back().unwrap(),
+                    keystroke,
+                    native,
                     bindings,
                 });
                 break;
             }
         }
         if to_replay.is_empty() {
+            let (keystroke, native) = input.take_prefix(1);
             to_replay.push(Replay {
-                keystroke: input.remove(0),
+                keystroke,
+                native,
                 ..Default::default()
             });
         }
@@ -622,7 +670,7 @@ impl DispatchTree {
 mod tests {
     use crate::{
         self as gpui, AppContext, DispatchResult, Element, ElementId, GlobalElementId,
-        InspectorElementId, Keystroke, LayoutId, Style,
+        InspectorElementId, Keystroke, LayoutId, PendingKeystrokes, Style,
     };
     use core::panic;
     use smallvec::SmallVec;
@@ -790,6 +838,51 @@ mod tests {
     }
 
     #[test]
+    fn replayed_keystrokes_keep_their_native_key_data() {
+        let mut tree = test_dispatch_tree(vec![KeyBinding::new("ctrl-b h", TestAction, None)]);
+        let path = SmallVec::new();
+        let native = |virtual_key: usize| {
+            Some(crate::NativeKeyData::Windows(
+                crate::WindowsKeyData::from_message(virtual_key, 0x0030_0001, false),
+            ))
+        };
+
+        let result = tree.dispatch_key(
+            PendingKeystrokes::default(),
+            Keystroke::parse("ctrl-b").unwrap(),
+            native(0x42),
+            &path,
+        );
+        assert_eq!(result.pending.len(), 1);
+
+        // "x" does not continue the binding, so "ctrl-b" is replayed with its own key data.
+        let result = tree.dispatch_key(
+            result.pending,
+            Keystroke::parse("x").unwrap(),
+            native(0x58),
+            &path,
+        );
+        assert!(result.pending.is_empty());
+        assert_eq!(result.to_replay.len(), 1);
+        assert_eq!(
+            result.to_replay[0].keystroke,
+            Keystroke::parse("ctrl-b").unwrap()
+        );
+        assert_eq!(result.to_replay[0].native, native(0x42));
+
+        // A flushed prefix is replayed with its key data too.
+        let result = tree.dispatch_key(
+            PendingKeystrokes::default(),
+            Keystroke::parse("ctrl-b").unwrap(),
+            native(0x42),
+            &path,
+        );
+        let replays = tree.flush_dispatch(result.pending, &path);
+        assert_eq!(replays.len(), 1);
+        assert_eq!(replays[0].native, native(0x42));
+    }
+
+    #[test]
     fn test_pending_has_binding_state() {
         let bindings = vec![
             KeyBinding::new("ctrl-b h", TestAction, None),
@@ -801,15 +894,20 @@ mod tests {
         type DispatchPath = SmallVec<[super::DispatchNodeId; 32]>;
         fn dispatch(
             tree: &mut DispatchTree,
-            pending: SmallVec<[Keystroke; 1]>,
+            pending: PendingKeystrokes,
             key: &str,
             path: &DispatchPath,
         ) -> DispatchResult {
-            tree.dispatch_key(pending, Keystroke::parse(key).unwrap(), path)
+            tree.dispatch_key(pending, Keystroke::parse(key).unwrap(), None, path)
         }
 
         let dispatch_path: DispatchPath = SmallVec::new();
-        let result = dispatch(&mut tree, SmallVec::new(), "ctrl-b", &dispatch_path);
+        let result = dispatch(
+            &mut tree,
+            PendingKeystrokes::default(),
+            "ctrl-b",
+            &dispatch_path,
+        );
         assert_eq!(result.pending.len(), 1);
         assert!(!result.pending_has_binding);
 
@@ -823,7 +921,12 @@ mod tests {
         tree.pop_node();
 
         let dispatch_path = tree.dispatch_path(node_id);
-        let result = dispatch(&mut tree, SmallVec::new(), "space", &dispatch_path);
+        let result = dispatch(
+            &mut tree,
+            PendingKeystrokes::default(),
+            "space",
+            &dispatch_path,
+        );
 
         assert_eq!(result.pending.len(), 1);
         assert!(!result.pending_has_binding);

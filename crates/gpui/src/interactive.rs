@@ -86,8 +86,9 @@ impl NativeKeyData {
     }
 }
 
-/// The key message data of a Windows key event.
+/// The key message data of a Windows key event. Build it with [`WindowsKeyData::from_message`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub struct WindowsKeyData {
     /// The virtual-key code (`VK_*`) from the message's wParam.
     pub virtual_key: u16,
