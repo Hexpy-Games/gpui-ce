@@ -100,7 +100,7 @@ pub(super) fn submit(
             None
         }
     };
-    renderer.after_surface_submit();
+    renderer.after_surface_submit(submission.is_some());
     submission
 }
 

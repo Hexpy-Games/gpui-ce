@@ -92,6 +92,9 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// If the release fence itself cannot be used, frames are never released, so a producer should
 /// treat a release that does not arrive within its own timeout as a failure and fall back, for
 /// example by recreating its textures and fences.
+/// The renderer's GPU queue waits for the acquire fence without a timeout: a producer that never
+/// signals `fence_value` stalls every later submission of the renderer, and a caller that waits
+/// for one of them (such as a headless render reading pixels back) blocks with it.
 ///
 /// A frame is identified by its texture handle and fence value, so a new frame must use a new
 /// texture handle or a higher fence value, otherwise damage tracking treats it as unchanged.

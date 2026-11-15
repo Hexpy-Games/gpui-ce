@@ -14,12 +14,24 @@ use windows::Win32::{
     Foundation::{CompareObjectHandles, HANDLE},
     Graphics::{
         Direct3D12::{
-            D3D12_RESOURCE_DIMENSION_TEXTURE2D, ID3D12CommandQueue, ID3D12Device, ID3D12Fence,
-            ID3D12Resource,
+            D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_FENCE_FLAG_NONE, D3D12_RESOURCE_BARRIER,
+            D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            D3D12_RESOURCE_DIMENSION_TEXTURE2D, D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
+            D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_TRANSITION_BARRIER,
+            ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12Device,
+            ID3D12Fence, ID3D12GraphicsCommandList, ID3D12PipelineState, ID3D12Resource,
         },
         Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM},
     },
 };
+use windows::core::Interface as _;
+
+/// How many window scenes a texture absent from the scene stays imported while its release
+/// fence is still in use, so a producer's rotating texture pool is not re-imported every frame.
+const POOL_GRACE_SCENES: u64 = 8;
 
 /// The shared surfaces of the window's scene and the release signals of the frame being encoded.
 #[derive(Default)]
@@ -29,17 +41,29 @@ pub(super) struct SharedSurfaces {
     release_fences: ReleaseFences,
     // (texture key, release fence, value) to signal once the frame is submitted.
     pending_releases: Vec<(usize, ID3D12Fence, u64)>,
+    // Textures sampled by the frame being encoded that must return to COMMON after it.
+    pending_transitions: SmallVec<[usize; 4]>,
+    transitions: CommonTransitions,
+    // Counts the window's scenes; `SharedSurface::last_drawn` is measured in it.
+    scene_count: u64,
     // Set while rasterizing a scene other than the window's own, which can only be older.
     pub(super) detached: bool,
 }
 
 impl SharedSurfaces {
-    /// Evicts the textures and fences of surfaces that left the window's scene.
+    /// Evicts the textures and fences of surfaces that left the window's scene. A texture of a
+    /// producer's pool (its release handle is still in the scene) stays for a few scenes.
     pub(super) fn retain(&mut self, surfaces: &[PaintSurface]) {
-        let active = shared_frames(surfaces)
-            .map(texture_key)
-            .collect::<SmallVec<[usize; 4]>>();
-        self.surfaces.retain(|key, _| active.contains(key));
+        self.scene_count += 1;
+        let active = shared_frames(surfaces).collect::<SmallVec<[_; 4]>>();
+        let scene_count = self.scene_count;
+        self.surfaces.retain(|key, shared| {
+            active.iter().any(|frame| {
+                texture_key(frame) == *key
+                    || (release_key(frame) == release_key(&shared.frame)
+                        && scene_count - shared.last_drawn <= POOL_GRACE_SCENES)
+            })
+        });
         self.release_fences.retain(surfaces);
     }
 
@@ -59,9 +83,15 @@ impl SharedSurfaces {
             .surfaces
             .entry(key)
             .or_insert_with(|| SharedSurface::new(&frame));
+        if !self.detached {
+            shared.last_drawn = self.scene_count;
+        }
         if shared.acquire(renderer, &frame)
             && let Some(texture) = shared.texture.as_mut()
         {
+            if texture.return_to_common && !self.pending_transitions.contains(&key) {
+                self.pending_transitions.push(key);
+            }
             let binding = &mut texture.binding;
             renderer.draw_surface_binding(surface, SurfaceColorFormat::Rgba, binding, pass)?;
         }
@@ -75,11 +105,16 @@ impl SharedSurfaces {
 
     /// Signals the release fences of the frame just submitted (or abandoned), so the signals
     /// follow every draw that sampled the frames on the queue.
-    pub(super) fn signal_releases(&mut self, renderer: &WgpuRenderer) {
+    pub(super) fn signal_releases(&mut self, renderer: &WgpuRenderer, submitted: bool) {
+        let transitions = std::mem::take(&mut self.pending_transitions);
         if self.pending_releases.is_empty() {
             return;
         }
-        let queue = d3d12(renderer).ok().map(|(_, queue)| queue);
+        let d3d12 = d3d12(renderer).ok();
+        if submitted && let Some((device, queue)) = &d3d12 {
+            self.return_to_common(device, queue, &transitions);
+        }
+        let queue = d3d12.map(|(_, queue)| queue);
         for (key, fence, value) in self.pending_releases.drain(..) {
             let result = queue
                 .as_ref()
@@ -92,6 +127,129 @@ impl SharedSurfaces {
             if let (Err(error), Some(shared)) = (result, self.surfaces.get_mut(&key)) {
                 shared.release = None;
                 shared.settle::<()>(Err(error));
+            }
+        }
+    }
+
+    /// Moves the textures the submitted frame sampled for the first time back to COMMON, ahead
+    /// of their release signals.
+    ///
+    /// wgpu registers an imported texture as uninitialized (COMMON), transitions it explicitly
+    /// to a shader-resource state on its first use, and never back, since it only reads it. A
+    /// texture without simultaneous access does not decay to COMMON after an explicit
+    /// transition, so the producer would write memory this queue holds in a read state. After
+    /// this one transition wgpu's tracker still assumes the read state and adds no barrier;
+    /// later samples implicitly promote the texture from COMMON to that read state (legal for
+    /// any texture), and a texture promoted to a read-only state decays back to COMMON when its
+    /// `ExecuteCommandLists` completes.
+    fn return_to_common(
+        &mut self,
+        device: &ID3D12Device,
+        queue: &ID3D12CommandQueue,
+        keys: &[usize],
+    ) {
+        let textures = keys
+            .iter()
+            .filter_map(|key| Some((*key, self.surfaces.get(key)?.texture.as_ref()?)))
+            .map(|(key, texture)| (key, texture.resource.clone()))
+            .collect::<SmallVec<[_; 4]>>();
+        if textures.is_empty() {
+            return;
+        }
+        let result = (self.transitions).execute(device, queue, textures.iter().map(|(_, r)| r));
+        for (key, _) in &textures {
+            let Some(shared) = self.surfaces.get_mut(key) else {
+                continue;
+            };
+            match &result {
+                Ok(()) => {
+                    if let Some(texture) = &mut shared.texture {
+                        texture.return_to_common = false;
+                    }
+                }
+                Err(error) => {
+                    shared.settle::<()>(Err(anyhow::anyhow!("{error:#}")));
+                }
+            }
+        }
+    }
+}
+
+/// Command lists that move shared textures back to COMMON on wgpu's queue, kept alive until the
+/// queue has executed them.
+#[derive(Default)]
+struct CommonTransitions {
+    fence: Option<ID3D12Fence>,
+    value: u64,
+    in_flight: Vec<(ID3D12CommandAllocator, ID3D12GraphicsCommandList, u64)>,
+}
+
+impl CommonTransitions {
+    fn execute<'a>(
+        &mut self,
+        device: &ID3D12Device,
+        queue: &ID3D12CommandQueue,
+        resources: impl Iterator<Item = &'a ID3D12Resource>,
+    ) -> Result<()> {
+        let barriers = resources
+            .map(|resource| D3D12_RESOURCE_BARRIER {
+                Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                    Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                        // SAFETY: copies the interface pointer without taking a reference; the
+                        // barrier never releases it and `resource` outlives the barrier.
+                        pResource: unsafe { std::mem::transmute_copy(resource) },
+                        Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        // wgpu's state for `TextureUses::RESOURCE`.
+                        StateBefore: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                            | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        StateAfter: D3D12_RESOURCE_STATE_COMMON,
+                    }),
+                },
+            })
+            .collect::<SmallVec<[_; 4]>>();
+        let fence = match &self.fence {
+            Some(fence) => fence.clone(),
+            // SAFETY: plain object creation on a live device.
+            None => (self.fence)
+                .insert(unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }?)
+                .clone(),
+        };
+        // SAFETY: the fence is a live COM object.
+        let completed = unsafe { fence.GetCompletedValue() };
+        self.in_flight.retain(|(_, _, value)| *value > completed);
+        // SAFETY: the objects are created on the live device, the list is recorded, closed and
+        // executed on that device's direct queue, and kept alive until the fence passes it.
+        unsafe {
+            let allocator: ID3D12CommandAllocator =
+                device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
+            let list: ID3D12GraphicsCommandList = device.CreateCommandList(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &allocator,
+                None::<&ID3D12PipelineState>,
+            )?;
+            list.ResourceBarrier(&barriers);
+            list.Close()?;
+            queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>()?)]);
+            self.value += 1;
+            queue.Signal(&fence, self.value)?;
+            self.in_flight.push((allocator, list, self.value));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CommonTransitions {
+    fn drop(&mut self) {
+        if let (Some(fence), false) = (&self.fence, self.in_flight.is_empty()) {
+            // SAFETY: the fence is live; a null event makes the call block until the queue has
+            // executed every list, so none is released while in use.
+            let waited = unsafe { fence.SetEventOnCompletion(self.value, HANDLE::default()) };
+            if let Err(error) = waited {
+                log::error!("waiting for shared surface transitions failed: {error}");
+                std::mem::forget(std::mem::take(&mut self.in_flight));
             }
         }
     }
@@ -203,11 +361,16 @@ struct SharedSurface {
     failed: bool,
     // The last frame's size disagreed with the texture and was logged.
     size_mismatch_logged: bool,
+    // The window scene (`SharedSurfaces::scene_count`) that last drew this texture.
+    last_drawn: u64,
 }
 
 struct ImportedTexture {
     binding: SurfaceBinding,
     size: Size<DevicePixels>,
+    resource: ID3D12Resource,
+    // wgpu left the texture in a shader-resource state that must return to COMMON.
+    return_to_common: bool,
     _texture: wgpu::Texture,
 }
 
@@ -220,6 +383,7 @@ impl SharedSurface {
             release: None,
             failed: false,
             size_mismatch_logged: false,
+            last_drawn: 0,
         }
     }
 
@@ -334,6 +498,10 @@ fn import_texture(
         desc.Format
     );
     anyhow::ensure!(
+        desc.Flags.0 & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE.0 == 0,
+        "shared surface texture denies shader-resource views"
+    );
+    anyhow::ensure!(
         desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1,
         "shared surface texture has {} slices and {} samples, expected one of each",
         desc.DepthOrArraySize,
@@ -350,7 +518,7 @@ fn import_texture(
     // `mip_level_count` mips, as checked above.
     let hal_texture = unsafe {
         wgpu::hal::dx12::Device::texture_from_raw(
-            resource,
+            resource.clone(),
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureDimension::D2,
             extent,
@@ -387,6 +555,8 @@ fn import_texture(
             width: DevicePixels(extent.width as i32),
             height: DevicePixels(extent.height as i32),
         },
+        resource,
+        return_to_common: desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS.0 == 0,
         _texture: texture,
     })
 }

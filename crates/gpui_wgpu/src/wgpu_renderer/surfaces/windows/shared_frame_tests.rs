@@ -5,8 +5,9 @@ use gpui::{
     Bounds, ContentMask, DevicePixels, PaintSurface, Quad, ScaledPixels, Scene, Size,
     WindowsSharedTextureFrame, point, size,
 };
-use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use windows_061::{
     Win32::{
         Foundation::{GENERIC_ALL, HANDLE, HMODULE, LUID},
@@ -28,14 +29,17 @@ use windows_061::{
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
-/// A producer on its own D3D11 device, on wgpu's adapter, sharing a texture and two fences like
-/// a browser's accelerated off-screen paint does.
+/// A producer on its own D3D11 device, on wgpu's adapter, with a pool of two shared textures and
+/// two shared fences, like a browser's accelerated off-screen paint. Frame `n` uses texture
+/// `n % 2`. A third shared fence, the gate, lets the test hold the producer's GPU work back.
 struct Producer {
     context: ID3D11DeviceContext4,
-    target: ID3D11RenderTargetView,
+    targets: [ID3D11RenderTargetView; 2],
     fence: ID3D11Fence,
     release: ID3D11Fence,
-    handles: [Arc<OwnedHandle>; 3],
+    gate: ID3D11Fence,
+    // [texture 0, texture 1, acquire fence, release fence, gate]
+    handles: [Arc<OwnedHandle>; 5],
     size: Size<DevicePixels>,
 }
 
@@ -68,6 +72,7 @@ impl Producer {
             )
         }?;
         let device: ID3D11Device = device.context("no producer device")?;
+        let context: ID3D11DeviceContext4 = context.context("no producer context")?.cast()?;
         let desc = D3D11_TEXTURE2D_DESC {
             Width: 40,
             Height: 20,
@@ -84,57 +89,85 @@ impl Producer {
             MiscFlags: (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0)
                 as u32,
         };
-        let mut texture = None;
-        // SAFETY: `desc` is valid and `texture` is a valid out-pointer.
-        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }?;
-        let texture = texture.context("no producer texture")?;
-        let mut target = None;
-        // SAFETY: `texture` is a live render-target texture; `target` is a valid out-pointer.
-        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut target)) }?;
+        let shared_texture = || -> Result<(ID3D11RenderTargetView, Arc<OwnedHandle>)> {
+            let mut texture = None;
+            // SAFETY: `desc` is valid and `texture` is a valid out-pointer.
+            unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }?;
+            let texture = texture.context("no producer texture")?;
+            let mut target = None;
+            // SAFETY: `texture` is a live render-target texture; `target` is a valid out-pointer.
+            unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut target)) }?;
+            let target = target.context("no producer target")?;
+            // Content no frame names yet, so a frame sampled before its paint shows red.
+            // SAFETY: the view is live.
+            unsafe { context.ClearRenderTargetView(&target, &RED) };
+            let resource = texture.cast::<IDXGIResource1>()?;
+            // SAFETY: the texture was created shareable; the new handle is owned at once.
+            let handle = unsafe { owned(resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?) };
+            Ok((target, handle))
+        };
+        let ((target0, texture0), (target1, texture1)) = (shared_texture()?, shared_texture()?);
         let device5 = device.cast::<ID3D11Device5>()?;
-        let shared_fence = || -> Result<ID3D11Fence> {
-            let mut fence = None;
+        let shared_fence = || -> Result<(ID3D11Fence, Arc<OwnedHandle>)> {
+            let mut fence: Option<ID3D11Fence> = None;
             // SAFETY: `fence` is a valid out-pointer.
             unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_SHARED, &mut fence) }?;
-            fence.context("no producer fence")
+            let fence = fence.context("no producer fence")?;
+            // SAFETY: the fence was created shareable; the new handle is owned at once.
+            let handle = unsafe { owned(fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?) };
+            Ok((fence, handle))
         };
-        let (fence, release) = (shared_fence()?, shared_fence()?);
-        let resource = texture.cast::<IDXGIResource1>()?;
-        // SAFETY: the objects were created shareable; each call returns a new NT handle that is
-        // owned at once.
-        let handles = unsafe {
-            [
-                owned(resource.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
-                owned(fence.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
-                owned(release.CreateSharedHandle(None, GENERIC_ALL.0, None)?),
-            ]
-        };
+        let (fence, fence_handle) = shared_fence()?;
+        let (release, release_handle) = shared_fence()?;
+        let (gate, gate_handle) = shared_fence()?;
         Ok(Self {
-            context: context.context("no producer context")?.cast()?,
-            target: target.context("no producer target")?,
+            context,
+            targets: [target0, target1],
             fence,
             release,
-            handles,
+            gate,
+            handles: [
+                texture0,
+                texture1,
+                fence_handle,
+                release_handle,
+                gate_handle,
+            ],
             size: size(DevicePixels(40), DevicePixels(20)),
         })
     }
 
-    /// Paints `color`, signals `fence_value` on the acquire fence, and returns the frame.
-    fn paint(&self, color: [f32; 4], fence_value: u64) -> Result<WindowsSharedTextureFrame> {
+    /// Paints `color` into texture `fence_value % 2` and signals `fence_value` on the acquire
+    /// fence. With `gate`, the producer's GPU first waits for the gate fence to reach it.
+    fn paint(
+        &self,
+        color: [f32; 4],
+        fence_value: u64,
+        gate: Option<u64>,
+    ) -> Result<WindowsSharedTextureFrame> {
+        let index = (fence_value % 2) as usize;
         // SAFETY: every object is live and owned by this producer.
         unsafe {
-            self.context.ClearRenderTargetView(&self.target, &color);
+            if let Some(gate) = gate {
+                self.context.Wait(&self.gate, gate)?;
+            }
+            self.context
+                .ClearRenderTargetView(&self.targets[index], &color);
             self.context.Signal(&self.fence, fence_value)?;
             self.context.Flush();
         }
-        let [texture, fence, release] = self.handles.clone();
-        Ok(WindowsSharedTextureFrame::new(
-            texture,
-            fence,
-            fence_value,
-            release,
-            self.size,
-        ))
+        Ok(self.frame(index, fence_value, self.size))
+    }
+
+    fn frame(
+        &self,
+        index: usize,
+        value: u64,
+        size: Size<DevicePixels>,
+    ) -> WindowsSharedTextureFrame {
+        let texture = self.handles[index].clone();
+        let (fence, release) = (self.handles[2].clone(), self.handles[3].clone());
+        WindowsSharedTextureFrame::new(texture, fence, value, release, size)
     }
 
     /// The release fence's completed value once it reaches `value`, or after two seconds. The
@@ -146,9 +179,26 @@ impl Producer {
             if completed() >= value {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         }
         completed()
+    }
+
+    /// The gate fence opened on wgpu's D3D12 device, so the CPU can signal it.
+    fn gate_on_d3d12(
+        &self,
+        renderer: &WgpuRenderer,
+    ) -> Result<windows::Win32::Graphics::Direct3D12::ID3D12Fence> {
+        let device = d3d12(renderer)?.0;
+        let mut fence = None;
+        // SAFETY: the handle is owned by this producer and open; `fence` is a valid out-pointer.
+        unsafe {
+            device.OpenSharedHandle(
+                windows::Win32::Foundation::HANDLE(self.handles[4].as_raw_handle()),
+                &raw mut fence,
+            )
+        }?;
+        fence.context("D3D12 returned no gate fence")
     }
 }
 
@@ -209,50 +259,64 @@ fn shared_state(renderer: &WgpuRenderer) -> (usize, usize) {
 
 #[test]
 fn shared_textures_render_release_skip_and_evict() -> Result<()> {
+    // Shows wgpu's D3D12 debug-layer messages, when the layer is installed.
+    let _ = env_logger::builder().is_test(true).try_init();
     let context = crate::WgpuContext::new_headless(None)?;
+    let info = context.adapter.get_info();
+    eprintln!("headless wgpu backend: {:?} ({})", info.backend, info.name);
+    if info.backend != wgpu::Backend::Dx12 {
+        eprintln!("skipping: shared textures are imported only on Direct3D 12");
+        return Ok(());
+    }
     let mut renderer =
         WgpuRenderer::new_headless(&context, size(DevicePixels(64), DevicePixels(40)))?;
-    let producer = Producer::new(&renderer, DXGI_FORMAT_B8G8R8A8_UNORM)
-        .context("the shared-texture path needs wgpu on Direct3D 12")?;
+    let producer = Producer::new(&renderer, DXGI_FORMAT_B8G8R8A8_UNORM)?;
 
-    let image = renderer.render_to_image(&surface_scene(Some(producer.paint(RED, 1)?)))?;
-    expect_pixel(&image, "first frame top-left", 11, 11, [255, 0, 0]);
-    expect_pixel(&image, "first frame bottom-right", 48, 28, [255, 0, 0]);
+    let image = renderer.render_to_image(&surface_scene(Some(producer.paint(BLUE, 1, None)?)))?;
+    expect_pixel(&image, "first frame top-left", 11, 11, [0, 0, 255]);
+    expect_pixel(&image, "first frame bottom-right", 48, 28, [0, 0, 255]);
     expect_pixel(&image, "left of surface", 8, 20, [0, 0, 0]);
     expect_pixel(&image, "quad", 58, 6, [0, 255, 0]);
     assert_eq!(shared_state(&renderer), (1, 1));
     assert_eq!(producer.released(1), 1, "the renderer must release frame 1");
 
-    // Same texture handle, higher fence value: the cached texture is sampled again.
-    let image = renderer.render_to_image(&surface_scene(Some(producer.paint(BLUE, 2)?)))?;
-    expect_pixel(&image, "second frame", 30, 20, [0, 0, 255]);
-    assert_eq!(shared_state(&renderer), (1, 1));
+    // The second texture holds red until the producer's GPU, held by the gate, paints it blue
+    // and signals the acquire fence. The CPU opens the gate only after a delay, so the frame
+    // shows blue only if the renderer's queue waited for the acquire fence.
+    let gate = producer.gate_on_d3d12(&renderer)?;
+    let frame = producer.paint(BLUE, 2, Some(1))?;
+    let delay = Duration::from_millis(300);
+    let opener = std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        // SAFETY: the fence is live; D3D12 fences are free-threaded.
+        unsafe { gate.Signal(1) }
+    });
+    let started = Instant::now();
+    let image = renderer.render_to_image(&surface_scene(Some(frame)))?;
+    let elapsed = started.elapsed();
+    opener.join().expect("gate thread panicked")?;
+    expect_pixel(&image, "gated frame", 30, 20, [0, 0, 255]);
+    assert!(
+        elapsed >= delay - Duration::from_millis(50),
+        "the render returned after {elapsed:?}, before the gate opened"
+    );
+    // The pool's first texture stays imported while its release fence is in use.
+    assert_eq!(shared_state(&renderer), (2, 2));
     assert_eq!(producer.released(2), 2, "the renderer must release frame 2");
 
     // A frame whose size disagrees with its texture is skipped on its own, yet released.
-    producer.paint(RED, 3)?;
-    let [texture, fence, release] = producer.handles.clone();
-    let tiny = size(DevicePixels(4), DevicePixels(4));
-    let wrong_size = WindowsSharedTextureFrame::new(texture, fence, 3, release, tiny);
+    producer.paint(RED, 3, None)?;
+    let wrong_size = producer.frame(1, 3, size(DevicePixels(4), DevicePixels(4)));
     let image = renderer.render_to_image(&surface_scene(Some(wrong_size)))?;
     expect_pixel(&image, "size-mismatch frame", 30, 20, [0, 0, 0]);
-    expect_pixel(
-        &image,
-        "quad beside size-mismatch frame",
-        58,
-        6,
-        [0, 255, 0],
-    );
-    assert_eq!(
-        producer.released(3),
-        3,
-        "a size-mismatch frame must be released"
-    );
-    let image = renderer.render_to_image(&surface_scene(Some(producer.paint(BLUE, 4)?)))?;
-    expect_pixel(&image, "frame after the mismatch", 30, 20, [0, 0, 255]);
+    expect_pixel(&image, "quad beside it", 58, 6, [0, 255, 0]);
+    assert_eq!(producer.released(3), 3, "a size-mismatch frame is released");
+    let image = renderer.render_to_image(&surface_scene(Some(producer.paint(RED, 4, None)?)))?;
+    expect_pixel(&image, "frame after the mismatch", 30, 20, [255, 0, 0]);
+    assert_eq!(shared_state(&renderer), (2, 2));
     assert_eq!(producer.released(4), 4, "the renderer must release frame 4");
 
-    // A surface that leaves the scene is evicted.
+    // A surface that leaves the scene is evicted with its whole pool.
     let image = renderer.render_to_image(&surface_scene(None))?;
     expect_pixel(&image, "removed surface", 30, 20, [0, 0, 0]);
     assert_eq!(shared_state(&renderer), (0, 0));
@@ -260,11 +324,11 @@ fn shared_textures_render_release_skip_and_evict() -> Result<()> {
     // A texture the renderer cannot sample is skipped and released; the frame still draws.
     let wrong_format = Producer::new(&renderer, DXGI_FORMAT_R8G8B8A8_UNORM)?;
     for value in 1..=2 {
-        let frame = wrong_format.paint(RED, value)?;
+        let frame = wrong_format.paint(RED, value, None)?;
         let image = renderer.render_to_image(&surface_scene(Some(frame)))?;
         expect_pixel(&image, "skipped surface", 30, 20, [0, 0, 0]);
         expect_pixel(&image, "quad beside skipped surface", 58, 6, [0, 255, 0]);
-        assert_eq!(shared_state(&renderer), (1, 0));
+        assert_eq!(shared_state(&renderer), (value as usize, 0));
         assert_eq!(
             wrong_format.released(value),
             value,

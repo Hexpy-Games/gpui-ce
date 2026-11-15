@@ -50,9 +50,9 @@ pub(super) fn set_detached_scene(renderer: &WgpuRenderer, detached: bool) {
         .detached = detached;
 }
 
-pub(super) fn signal_surface_releases(renderer: &WgpuRenderer) {
+pub(super) fn signal_surface_releases(renderer: &WgpuRenderer, submitted: bool) {
     let mut cache = renderer.resources().surface_cache.borrow_mut();
-    cache.shared.signal_releases(renderer);
+    cache.shared.signal_releases(renderer, submitted);
 }
 
 pub(super) fn draw_surfaces(

@@ -95,9 +95,9 @@ impl WgpuRenderer {
 
     /// Runs after a frame's submission, or after its encoding failed: shared surfaces signal
     /// their release fences behind the work that sampled them.
-    pub(super) fn after_surface_submit(&self) {
+    pub(super) fn after_surface_submit(&self, _submitted: bool) {
         #[cfg(all(target_os = "windows", feature = "wgpu-surfaces"))]
-        platform::signal_surface_releases(self);
+        platform::signal_surface_releases(self, _submitted);
     }
 
     #[cfg(any(
