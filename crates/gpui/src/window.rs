@@ -7838,6 +7838,17 @@ impl Window {
         self.platform_window.gpu_specs()
     }
 
+    /// The locally unique identifier (LUID) of the GPU adapter this window's renderer draws
+    /// with: the LUID's `HighPart` in the upper 32 bits, its `LowPart` in the lower 32 bits.
+    ///
+    /// Code that hands this window shared GPU resources (for example D3D11 shared textures
+    /// and fences on Windows) must create them on this adapter, since they cannot be opened
+    /// across adapters. Reported by the DirectX renderer on Windows and by a headless WGPU
+    /// renderer on D3D12; `None` elsewhere.
+    pub fn gpu_adapter_luid(&self) -> Option<u64> {
+        self.platform_window.gpu_adapter_luid()
+    }
+
     /// Returns the GPU context (device + queue) if available.
     /// The returned `Box` contains `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`.
     #[cfg(any(

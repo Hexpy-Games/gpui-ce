@@ -2567,6 +2567,12 @@ impl DirectXRenderer {
         )
     }
 
+    /// The LUID of the adapter this renderer's device runs on (see `adapter_luid`).
+    pub(crate) fn gpu_adapter_luid(&self) -> Result<u64> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        crate::directx_devices::adapter_luid(&devices.adapter)
+    }
+
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
         let devices = self.devices.as_ref().context("devices missing")?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
@@ -4630,6 +4636,22 @@ mod tests {
     const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
     const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
     const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    /// What `Window::gpu_adapter_luid` reports is the adapter the renderer's device runs on, as
+    /// DXGI reports it for the device itself.
+    #[test]
+    fn renderer_reports_its_device_adapter_luid() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, renderer) = shared_renderer(&devices)?;
+        let dxgi_device: windows::Win32::Graphics::Dxgi::IDXGIDevice = devices.device.cast()?;
+        // SAFETY: plain COM getters on live objects.
+        let desc = unsafe { dxgi_device.GetAdapter()?.GetDesc()? };
+        assert_eq!(
+            renderer.gpu_adapter_luid()?,
+            crate::directx_devices::luid_to_u64(desc.AdapterLuid)
+        );
+        Ok(())
+    }
 
     #[test]
     fn shared_d3d11_textures_render_release_skip_and_evict() -> Result<()> {

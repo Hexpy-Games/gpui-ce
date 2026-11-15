@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use windows::Win32::{
-    Foundation::HMODULE,
+    Foundation::{HMODULE, LUID},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0,
@@ -34,6 +34,15 @@ pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T
         .context("DirectXRenderer failed to recover from lost device after multiple attempts")
 }
 
+/// The Direct3D 11 device every window renders with; the platform creates it once and shares
+/// it with all windows (and recreates it after a device loss).
+///
+/// Adapter choice: the adapters in DXGI's default enumeration order (`EnumAdapters`, not
+/// `EnumAdapterByGpuPreference`), the first one that creates a feature level 11.0+ device.
+/// Adapter 0 is the adapter Windows assigns this process: normally the one driving the primary
+/// display, unless a per-app GPU preference (Settings > System > Display > Graphics) reorders
+/// it. So on a hybrid-GPU machine the renderer may run on either GPU; consumers learn which
+/// from [`adapter_luid`] (`Window::gpu_adapter_luid`) rather than assuming one.
 #[derive(Clone)]
 pub(crate) struct DirectXDevices {
     pub(crate) adapter: IDXGIAdapter1,
@@ -66,6 +75,17 @@ impl DirectXDevices {
             device_context,
         })
     }
+}
+
+/// The adapter's LUID as one integer: `HighPart` in the upper 32 bits, `LowPart` in the lower.
+pub(crate) fn adapter_luid(adapter: &IDXGIAdapter1) -> Result<u64> {
+    // SAFETY: GetDesc1 only writes the returned descriptor.
+    let desc = unsafe { adapter.GetDesc1() }.context("Reading the DXGI adapter description")?;
+    Ok(luid_to_u64(desc.AdapterLuid))
+}
+
+pub(crate) fn luid_to_u64(luid: LUID) -> u64 {
+    (u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart)
 }
 
 #[inline]
@@ -118,7 +138,12 @@ fn get_adapter(
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
                 .to_string();
-            log::info!("Using GPU: {}", gpu_name);
+            log::info!(
+                "Using GPU: {} (DXGI adapter {}, LUID {:016x})",
+                gpu_name,
+                adapter_index,
+                luid_to_u64(desc.AdapterLuid)
+            );
         }
         // Check to see whether the adapter supports Direct3D 11 and create
         // the device if it does.
@@ -173,4 +198,61 @@ fn get_device(
     // FL11.0/11.1 guarantees the compute/raw-buffer capabilities required by the SM5 DXBC
     // artifacts, so no legacy D3D10.x optional-feature probe is needed here.
     Ok(device)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DirectXDevices, adapter_luid, luid_to_u64};
+    use anyhow::Result;
+    use windows::Win32::{
+        Foundation::LUID,
+        Graphics::Dxgi::{DXGI_ERROR_NOT_FOUND, IDXGIDevice},
+    };
+    use windows::core::Interface as _;
+
+    #[test]
+    fn luid_packs_high_part_above_low_part() {
+        let luid = LUID {
+            LowPart: 0x0001_a14e,
+            HighPart: 0,
+        };
+        assert_eq!(luid_to_u64(luid), 0x0001_a14e);
+        let luid = LUID {
+            LowPart: 0xdead_beef,
+            HighPart: -1,
+        };
+        assert_eq!(luid_to_u64(luid), 0xffff_ffff_dead_beef);
+    }
+
+    /// The reported LUID is the adapter the D3D11 device actually runs on, as DXGI reports it
+    /// for the device itself. Needs no window, so it also runs in session 0.
+    #[test]
+    fn reported_luid_is_the_device_adapter() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let reported = adapter_luid(&devices.adapter)?;
+        let dxgi_device: IDXGIDevice = devices.device.cast()?;
+        // SAFETY: plain COM getters on live objects.
+        let device_desc = unsafe { dxgi_device.GetAdapter()?.GetDesc()? };
+        assert_eq!(reported, luid_to_u64(device_desc.AdapterLuid));
+
+        // Log every adapter and the pick, so a run shows how this machine resolves.
+        for index in 0.. {
+            // SAFETY: plain COM enumeration on a live factory.
+            let adapter = match unsafe { devices.dxgi_factory.EnumAdapters1(index) } {
+                Ok(adapter) => adapter,
+                Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) => return Err(error.into()),
+            };
+            // SAFETY: GetDesc1 only writes the returned descriptor.
+            let desc = unsafe { adapter.GetDesc1()? };
+            let luid = luid_to_u64(desc.AdapterLuid);
+            let name = String::from_utf16_lossy(&desc.Description);
+            eprintln!(
+                "DXGI adapter {index}: {} LUID {luid:016x}{}",
+                name.trim_matches(char::from(0)),
+                if luid == reported { " <- renderer" } else { "" },
+            );
+        }
+        Ok(())
+    }
 }
