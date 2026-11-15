@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use wgpu::TextureFormat;
 
+#[cfg(target_os = "windows")]
+mod headless_adapter;
+#[cfg(target_os = "windows")]
+pub use headless_adapter::{HEADLESS_ADAPTER_LUID_ENV, adapter_luid, default_adapter_luid};
+
 /// Environment variable that forces the HWND swapchain path on Windows.
 pub const DISABLE_DIRECT_COMPOSITION_ENV: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 
@@ -489,17 +494,28 @@ impl WgpuContext {
     ) -> anyhow::Result<Self> {
         NativeBackend::try_in_preference_order("a headless GPU context", |backend| {
             let instance = backend.instance(None);
-            let adapter =
-                gpui::block_on(instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
-                    // LowPower avoids waking a discrete GPU just for snapshots on dual-GPU
-                    // systems.
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                }))
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to request headless GPU adapter: {error}")
-                })?;
+            // On Windows, the default adapter that producers of shared textures use too.
+            #[cfg(target_os = "windows")]
+            let default_adapter = (backend == NativeBackend::Dx12)
+                .then(|| headless_adapter::headless_adapter(&instance.raw))
+                .flatten();
+            #[cfg(not(target_os = "windows"))]
+            let default_adapter = None;
+            let adapter = match default_adapter {
+                Some(adapter) => adapter,
+                None => {
+                    gpui::block_on(instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
+                        // LowPower avoids waking a discrete GPU just for snapshots on dual-GPU
+                        // systems.
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    }))
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to request headless GPU adapter: {error}")
+                    })?
+                }
+            };
             let device = gpui::block_on(Self::create_device(&adapter, extra_requirements))?;
             Self::from_created_device(instance.raw, adapter, device)
         })

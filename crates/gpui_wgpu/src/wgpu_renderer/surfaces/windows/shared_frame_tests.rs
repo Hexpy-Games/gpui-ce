@@ -274,6 +274,16 @@ fn shared_textures_render_release_skip_and_evict() -> Result<()> {
         eprintln!("skipping: shared textures are imported only on Direct3D 12");
         return Ok(());
     }
+    // Producers that create their device without naming an adapter use the default adapter.
+    let headless_luid = crate::adapter_luid(&context.adapter).context("no adapter LUID")?;
+    let default_luid = crate::default_adapter_luid()?;
+    eprintln!("headless adapter LUID {headless_luid:016x}, default {default_luid:016x}");
+    if std::env::var_os(crate::HEADLESS_ADAPTER_LUID_ENV).is_none() {
+        assert_eq!(
+            headless_luid, default_luid,
+            "headless must use the default adapter"
+        );
+    }
     let mut renderer =
         WgpuRenderer::new_headless(&context, size(DevicePixels(64), DevicePixels(40)))?;
     let producer = Producer::new(&renderer, DXGI_FORMAT_B8G8R8A8_UNORM)?;
