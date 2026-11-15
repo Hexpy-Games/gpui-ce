@@ -1436,12 +1436,16 @@ mod tests {
                 keystroke,
                 is_held: false,
                 prefer_character_input: false,
+                native: None,
             }));
         }
 
         fn key_up(&mut self, keystroke: &str) {
             let keystroke = Keystroke::parse(keystroke).unwrap();
-            self.dispatch(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+            self.dispatch(PlatformInput::KeyUp(KeyUpEvent {
+                keystroke,
+                native: None,
+            }));
         }
 
         fn change_modifiers(&mut self, modifiers: Modifiers) {

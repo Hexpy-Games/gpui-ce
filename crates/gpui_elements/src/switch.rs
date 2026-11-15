@@ -490,9 +490,13 @@ mod tests {
             keystroke: keystroke.clone(),
             is_held: false,
             prefer_character_input: false,
+            native: None,
         });
 
-        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.simulate_event(KeyUpEvent {
+            keystroke,
+            native: None,
+        });
     }
 
     #[gpui::test]

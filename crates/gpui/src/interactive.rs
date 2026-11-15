@@ -32,6 +32,11 @@ pub struct KeyDownEvent {
     /// Whether to prefer character input over keybindings for this keystroke.
     /// In some cases, like AltGr on Windows, modifiers are significant for character input.
     pub prefer_character_input: bool,
+
+    /// The platform's own description of the key, for forwarding the press to an embedded
+    /// native view such as a browser. `None` when the platform does not report it or the
+    /// event was synthesized by gpui (for example by `Window::dispatch_keystroke`).
+    pub native: Option<NativeKeyData>,
 }
 
 impl Sealed for KeyDownEvent {}
@@ -47,6 +52,9 @@ impl KeyEvent for KeyDownEvent {}
 pub struct KeyUpEvent {
     /// The keystroke that was released.
     pub keystroke: Keystroke,
+
+    /// The platform's own description of the key. See [`KeyDownEvent::native`].
+    pub native: Option<NativeKeyData>,
 }
 
 impl Sealed for KeyUpEvent {}
@@ -56,6 +64,58 @@ impl InputEvent for KeyUpEvent {
     }
 }
 impl KeyEvent for KeyUpEvent {}
+
+/// The data a platform reported for a key event, beyond the parsed [`Keystroke`].
+///
+/// This lives on the events rather than on [`Keystroke`] because a keystroke is the
+/// layout-independent identity used for key bindings, equality and parsing; the native data
+/// differs between two presses of the same keystroke (repeat count, previous state).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum NativeKeyData {
+    /// A `WM_KEYDOWN`, `WM_SYSKEYDOWN`, `WM_KEYUP` or `WM_SYSKEYUP` message on Windows.
+    Windows(WindowsKeyData),
+}
+
+impl NativeKeyData {
+    /// The Windows key message data, if this event came from Windows.
+    pub fn windows(&self) -> Option<&WindowsKeyData> {
+        match self {
+            NativeKeyData::Windows(data) => Some(data),
+        }
+    }
+}
+
+/// The key message data of a Windows key event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct WindowsKeyData {
+    /// The virtual-key code (`VK_*`) from the message's wParam.
+    pub virtual_key: u16,
+    /// The OEM scan code, bits 16-23 of the lParam, without the extended prefix.
+    pub scan_code: u16,
+    /// Whether the key is an extended key (an `0xE0`-prefixed scan code), bit 24 of the lParam.
+    pub extended: bool,
+    /// The raw lParam: repeat count, scan code, extended flag, context code, previous key
+    /// state and transition state. `WM_CHAR` messages translated from this key carry the
+    /// same lParam.
+    pub lparam: isize,
+    /// Whether the message was `WM_SYSKEYDOWN` or `WM_SYSKEYUP` (F10, or a key pressed
+    /// while Alt is held) rather than `WM_KEYDOWN` or `WM_KEYUP`.
+    pub system_key: bool,
+}
+
+impl WindowsKeyData {
+    /// Decodes the key message data from a key message's wParam and lParam.
+    pub fn from_message(wparam: usize, lparam: isize, system_key: bool) -> Self {
+        Self {
+            virtual_key: wparam as u16,
+            scan_code: ((lparam >> 16) & 0xFF) as u16,
+            extended: (lparam >> 24) & 0x1 != 0,
+            lparam,
+            system_key,
+        }
+    }
+}
 
 /// The modifiers changed event equivalent for the platform.
 #[derive(Clone, Debug, Default)]

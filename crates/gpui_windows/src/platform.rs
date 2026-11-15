@@ -351,18 +351,14 @@ impl WindowsPlatform {
 }
 
 fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
-        return None;
-    }
-
-    let result = unsafe {
-        SendMessageW(
-            msg.hwnd,
-            WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
-        )
+    let gpui_message = match msg.message {
+        WM_KEYDOWN => WM_GPUI_KEYDOWN,
+        WM_SYSKEYDOWN => WM_GPUI_SYSKEYDOWN,
+        _ => return None,
     };
+
+    let result =
+        unsafe { SendMessageW(msg.hwnd, gpui_message, Some(msg.wParam), Some(msg.lParam)) };
     (result.0 == 0).then_some(())
 }
 
