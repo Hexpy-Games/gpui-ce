@@ -145,6 +145,10 @@ fn filter_key(
     let boundaries_end = scene.filter_boundaries.partition_point(|p| p.order < order);
     for boundary in &scene.filter_boundaries[..boundaries_end] {
         if touches(boundary.bounds.intersect(&boundary.content_mask.bounds)) {
+            // An animating group changes with time, so what is behind this filter is never the same.
+            if boundary.motion.is_animated() {
+                return None;
+            }
             let mut hasher = DefaultHasher::new();
             hash_bounds(&mut hasher, &boundary.bounds);
             hash_bounds(&mut hasher, &boundary.content_mask.bounds);
@@ -208,8 +212,8 @@ mod tests {
     // test-category: pure-logic
     use super::*;
     use gpui::{
-        BackdropFilter, ContentMask, Quad, ScaledFilter, Scene, blue, bounds, point, red, size,
-        solid_background,
+        BackdropFilter, ContentMask, FilterBoundary, LayerMotion, Quad, ScaledFilter, Scene, blue,
+        bounds, point, red, size, solid_background,
     };
 
     fn scaled_bounds(x: f32, y: f32, extent: f32) -> Bounds<ScaledPixels> {
@@ -255,6 +259,63 @@ mod tests {
         assert!(base.is_some());
         assert_ne!(base, key_of_filter(blue(), red()));
         assert_eq!(base, key_of_filter(red(), blue()));
+    }
+
+    #[test]
+    fn animated_group_under_the_region_has_no_key() {
+        let key_with_motion = |motion| {
+            let mask = ContentMask {
+                bounds: scaled_bounds(0.0, 0.0, 1000.0),
+                ..Default::default()
+            };
+            let mut scene = Scene::default();
+            let boundary = FilterBoundary {
+                order: 0,
+                bounds: scaled_bounds(110.0, 110.0, 50.0),
+                content_mask: mask,
+                corner_radii: Default::default(),
+                corner_smoothing: 0.0,
+                filters: Default::default(),
+                opacity: 0.5,
+                scale: 1.0,
+                scale_origin: Default::default(),
+                motion_bounds: Bounds::default(),
+                motion,
+                is_start: true,
+                inline: false,
+            };
+            scene.insert_primitive(boundary.clone());
+            scene.insert_primitive(Quad {
+                bounds: scaled_bounds(110.0, 110.0, 50.0),
+                content_mask: mask,
+                background: solid_background(red()),
+                ..Default::default()
+            });
+            scene.insert_primitive(FilterBoundary {
+                is_start: false,
+                ..boundary
+            });
+            scene.insert_primitive(BackdropFilter {
+                bounds: scaled_bounds(100.0, 100.0, 100.0),
+                content_mask: mask,
+                filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
+                    .into_iter()
+                    .collect(),
+                opacity: 1.0,
+                ..Default::default()
+            });
+            scene.finish();
+            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)))[0]
+        };
+        assert!(key_with_motion(LayerMotion::NONE).is_some());
+        assert!(
+            key_with_motion(LayerMotion {
+                duration_ms: 1000,
+                opacity: (0.0, 1.0),
+                ..LayerMotion::NONE
+            })
+            .is_none()
+        );
     }
 
     #[test]
