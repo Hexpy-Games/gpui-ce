@@ -72,7 +72,11 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// redraw is not drawn, so its frame is released when the surface is next drawn. The release
 /// fence never moves backwards: if a stale scene (such as a compositor group rasterized from an
 /// older scene) still holds a frame older than one already drawn with the same release fence,
-/// the renderer draws and releases that newer frame in its place.
+/// the renderer draws and releases that newer frame in its place, also when the window's scene
+/// names the fence by another handle to the same object (such as a duplicated handle). A stale
+/// scene holding a release handle the window's own scene no longer uses, or that refers to
+/// another object (such as one from a second `CreateSharedHandle` call), skips that surface: it
+/// is neither drawn nor released.
 ///
 /// A surface the renderer cannot import (for example a texture of another format, or handles
 /// from another adapter) is skipped and logged once; the renderer still signals its release
