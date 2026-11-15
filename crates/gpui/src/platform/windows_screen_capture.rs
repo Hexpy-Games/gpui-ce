@@ -76,7 +76,9 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 /// names the fence by another handle to the same object (such as a duplicated handle). A stale
 /// scene holding a release handle the window's own scene no longer uses, or that refers to
 /// another object (such as one from a second `CreateSharedHandle` call), skips that surface: it
-/// is neither drawn nor released.
+/// is neither drawn nor released. A detached rasterization (`PlatformWindow::rasterize_offscreen`)
+/// draws only shared surfaces whose release fence the window has already drawn; it skips the
+/// others the same way, including a surface's first frame.
 ///
 /// A surface the renderer cannot import (for example a texture of another format, or handles
 /// from another adapter) is skipped and logged once; the renderer still signals its release
