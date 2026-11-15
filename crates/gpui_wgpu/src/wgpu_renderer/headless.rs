@@ -254,4 +254,52 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
     }
+
+    #[cfg(target_os = "windows")]
+    fn gpu_adapter_luid(&self) -> Option<u64> {
+        let device = &self.renderer.resources().device;
+        // SAFETY: the HAL device is only read, and only while `device` is borrowed.
+        let hal_device = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }?;
+        // SAFETY: GetAdapterLuid has no preconditions on a live device.
+        let luid = unsafe { hal_device.raw_device().GetAdapterLuid() };
+        Some((u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart))
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::WgpuHeadlessRenderer;
+    use gpui::PlatformHeadlessRenderer as _;
+    use windows_061::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+    /// On D3D12 the headless renderer reports the LUID of a real DXGI adapter.
+    #[test]
+    fn headless_d3d12_reports_an_enumerated_adapter_luid() -> anyhow::Result<()> {
+        let renderer = WgpuHeadlessRenderer::new()?;
+        let device = &renderer.renderer.resources().device;
+        // SAFETY: only checks which backend the device runs on.
+        let on_d3d12 = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.is_some();
+        let Some(luid) = renderer.gpu_adapter_luid() else {
+            assert!(!on_d3d12, "a D3D12 device must report its adapter LUID");
+            return Ok(());
+        };
+        // SAFETY: plain DXGI enumeration.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+        let mut names = Vec::new();
+        // SAFETY: plain DXGI enumeration on a live factory.
+        while let Ok(adapter) = unsafe { factory.EnumAdapters1(names.len() as u32) } {
+            // SAFETY: GetDesc1 only writes the returned descriptor.
+            let desc = unsafe { adapter.GetDesc1()? };
+            let adapter_luid = (u64::from(desc.AdapterLuid.HighPart as u32) << 32)
+                | u64::from(desc.AdapterLuid.LowPart);
+            names.push((adapter_luid, String::from_utf16_lossy(&desc.Description)));
+        }
+        let name = names
+            .iter()
+            .find(|(adapter_luid, _)| *adapter_luid == luid)
+            .map(|(_, name)| name.trim_matches(char::from(0)));
+        eprintln!("headless D3D12 adapter: {name:?} LUID {luid:016x}");
+        assert!(name.is_some(), "LUID {luid:016x} is no DXGI adapter");
+        Ok(())
+    }
 }

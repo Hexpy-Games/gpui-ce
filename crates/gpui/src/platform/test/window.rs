@@ -497,6 +497,10 @@ impl PlatformWindow for TestWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
     }
+
+    fn gpu_adapter_luid(&self) -> Option<u64> {
+        self.0.lock().renderer.as_ref()?.gpu_adapter_luid()
+    }
 }
 
 pub(crate) struct TestAtlasState {

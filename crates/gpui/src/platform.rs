@@ -1073,6 +1073,16 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
+    /// The locally unique identifier (LUID) of the GPU adapter this window's renderer draws
+    /// with, as one integer: the LUID's `HighPart` in the upper 32 bits and its `LowPart` in the
+    /// lower 32 bits. `None` where the platform has no adapter LUIDs or does not report one.
+    ///
+    /// Producers of shared GPU resources must create them on this adapter: Windows refuses to
+    /// open shared textures and fences across adapters.
+    fn gpu_adapter_luid(&self) -> Option<u64> {
+        None
+    }
+
     /// Returns the GPU context for this window's renderer.
     /// The returned `Box` contains `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`.
     #[cfg(any(
@@ -1192,6 +1202,11 @@ pub trait PlatformHeadlessRenderer {
 
     /// Returns the sprite atlas used by this renderer.
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+
+    /// The renderer's GPU adapter LUID, in the layout of [`PlatformWindow::gpu_adapter_luid`].
+    fn gpu_adapter_luid(&self) -> Option<u64> {
+        None
+    }
 
     /// Sets the animation clock the next renders read.
     fn set_animation_time_ms(&mut self, _time_ms: u32) {}
