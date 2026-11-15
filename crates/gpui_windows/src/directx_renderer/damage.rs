@@ -20,6 +20,7 @@ impl DirectXRenderer {
             return Ok(());
         }
         self.animation_time_ms = gpui::animation_time_ms();
+        self.retain_surfaces(scene);
         if !self.render_damage(scene)? {
             self.render(scene, background_appearance, false)?;
         }

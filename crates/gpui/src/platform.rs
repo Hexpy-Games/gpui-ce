@@ -24,7 +24,7 @@ pub mod screen_capture;
 #[cfg(target_os = "windows")]
 mod windows_screen_capture;
 #[cfg(target_os = "windows")]
-pub use windows_screen_capture::WindowsScreenCaptureFrame;
+pub use windows_screen_capture::{WindowsScreenCaptureFrame, WindowsSharedTextureFrame};
 
 #[cfg(all(target_os = "windows", feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame = WindowsScreenCaptureFrame;

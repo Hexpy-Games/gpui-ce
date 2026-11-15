@@ -818,6 +818,52 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shared_texture_fence_value_is_part_of_the_surface_identity() {
+        use std::{fs::File, os::windows::io::OwnedHandle, sync::Arc};
+        // Damage only compares handle identity, so any open handle stands in for the objects.
+        let handle = || {
+            Arc::new(OwnedHandle::from(
+                File::open(std::env::current_exe().unwrap()).unwrap(),
+            ))
+        };
+        let (texture, fence, release) = (handle(), handle(), handle());
+        let surface_bounds = rect(20.0, 20.0, 20.0, 20.0);
+        let build = |fence_value| {
+            let mut scene = Scene::default();
+            scene.insert_primitive(PaintSurface {
+                order: 0,
+                bounds: surface_bounds,
+                content_mask: mask(),
+                source: crate::WindowsSharedTextureFrame::new(
+                    texture.clone(),
+                    fence.clone(),
+                    fence_value,
+                    release.clone(),
+                    size(DevicePixels(20), DevicePixels(20)),
+                )
+                .into(),
+            });
+            scene
+        };
+        let mut a = build(1);
+        a.finish();
+        let mut same = build(1);
+        same.finish_over(&a);
+        let Some(DamagePlan::Partial(plan)) = same.damage_plan_over(Some(a.generation())) else {
+            panic!("expected a partial redraw");
+        };
+        assert!(plan.rect.is_empty(), "an unchanged frame must not redraw");
+
+        let mut next = build(2);
+        next.finish_over(&a);
+        let Some(DamagePlan::Partial(plan)) = next.damage_plan_over(Some(a.generation())) else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&surface_bounds), surface_bounds);
+    }
+
     #[test]
     fn scene_change_inside_opacity_group_stays_local() {
         let changed = rect(20.0, 20.0, 10.0, 10.0);
