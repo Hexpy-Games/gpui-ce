@@ -1360,6 +1360,10 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     last_frame_ms: Cell<u32>,
+    /// Listeners for slow animation ticks, registered while painting the current frame.
+    slow_animation_listeners: Vec<SlowAnimationListener>,
+    /// Consecutive animation ticks slower than the smallest registered threshold.
+    slow_animation_streak: u32,
     pending_motion_wake: Option<(u32, Task<()>)>,
     layout_transition_until: Cell<u32>,
     covered_live_keys: FxHashSet<u64>,
@@ -1418,6 +1422,12 @@ pub struct Window {
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
     a11y_was_active: bool,
+}
+
+struct SlowAnimationListener {
+    slow: Duration,
+    frames: u32,
+    listener: Box<dyn FnOnce(&mut Window, &mut App)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1913,7 +1923,7 @@ impl Window {
                     // Nothing changed but the scene carries animated primitives: the GPU
                     // advances them, so present the same scene again.
                     handle
-                        .update(&mut cx, |_, window, _| {
+                        .update(&mut cx, |_, window, cx| {
                             let now = crate::animation_time_ms();
                             if window.rendered_frame.scene.has_animations()
                                 && window
@@ -1921,10 +1931,13 @@ impl Window {
                                     .scene
                                     .retained_changes_between(window.last_frame_ms.get(), now)
                             {
+                                let start = Instant::now();
                                 window
                                     .platform_window
                                     .draw_animation_frame(&window.rendered_frame.scene);
+                                let elapsed = start.elapsed();
                                 window.last_frame_ms.set(now);
+                                window.animation_tick_took(elapsed, cx);
                             }
                             if !window.rendered_frame.scene.live_layers().is_empty() {
                                 window
@@ -2130,6 +2143,8 @@ impl Window {
             last_text_input_configuration: None,
             focused_text_input: None,
             last_frame_ms: Cell::new(0),
+            slow_animation_listeners: Vec::new(),
+            slow_animation_streak: 0,
             pending_motion_wake: None,
             layout_transition_until: Cell::new(0),
             covered_live_keys: FxHashSet::default(),
@@ -2763,6 +2778,46 @@ impl Window {
         self.on_next_frame(move |_, cx| cx.notify(entity));
     }
 
+    /// Calls `listener` once when `frames` consecutive animation ticks of the frame being
+    /// painted each took longer than `slow` to encode and present. Animation ticks run no view
+    /// code, so this is how a view learns that its animated primitives cost too much. Register
+    /// while painting; listeners are dropped when the window is drawn again.
+    pub fn on_slow_animation_frames(
+        &mut self,
+        slow: Duration,
+        frames: u32,
+        listener: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) {
+        self.slow_animation_listeners.push(SlowAnimationListener {
+            slow,
+            frames,
+            listener: Box::new(listener),
+        });
+    }
+
+    fn animation_tick_took(&mut self, elapsed: Duration, cx: &mut App) {
+        let Some(slow) = self.slow_animation_listeners.iter().map(|l| l.slow).min() else {
+            self.slow_animation_streak = 0;
+            return;
+        };
+        if elapsed <= slow {
+            self.slow_animation_streak = 0;
+            return;
+        }
+        self.slow_animation_streak += 1;
+        let streak = self.slow_animation_streak;
+        let (fired, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.slow_animation_listeners)
+            .into_iter()
+            .partition(|l| elapsed > l.slow && streak >= l.frames);
+        self.slow_animation_listeners = kept;
+        if !fired.is_empty() {
+            self.slow_animation_streak = 0;
+        }
+        for listener in fired {
+            (listener.listener)(self, cx);
+        }
+    }
+
     fn schedule_animation_frame(&mut self, cx: &App) {
         let now = crate::animation_time_ms();
         let demand = self.rendered_frame.scene.animation_demand(now);
@@ -3345,6 +3400,7 @@ impl Window {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let arena_scope = ElementArenaScope::enter(&cx.element_arena);
+        self.slow_animation_listeners.clear();
 
         self.invalidate_entities();
         cx.entities.clear_accessed();
