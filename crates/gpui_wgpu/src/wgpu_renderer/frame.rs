@@ -75,8 +75,11 @@ pub(super) fn render_offscreen(
     if targets.offscreen.is_some() {
         renderer.retained = None;
     }
+    renderer.set_detached_surface_scene(true);
     let encoder = FrameEncoder::new(renderer, scene, commands, None, None, targets);
-    submit(renderer, encoder, None).is_some()
+    let submitted = submit(renderer, encoder, None).is_some();
+    renderer.set_detached_surface_scene(false);
+    submitted
 }
 
 /// Encodes and submits `encoder`; `None` when encoding failed (nothing is submitted).
@@ -85,7 +88,7 @@ pub(super) fn submit(
     encoder: FrameEncoder<'_>,
     readback: Option<ReadbackCopy<'_>>,
 ) -> Option<wgpu::SubmissionIndex> {
-    match encoder.encode(readback) {
+    let submission = match encoder.encode(readback) {
         Ok(command_buffer) => Some(renderer.resources().queue.submit([command_buffer])),
         Err(DrawError::ExternalSurface) => None,
         Err(DrawError::CapacityPlanningInvariant) => {
@@ -96,7 +99,9 @@ pub(super) fn submit(
             log::error!("frame preparation did not create a required intermediate target");
             None
         }
-    }
+    };
+    renderer.after_surface_submit();
+    submission
 }
 
 pub(super) struct ReadbackCopy<'a> {

@@ -52,7 +52,11 @@ impl std::fmt::Debug for WindowsScreenCaptureFrame {
 }
 
 /// A frame that another Direct3D 11 device rendered into a shared texture, such as a browser's
-/// accelerated off-screen paint. Only the Direct3D 11 renderer imports it.
+/// accelerated off-screen paint. The Direct3D 11 renderer imports it, and so does the wgpu
+/// renderer when it runs on Direct3D 12 with the `wgpu-surfaces` feature: it opens the handles
+/// on its D3D12 device, makes its queue wait on the acquire fence before the submission that
+/// samples the frame, and signals the release fence after that submission. Both follow the
+/// protocol below.
 ///
 /// The producer creates the texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` and no keyed
 /// mutex, as a single-sample, single-slice `DXGI_FORMAT_B8G8R8A8_UNORM` or
