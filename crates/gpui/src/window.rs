@@ -1385,6 +1385,7 @@ pub struct Window {
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
+    zoom: f32,
     pub(crate) bounds_observers: SubscriberSet<(), AnyObserver>,
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SubscriberSet<(), AnyObserver>,
@@ -2032,7 +2033,9 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move |event| {
                 handle
-                    .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .update(&mut cx, |_, window, cx| {
+                        window.dispatch_event(event.scale(1. / window.zoom), cx)
+                    })
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
             })
@@ -2126,6 +2129,7 @@ impl Window {
             rem_size: px(16.),
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
+            zoom: 1.,
             layout_engine: Some(TaffyLayoutEngine::new()),
             collecting_inline: false,
             current_inline_fragments: None,
@@ -2571,7 +2575,13 @@ impl Window {
     /// - `Some(&[])` is an empty region, so the window receives no pointer or touch input.
     /// - `None` resets the region to the default, so the whole window receives input again.
     pub fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
-        self.platform_window.set_input_region(region);
+        let region = region.map(|region| {
+            region
+                .iter()
+                .map(|bounds| bounds.map(|length| length * self.zoom))
+                .collect::<Vec<_>>()
+        });
+        self.platform_window.set_input_region(region.as_deref());
     }
 
     /// Return the `WindowBounds` to indicate that how a window should be opened
@@ -2920,10 +2930,16 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
-        self.scale_factor = self.platform_window.scale_factor();
-        self.viewport_size = self.platform_window.content_size();
+        self.scale_factor = self.platform_window.scale_factor() * self.zoom;
+        self.viewport_size = self
+            .platform_window
+            .content_size()
+            .map(|length| px(length.0 / self.zoom));
         self.display_id = self.platform_window.display().map(|display| display.id());
-        self.mouse_position = self.platform_window.mouse_position();
+        self.mouse_position = self
+            .platform_window
+            .mouse_position()
+            .map(|length| px(length.0 / self.zoom));
 
         self.refresh();
 
@@ -2969,7 +2985,8 @@ impl Window {
 
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
-        self.platform_window.resize(size);
+        self.platform_window
+            .resize(size.map(|length| length * self.zoom));
     }
 
     /// Returns whether or not the window is currently fullscreen
@@ -3035,7 +3052,8 @@ impl Window {
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
     pub fn show_window_menu(&self, position: Point<Pixels>) {
-        self.platform_window.show_window_menu(position)
+        self.platform_window
+            .show_window_menu(position.map(|length| length * self.zoom))
     }
 
     /// Handle window movement for Linux and macOS.
@@ -3049,7 +3067,7 @@ impl Window {
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
     pub fn set_client_inset(&mut self, inset: Pixels) {
         self.client_inset = Some(inset);
-        self.platform_window.set_client_inset(inset);
+        self.platform_window.set_client_inset(inset * self.zoom);
     }
 
     /// Returns the client_inset value by [`Self::set_client_inset`].
@@ -3150,6 +3168,31 @@ impl Window {
     /// be rendered as two pixels on screen.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor
+    }
+
+    /// The content zoom of this window. See [`Window::set_zoom`].
+    pub fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    /// Sets the content zoom of this window, like a web page's zoom factor.
+    ///
+    /// Everything the window exposes to elements (viewport size, mouse position, input event
+    /// coordinates, layout and paint coordinates) is in content pixels, which are native
+    /// logical pixels divided by the zoom, and [`Window::scale_factor`] is the platform scale
+    /// factor times the zoom. Every coordinate passed from the window to the platform is
+    /// converted back to native logical pixels. These stay native: [`Window::bounds`],
+    /// [`Window::window_bounds`], [`Window::inner_window_bounds`],
+    /// [`Window::set_traffic_light_position`], [`Window::set_window_min_size`] and display bounds.
+    /// `PopupOptions` anchors and `set_exclusive_zone` are passed to the platform as given
+    /// (native logical pixels).
+    pub fn set_zoom(&mut self, zoom: f32, cx: &mut App) {
+        debug_assert!(self.invalidator.not_drawing(), "set_zoom during draw");
+        if self.zoom == zoom {
+            return;
+        }
+        self.zoom = zoom;
+        self.bounds_changed(cx);
     }
 
     /// Overrides the display scale factor for tests.
@@ -7610,7 +7653,8 @@ impl Window {
         selected: Option<usize>,
         anchor: Bounds<Pixels>,
     ) -> Option<oneshot::Receiver<Option<usize>>> {
-        self.platform_window.popup_menu(items, selected, anchor)
+        self.platform_window
+            .popup_menu(items, selected, anchor.map(|length| length * self.zoom))
     }
 
     fn build_custom_prompt(

@@ -385,7 +385,7 @@ fn make_layers(
             let _: () = unsafe { msg_send![&*mask, setBackgroundColor: CgColor(color)] };
             unsafe { CGColorRelease(color) };
             let _: () = unsafe {
-                msg_send![&*mask, setFrame: rect(f64::from(f32::from(from.left)), f64::from(f32::from(from.bottom)), width - f64::from(f32::from(from.left + from.right)), height - f64::from(f32::from(from.top + from.bottom)))]
+                msg_send![&*mask, setFrame: rect(points(f32::from(from.left)), points(f32::from(from.bottom)), width - points(f32::from(from.left + from.right)), height - points(f32::from(from.top + from.bottom)))]
             };
             let _: () = unsafe { msg_send![&*layer, setMask: &*mask] };
             mask
@@ -406,11 +406,10 @@ fn make_layers(
                     unsafe { msg_send![class!(NSNumber), numberWithDouble: opacity] }
                 } else if key == "bounds" || key == "position" {
                     let (from, to) = motion.clip.unwrap();
-                    let left = f64::from(f32::from(from.left + (to.left - from.left) * progress));
-                    let right =
-                        f64::from(f32::from(from.right + (to.right - from.right) * progress));
-                    let top = f64::from(f32::from(from.top + (to.top - from.top) * progress));
-                    let bottom = f64::from(f32::from(
+                    let left = points(f32::from(from.left + (to.left - from.left) * progress));
+                    let right = points(f32::from(from.right + (to.right - from.right) * progress));
+                    let top = points(f32::from(from.top + (to.top - from.top) * progress));
+                    let bottom = points(f32::from(
                         from.bottom + (to.bottom - from.bottom) * progress,
                     ));
                     if key == "bounds" {
@@ -443,8 +442,8 @@ fn make_layers(
                         m32: 0.0,
                         m33: 1.0,
                         m34: 0.0,
-                        m41: f64::from(f32::from(offset.x)),
-                        m42: -f64::from(f32::from(offset.y)),
+                        m41: points(f32::from(offset.x)),
+                        m42: -points(f32::from(offset.y)),
                         m43: 0.0,
                         m44: 1.0,
                     };
