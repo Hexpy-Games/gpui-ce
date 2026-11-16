@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Display, Edges, GridTemplate, InlineContent,
     LayoutDirection, Length, Pixels, Point, Position, ResolvedDirection, SharedString, Size, Style,
@@ -22,8 +23,16 @@ type StackSafe<T> = stacksafe::StackSafe<T>;
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
+/// What a measured leaf reports to layout.
+pub(crate) struct Measured {
+    pub(crate) size: Size<Pixels>,
+    /// The first line's baseline from the top of the leaf, for `align-items: baseline`; `None`
+    /// aligns the leaf by its bottom edge.
+    pub(crate) baseline: Option<Pixels>,
+}
+
 type MeasureFn =
-    dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
+    dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Measured;
 type NodeMeasureFn = StackSafe<Box<MeasureFn>>;
 
 struct NodeContext {
@@ -140,7 +149,7 @@ impl TaffyLayoutEngine {
             Size<AvailableSpace>,
             &mut Window,
             &mut App,
-        ) -> Size<Pixels>
+        ) -> Measured
         + 'static,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
@@ -510,7 +519,7 @@ impl TaffyLayoutEngine {
                 available_space.into(),
                 |known_dimensions, available_space, _id, node_context, style| {
                     let Some(node_context) = node_context else {
-                        return taffy::geometry::Size::default();
+                        return taffy::LeafMeasure::from(taffy::geometry::Size::default());
                     };
 
                     let known_dimensions = Size {
@@ -541,12 +550,16 @@ impl TaffyLayoutEngine {
                         &mut window.measurement_unicode_bidi,
                         node_context.unicode_bidi,
                     );
-                    let measured_size: Size<Pixels> =
+                    let measured =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
                     window.measurement_direction = previous_direction;
                     window.measurement_unicode_bidi = previous_unicode_bidi;
 
-                    snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
+                    taffy::LeafMeasure {
+                        size: snap_measured_size_to_device_pixels(measured.size, scale_factor)
+                            .into(),
+                        first_baseline: measured.baseline.map(|baseline| baseline.0 * scale_factor),
+                    }
                 },
             )
             .expect(EXPECT_MESSAGE);
