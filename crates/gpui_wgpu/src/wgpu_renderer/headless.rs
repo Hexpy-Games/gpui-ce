@@ -220,6 +220,10 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
         self.renderer.read_offscreen_target(target, submission)
     }
 
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(self.renderer.gpu_context()))
+    }
+
     fn set_animation_time_ms(&mut self, time_ms: u32) {
         self.renderer.set_animation_time_ms(time_ms);
     }

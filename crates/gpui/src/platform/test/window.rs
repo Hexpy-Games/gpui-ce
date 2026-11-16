@@ -501,6 +501,16 @@ impl PlatformWindow for TestWindow {
     fn gpu_adapter_luid(&self) -> Option<u64> {
         self.0.lock().renderer.as_ref()?.gpu_adapter_luid()
     }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        self.0.lock().renderer.as_ref()?.gpu_context()
+    }
 }
 
 pub(crate) struct TestAtlasState {
