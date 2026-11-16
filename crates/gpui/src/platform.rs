@@ -1208,6 +1208,11 @@ pub trait PlatformHeadlessRenderer {
         None
     }
 
+    /// The renderer's device and queue, in the form of [`PlatformWindow::gpu_context`].
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        None
+    }
+
     /// Sets the animation clock the next renders read.
     fn set_animation_time_ms(&mut self, _time_ms: u32) {}
 
