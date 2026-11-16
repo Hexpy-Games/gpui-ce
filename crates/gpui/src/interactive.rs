@@ -920,6 +920,75 @@ impl PlatformInput {
         }
     }
 
+    /// Multiplies every window-coordinate position and pixel distance by `factor`.
+    pub(crate) fn scale(self, factor: f32) -> Self {
+        match self {
+            PlatformInput::KeyDown(event) => PlatformInput::KeyDown(event),
+            PlatformInput::KeyUp(event) => PlatformInput::KeyUp(event),
+            PlatformInput::ModifiersChanged(event) => PlatformInput::ModifiersChanged(event),
+            PlatformInput::MouseDown(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::MouseDown(event)
+            }
+            PlatformInput::MouseUp(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::MouseUp(event)
+            }
+            PlatformInput::MousePressure(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::MousePressure(event)
+            }
+            PlatformInput::MouseMove(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::MouseMove(event)
+            }
+            PlatformInput::MouseExited(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::MouseExited(event)
+            }
+            PlatformInput::ScrollWheel(mut event) => {
+                event.position = event.position * factor;
+                if let ScrollDelta::Pixels(delta) = event.delta {
+                    event.delta = ScrollDelta::Pixels(delta * factor);
+                }
+                PlatformInput::ScrollWheel(event)
+            }
+            PlatformInput::Pinch(mut event) => {
+                event.position = event.position * factor;
+                PlatformInput::Pinch(event)
+            }
+            PlatformInput::LongPress(mut event) => {
+                event.start_position = event.start_position * factor;
+                event.position = event.position * factor;
+                PlatformInput::LongPress(event)
+            }
+            PlatformInput::TouchDrag(mut event) => {
+                event.start_position = event.start_position * factor;
+                event.position = event.position * factor;
+                PlatformInput::TouchDrag(event)
+            }
+            PlatformInput::FileDrop(event) => PlatformInput::FileDrop(match event {
+                FileDropEvent::Entered { position, paths } => FileDropEvent::Entered {
+                    position: position * factor,
+                    paths,
+                },
+                FileDropEvent::Pending { position } => FileDropEvent::Pending {
+                    position: position * factor,
+                },
+                FileDropEvent::Submit { position } => FileDropEvent::Submit {
+                    position: position * factor,
+                },
+                FileDropEvent::Exited => FileDropEvent::Exited,
+                FileDropEvent::Ended => FileDropEvent::Ended,
+            }),
+            PlatformInput::Touch(mut event) => {
+                event.position = event.position * factor;
+                event.predicted_position = event.predicted_position.map(|p| p * factor);
+                PlatformInput::Touch(event)
+            }
+        }
+    }
+
     /// Returns the touch event contained in this input, if any.
     pub fn touch_event(&self) -> Option<&TouchEvent> {
         match self {

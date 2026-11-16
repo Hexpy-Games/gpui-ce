@@ -838,3 +838,56 @@ fn hover_regions_preserve_stationary_press_suppress_pressed_moves_and_resume_on_
         "region observers must preserve normal click dispatch"
     );
 }
+
+struct ZoomView {
+    mouse_down: Rc<Cell<Option<Point<Pixels>>>>,
+}
+
+impl Render for ZoomView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mouse_down = self.mouse_down.clone();
+        div()
+            .size(px(100.))
+            .on_mouse_down(MouseButton::Left, move |event, _, _| {
+                mouse_down.set(Some(event.position));
+            })
+    }
+}
+
+#[gpui::test]
+fn zoom_scales_viewport_and_pointer_input(cx: &mut TestAppContext) {
+    let mouse_down = Rc::new(Cell::new(None));
+    let window = cx.add_window({
+        let mouse_down = mouse_down.clone();
+        move |_, _| ZoomView { mouse_down }
+    });
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let (size, scale_factor) = cx
+        .update_window(window.into(), |_, window, _| {
+            (window.viewport_size(), window.scale_factor())
+        })
+        .unwrap();
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_zoom(2., cx);
+        assert_eq!(window.zoom(), 2.);
+        assert_eq!(window.viewport_size().width, size.width / 2.);
+        assert_eq!(window.viewport_size().height, size.height / 2.);
+        assert_eq!(window.scale_factor(), scale_factor * 2.);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    cx.test_window(window.into()).simulate_input(
+        MouseDownEvent {
+            position: point(px(100.), px(60.)),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+        .to_platform_input(),
+    );
+    assert_eq!(mouse_down.get(), Some(point(px(50.), px(30.))));
+}

@@ -2291,7 +2291,12 @@ impl PlatformInputHandler {
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
         self.cx
-            .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
+            .update(|window, cx| {
+                let zoom = window.zoom();
+                self.handler
+                    .bounds_for_range(range_utf16, window, cx)
+                    .map(|bounds| bounds.map(|length| length * zoom))
+            })
             .ok()
             .flatten()
     }
@@ -2343,9 +2348,11 @@ impl PlatformInputHandler {
     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
         let marked_range = self.handler.marked_text_range(window, cx);
         let selection = self.handler.selected_text_range(true, window, cx)?;
+        let zoom = window.zoom();
         Self::compute_ime_candidate_bounds(marked_range, &selection, |range| {
             self.handler.bounds_for_range(range, window, cx)
         })
+        .map(|bounds| bounds.map(|length| length * zoom))
     }
 
     pub fn ime_candidate_bounds(&mut self) -> Option<Bounds<Pixels>> {
@@ -2359,7 +2366,11 @@ impl PlatformInputHandler {
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
         self.cx
-            .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
+            .update(|window, cx| {
+                let zoom = window.zoom();
+                let point = point.map(|length| px(length.0 / zoom));
+                self.handler.character_index_for_point(point, window, cx)
+            })
             .ok()
             .flatten()
     }

@@ -1973,6 +1973,14 @@ impl PlatformWindow for WaylandWindow {
         state.app_id = Some(app_id.to_owned());
     }
 
+    fn set_window_min_size(&self, size: Size<Pixels>) {
+        let mut state = self.borrow_mut();
+        state.window_min_size = Some(size);
+        if let Some(toplevel) = state.surface_state.toplevel() {
+            toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
+        }
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.borrow_mut();
         if state.background_appearance == background_appearance {
