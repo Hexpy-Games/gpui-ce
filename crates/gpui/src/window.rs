@@ -3184,7 +3184,10 @@ impl Window {
     /// converted back to native logical pixels. These stay native: [`Window::bounds`],
     /// [`Window::window_bounds`], [`Window::inner_window_bounds`],
     /// [`Window::set_traffic_light_position`], [`Window::set_window_min_size`] and display bounds.
+    /// `PopupOptions` anchors and `set_exclusive_zone` are passed to the platform as given
+    /// (native logical pixels).
     pub fn set_zoom(&mut self, zoom: f32, cx: &mut App) {
+        debug_assert!(self.invalidator.not_drawing(), "set_zoom during draw");
         if self.zoom == zoom {
             return;
         }

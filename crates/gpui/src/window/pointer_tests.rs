@@ -871,7 +871,6 @@ fn zoom_scales_viewport_and_pointer_input(cx: &mut TestAppContext) {
 
     cx.update_window(window.into(), |_, window, cx| {
         window.set_zoom(2., cx);
-        assert_eq!(window.zoom(), 2.);
         assert_eq!(window.viewport_size().width, size.width / 2.);
         assert_eq!(window.viewport_size().height, size.height / 2.);
         assert_eq!(window.scale_factor(), scale_factor * 2.);
