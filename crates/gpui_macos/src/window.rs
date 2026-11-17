@@ -868,6 +868,9 @@ struct MacWindowState {
     /// transaction. Still set on the tick after the one that yielded: AppKit did not display,
     /// so that tick draws the new size in a transaction itself.
     resize_draw_pending: bool,
+    /// Set when a tick yielded to the display pass for the pending resize draw; the next tick
+    /// draws it, so a stream of size changes cannot suppress every tick.
+    resize_tick_yielded: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1333,6 +1336,7 @@ impl MacWindow {
                 served_vsync_ns: 0,
                 resized_since_tick: false,
                 resize_draw_pending: false,
+                resize_tick_yielded: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3416,8 +3420,11 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let scale_factor = lock.scale_factor();
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
+    let mut scale_changed = false;
     if let Some(layer) = lock.renderer.layer() {
         unsafe {
+            let old_scale: f64 = msg_send![layer.as_ptr() as ObjcId, contentsScale];
+            scale_changed = old_scale != scale_factor as f64;
             let _: () = msg_send![
                 layer.as_ptr() as ObjcId,
                 setContentsScale: scale_factor as f64
@@ -3426,6 +3433,10 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    if scale_changed {
+        lock.resized_since_tick = true;
+        lock.resize_draw_pending = true;
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3616,6 +3627,7 @@ fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
         return;
     };
     lock.resize_draw_pending = false;
+    lock.resize_tick_yielded = false;
     lock.renderer.set_presents_with_transaction(true);
     let request = lock.next_frame_request();
     drop(lock);
@@ -3650,18 +3662,19 @@ extern "C" fn step(view: *mut c_void) {
         {
             return;
         }
+        // A tick has passed without that display: draw the new size here, still in a
+        // transaction, so it never reaches the screen in the old layer bounds.
+        if lock.resize_draw_pending && lock.resize_tick_yielded {
+            drop(lock);
+            draw_in_transaction(&window_state);
+            return;
+        }
         // The size changed since the last tick. AppKit draws the new size in its display pass,
         // inside the transaction that carries the new geometry: before this tick in live
         // resize, after it for a programmatic frame change (zoom, tiling, accessibility). This
         // tick does not draw, so the refresh keeps one present.
         if resized {
-            return;
-        }
-        // A tick has passed without that display: draw the new size here, still in a
-        // transaction, so it never reaches the screen in the old layer bounds.
-        if lock.resize_draw_pending {
-            drop(lock);
-            draw_in_transaction(&window_state);
+            lock.resize_tick_yielded = lock.resize_draw_pending;
             return;
         }
         if let Some(mut callback) = lock.request_frame_callback.take() {
