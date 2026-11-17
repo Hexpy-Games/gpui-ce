@@ -2417,6 +2417,11 @@ impl PlatformWindow for MacWindow {
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
 
+    #[cfg(feature = "wgpu")]
+    fn release_resize_surplus(&self) {
+        self.0.lock().renderer.trim_intermediates();
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         let executor = self.0.lock().foreground_executor.clone();
         executor
