@@ -44,9 +44,14 @@ pub fn backdrop_sampling_region(
 }
 
 impl BackdropFilter {
-    /// [`backdrop_sampling_region`] for this filter.
+    /// [`backdrop_sampling_region`] for this filter over its appear range: the required blur
+    /// with the larger reach of its lens and the appear's starting lens.
     pub fn sampling_region(&self) -> Bounds<ScaledPixels> {
-        backdrop_sampling_region(self.bounds, self.required_blur_radius(), &self.lens)
+        let blur = self.required_blur_radius();
+        let region = backdrop_sampling_region(self.bounds, blur, &self.lens);
+        self.appear.map_or(region, |appear| {
+            region.union(&backdrop_sampling_region(self.bounds, blur, &appear.lens))
+        })
     }
 }
 
