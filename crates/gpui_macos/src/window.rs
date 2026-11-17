@@ -871,6 +871,8 @@ struct MacWindowState {
     /// Set when a tick yielded to the display pass for the pending resize draw; the next tick
     /// draws it, so a stream of size changes cannot suppress every tick.
     resize_tick_yielded: bool,
+    /// The scale factor last applied to the layer and drawable; a different one is a resize.
+    applied_scale_factor: f32,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1337,6 +1339,7 @@ impl MacWindow {
                 resized_since_tick: false,
                 resize_draw_pending: false,
                 resize_tick_yielded: false,
+                applied_scale_factor: get_scale_factor(native_window),
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3420,11 +3423,8 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let scale_factor = lock.scale_factor();
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
-    let mut scale_changed = false;
     if let Some(layer) = lock.renderer.layer() {
         unsafe {
-            let old_scale: f64 = msg_send![layer.as_ptr() as ObjcId, contentsScale];
-            scale_changed = old_scale != scale_factor as f64;
             let _: () = msg_send![
                 layer.as_ptr() as ObjcId,
                 setContentsScale: scale_factor as f64
@@ -3433,7 +3433,8 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
-    if scale_changed {
+    if lock.applied_scale_factor != scale_factor {
+        lock.applied_scale_factor = scale_factor;
         lock.resized_since_tick = true;
         lock.resize_draw_pending = true;
     }
@@ -3662,9 +3663,10 @@ extern "C" fn step(view: *mut c_void) {
         {
             return;
         }
-        // A tick has passed without that display: draw the new size here, still in a
-        // transaction, so it never reaches the screen in the old layer bounds.
-        if lock.resize_draw_pending && lock.resize_tick_yielded {
+        // A pending resize draw with no fresh resize: AppKit did not display (or the yield
+        // was spent), so draw the new size here, still in a transaction, so it never reaches
+        // the screen in the old layer bounds and is never a plain link present.
+        if lock.resize_draw_pending && (lock.resize_tick_yielded || !resized) {
             drop(lock);
             draw_in_transaction(&window_state);
             return;
