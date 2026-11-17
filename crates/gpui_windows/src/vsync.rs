@@ -1,7 +1,7 @@
 use std::{
     sync::{
         LazyLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -10,8 +10,12 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use windows::Win32::{
     Foundation::HWND,
-    Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo},
+    Graphics::Dwm::{
+        DWM_TIMING_INFO, DWMWA_CLOAKED, DwmFlush, DwmGetCompositionTimingInfo,
+        DwmGetWindowAttribute,
+    },
     System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
+    UI::WindowsAndMessaging::IsIconic,
 };
 
 /// The latest DWM vblank on gpui's animation clock; written by the vsync thread. Zero is unknown.
@@ -25,6 +29,45 @@ pub(crate) fn latest_vsync() -> Option<gpui::FrameVsync> {
         at_ns,
         period_ns: LATEST_PERIOD_NS.load(Ordering::Relaxed),
     })
+}
+
+/// Session-wide reasons no window can be seen; like Chromium, both count as every window occluded.
+#[derive(Default)]
+pub(crate) struct SessionVisibility {
+    display_off: AtomicBool,
+    locked: AtomicBool,
+}
+
+impl SessionVisibility {
+    pub(crate) fn set_display_off(&self, off: bool) {
+        self.display_off.store(off, Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_locked(&self, locked: bool) {
+        self.locked.store(locked, Ordering::Relaxed)
+    }
+
+    pub(crate) fn is_hidden(&self) -> bool {
+        self.display_off.load(Ordering::Relaxed) || self.locked.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether the window can be seen: not minimised and not cloaked (another virtual desktop,
+/// or hidden by the shell). Safe to call from the vsync thread.
+pub(crate) fn is_window_presentable(hwnd: HWND) -> bool {
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let queried = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    !(queried.is_ok() && cloaked != 0)
 }
 
 static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {

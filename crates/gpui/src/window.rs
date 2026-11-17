@@ -23,7 +23,9 @@ use crate::{
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
-    point, px, rems, size, transparent_black,
+    point, px, rems, size,
+    taffy::Measured,
+    transparent_black,
     util::{
         atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel,
         round_half_toward_zero, round_half_toward_zero_f64, round_stroke_to_device_pixel,
@@ -1655,6 +1657,7 @@ impl Window {
         let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
         let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
         let last_frame_time = Rc::new(Cell::new(None));
+        let surface_resized = Rc::new(Cell::new(false));
 
         platform_window
             .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
@@ -1813,6 +1816,7 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
+            let surface_resized = surface_resized.clone();
             let mut deferred_force_render = false;
             move |request_frame_options| {
                 #[cfg(feature = "profiler")]
@@ -1847,10 +1851,15 @@ impl Window {
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
+                // The platform has already resized the surface: this frame must be drawn and
+                // presented, or the previous frame is shown stretched to the new size.
+                let resized = surface_resized.take();
+
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
                 // - Inactive window (not focused): cap to ~30fps to save energy
                 let min_frame_interval = if request_frame_options.require_presentation
+                    || resized
                     || (!request_frame_options.force_render
                         && next_frame_callbacks.borrow().is_empty())
                 {
@@ -1964,6 +1973,7 @@ impl Window {
         platform_window.on_resize(Box::new({
             let mut cx = cx.to_async();
             move |_, _| {
+                surface_resized.set(true);
                 handle
                     .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
                     .log_err();
@@ -6084,6 +6094,25 @@ impl Window {
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
+        self.request_measured_layout_with_baseline(
+            style,
+            move |known_dimensions, available_space, window, cx| Measured {
+                size: measure(known_dimensions, available_space, window, cx),
+                baseline: None,
+            },
+        )
+    }
+
+    /// [`Self::request_measured_layout`] for a leaf that also reports its first baseline (text).
+    pub(crate) fn request_measured_layout_with_baseline<F>(
+        &mut self,
+        style: Style,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Measured
+            + 'static,
+    {
         self.invalidator.debug_assert_prepaint();
 
         let rem_size = self.rem_size();
@@ -9603,6 +9632,28 @@ mod tests {
             test_window.frame_wake_count() > baseline || callback_ran.get(),
             "a frame request with pending next-frame callbacks must either run them or re-arm the frame source"
         );
+    }
+
+    /// The frame after a surface resize must not be deferred by the
+    /// inactive-window throttle: the platform has already resized the surface.
+    #[gpui::test]
+    fn test_frame_after_resize_is_not_throttled(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut test_window = cx.test_window(window.into());
+        // A recent frame, so the inactive-window throttle would engage.
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        let callback_ran = Rc::new(Cell::new(false));
+        window
+            .update(cx, {
+                let callback_ran = callback_ran.clone();
+                move |_, window, _| window.on_next_frame(move |_, _| callback_ran.set(true))
+            })
+            .unwrap();
+
+        test_window.simulate_resize(size(px(800.), px(600.)));
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert!(callback_ran.get(), "the frame after a resize must run");
     }
 
     #[gpui::test]

@@ -18,6 +18,12 @@ use itertools::Itertools;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+use windows::Win32::System::{
+    RemoteDesktop::{
+        NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+    },
+    SystemServices::GUID_SESSION_DISPLAY_STATUS,
+};
 use windows::{
     UI::ViewManagement::UISettings,
     Win32::{
@@ -48,6 +54,7 @@ pub struct WindowsPlatform {
     invalidate_devices: Arc<AtomicBool>,
     handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
+    display_notification: Option<HPOWERNOTIFY>,
     disable_direct_composition: bool,
     has_package_identity: bool,
     app_identity: RefCell<Option<(String, String)>>,
@@ -61,6 +68,7 @@ struct WindowsPlatformInner {
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     dispatcher: Arc<WindowsDispatcher>,
+    pub(crate) session_visibility: Arc<SessionVisibility>,
 }
 
 pub(crate) struct WindowsPlatformState {
@@ -172,6 +180,21 @@ impl WindowsPlatform {
             .context("CreateWindowExW did not run correctly")?;
         let handle = result?;
 
+        // Display on/off arrives as WM_POWERBROADCAST/PBT_POWERSETTINGCHANGE (the current state is sent
+        // once at registration); lock/unlock as WM_WTSSESSION_CHANGE.
+        let display_notification = (!headless)
+            .then(|| unsafe {
+                RegisterPowerSettingNotification(
+                    HANDLE(handle.0),
+                    &GUID_SESSION_DISPLAY_STATUS,
+                    DEVICE_NOTIFY_WINDOW_HANDLE,
+                )
+            })
+            .and_then(|r| r.log_err());
+        if !headless {
+            unsafe { WTSRegisterSessionNotification(handle, NOTIFY_FOR_THIS_SESSION) }.log_err();
+        }
+
         let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
             .is_ok_and(|value| value == "true" || value == "1");
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
@@ -201,6 +224,7 @@ impl WindowsPlatform {
             foreground_executor,
             text_system,
             suspend_resume_notification: RefCell::new(None),
+            display_notification,
             disable_direct_composition,
             has_package_identity: has_package_identity(),
             drop_target_helper,
@@ -316,6 +340,7 @@ impl WindowsPlatform {
         let all_windows = Arc::downgrade(&self.raw_window_handles);
         let text_system = Arc::downgrade(&self.text_system);
         let invalidate_devices = self.invalidate_devices.clone();
+        let session_visibility = self.inner.session_visibility.clone();
 
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
@@ -339,7 +364,15 @@ impl WindowsPlatform {
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
+                    // Nothing on screen: draw nothing, as Chromium does. Becoming visible
+                    // again invalidates on the next vblank; the dirty state was never consumed.
+                    if session_visibility.is_hidden() {
+                        continue;
+                    }
                     for hwnd in all_windows.read().iter() {
+                        if !is_window_presentable(hwnd.as_raw()) {
+                            continue;
+                        }
                         unsafe {
                             let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
                         }
@@ -973,6 +1006,7 @@ impl WindowsPlatformInner {
                 .main_receiver
                 .take()
                 .context("missing main receiver")?,
+            session_visibility: Arc::default(),
         }))
     }
 
@@ -1003,7 +1037,8 @@ impl WindowsPlatformInner {
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
-            WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
+            WM_POWERBROADCAST => self.handle_power_broadcast(wparam, lparam),
+            WM_WTSSESSION_CHANGE => self.handle_session_change(wparam),
             _ => None,
         };
         if let Some(result) = handled {
@@ -1159,11 +1194,36 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
-    fn handle_power_broadcast(&self, wparam: WPARAM) -> Option<isize> {
+    fn handle_power_broadcast(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC {
             self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
         }
+        if wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
+            // SAFETY: for PBT_POWERSETTINGCHANGE, lparam points to a POWERBROADCAST_SETTING
+            // followed by `DataLength` bytes of payload. Read through the raw pointer without
+            // creating a reference, since `Data` is declared as `[u8; 1]`.
+            unsafe {
+                let p = lparam.0 as *const POWERBROADCAST_SETTING;
+                let power_setting = std::ptr::addr_of!((*p).PowerSetting).read_unaligned();
+                let data_length = std::ptr::addr_of!((*p).DataLength).read_unaligned();
+                if power_setting == GUID_SESSION_DISPLAY_STATUS && data_length >= 4 {
+                    // 0 = off, 1 = on, 2 = dimmed (still visible).
+                    let state =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*p).Data).cast::<u32>());
+                    self.session_visibility.set_display_off(state == 0);
+                }
+            }
+        }
         Some(1)
+    }
+
+    fn handle_session_change(&self, wparam: WPARAM) -> Option<isize> {
+        match wparam.0 as u32 {
+            WTS_SESSION_LOCK => self.session_visibility.set_locked(true),
+            WTS_SESSION_UNLOCK => self.session_visibility.set_locked(false),
+            _ => return None,
+        }
+        Some(0)
     }
 
     fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
@@ -1182,6 +1242,13 @@ impl Drop for WindowsPlatform {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
                 // SAFETY: notification was returned by RegisterSuspendResumeNotification.
                 UnregisterSuspendResumeNotification(notification).log_err();
+            }
+            if let Some(notification) = self.display_notification.take() {
+                // SAFETY: notification was returned by RegisterPowerSettingNotification.
+                UnregisterPowerSettingNotification(notification).log_err();
+            }
+            if !self.headless {
+                WTSUnRegisterSessionNotification(self.handle).log_err();
             }
             DestroyWindow(self.handle)
                 .context("Destroying platform window")

@@ -6,6 +6,7 @@ use crate::{
     Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign, TextLayoutOptions,
     TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap, TooltipId,
     UnicodeBidi, WhiteSpace, Window, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
+    taffy::Measured,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -635,6 +636,24 @@ struct TextLayoutInner {
     bounds: Option<Bounds<Pixels>>,
 }
 
+impl TextLayoutInner {
+    /// The size, and the first line's baseline where it is painted: half the leading above the
+    /// ascent.
+    fn measured(&self) -> Measured {
+        let baseline = self
+            .document
+            .as_ref()
+            .filter(|document| !document.visual_lines().is_empty())
+            .map(|document| {
+                (self.line_height - document.ascent() - document.descent()) / 2. + document.ascent()
+            });
+        Measured {
+            size: self.size,
+            baseline,
+        }
+    }
+}
+
 fn balance_width(
     width: Pixels,
     line_count: usize,
@@ -993,7 +1012,7 @@ impl TextLayout {
             line_height,
         };
 
-        let layout_id = window.request_measured_layout(Default::default(), {
+        let layout_id = window.request_measured_layout_with_baseline(Default::default(), {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
@@ -1019,7 +1038,7 @@ impl TextLayout {
                     && text_layout.truncate_width.is_none()
                     && text_layout.options == options
                 {
-                    return text_layout.size;
+                    return text_layout.measured();
                 }
 
                 let (text, runs) = Self::apply_truncation(
@@ -1077,21 +1096,19 @@ impl TextLayout {
                     .map(|document| document.len())
                     .unwrap_or_default();
 
-                element_state
-                    .0
-                    .layout
-                    .borrow_mut()
-                    .replace(TextLayoutInner {
-                        document,
-                        len,
-                        line_height,
-                        truncate_width,
-                        options,
-                        size,
-                        bounds: None,
-                    });
+                let inner = TextLayoutInner {
+                    document,
+                    len,
+                    line_height,
+                    truncate_width,
+                    options,
+                    size,
+                    bounds: None,
+                };
+                let measured = inner.measured();
+                element_state.0.layout.borrow_mut().replace(inner);
 
-                size
+                measured
             }
         });
 

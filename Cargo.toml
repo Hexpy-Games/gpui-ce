@@ -27,6 +27,9 @@ members = [
   "./tooling/perf/",
 ]
 default-members = ["./crates/gpui/"]
+# Vendored upstream crate (crates/taffy/VENDORED.md): built as gpui's path dependency, not linted
+# or tested as a workspace member.
+exclude = ["./crates/taffy/"]
 resolver = "3"
 
 [workspace.package]
@@ -298,6 +301,7 @@ features = [
   "Win32_System_Ole",
   "Win32_System_Performance",
   "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
   "Win32_System_RestartManager",
   "Win32_System_SystemInformation",
   "Win32_System_SystemServices",
