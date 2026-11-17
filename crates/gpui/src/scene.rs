@@ -1652,7 +1652,7 @@ pub fn backdrop_appear_parameters(filter: &BackdropFilter, now_ms: u32) -> (Back
 pub fn backdrop_presence(filter: &BackdropFilter, now_ms: u32) -> f32 {
     filter.appear.map_or(1.0, |appear| {
         let (from, to) = appear.motion.opacity;
-        from + (to - from) * appear.motion.progress(now_ms)
+        (from + (to - from) * appear.motion.progress(now_ms)).clamp(0.0, 1.0)
     })
 }
 
@@ -1761,6 +1761,13 @@ impl BackdropFilter {
     /// Largest gaussian blur radius in this filter chain, in device pixels.
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
+    }
+
+    /// Largest blur radius this filter draws with over its appear range, in device pixels: what
+    /// its blur targets, sampling region and cache requirement must cover.
+    pub fn required_blur_radius(&self) -> f32 {
+        self.max_blur_radius()
+            .max(self.appear.map_or(0.0, |appear| appear.blur))
     }
 }
 

@@ -5,7 +5,7 @@ use super::*;
 
 /// Whether compositing `filter` reads a blurred backdrop that the cache can supply.
 pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
-    BlurKernel::for_radius(filter.max_blur_radius()).is_some() || filter.lens.is_active()
+    BlurKernel::for_radius(filter.required_blur_radius()).is_some() || filter.lens.is_active()
 }
 
 impl DirectXRenderer {

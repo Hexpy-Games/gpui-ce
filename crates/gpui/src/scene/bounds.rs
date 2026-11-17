@@ -46,7 +46,7 @@ pub fn backdrop_sampling_region(
 impl BackdropFilter {
     /// [`backdrop_sampling_region`] for this filter.
     pub fn sampling_region(&self) -> Bounds<ScaledPixels> {
-        backdrop_sampling_region(self.bounds, self.max_blur_radius(), &self.lens)
+        backdrop_sampling_region(self.bounds, self.required_blur_radius(), &self.lens)
     }
 }
 

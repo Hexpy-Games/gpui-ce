@@ -36,7 +36,8 @@ fn filter_key(
     filter: &BackdropFilter,
     keys: &[Option<u64>],
 ) -> Option<u64> {
-    if filter.wallpaper.is_some() {
+    // An animating appear changes its blur every tick; it is re-blurred each frame instead.
+    if filter.wallpaper.is_some() || filter.appear.is_some_and(|a| a.motion.is_animated()) {
         return None;
     }
     let region = filter.sampling_region();

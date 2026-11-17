@@ -708,11 +708,8 @@ fn appearing_glass_is_the_backdrop_at_presence_zero_and_unchanged_at_one() {
             ..LayerMotion::NONE
         },
     };
-    let exiting = filter(
-        lens([0.0, 1.0, 0.0]),
-        smallvec![ScaledFilter::Blur(ScaledPixels(12.0))],
-        Some(exit),
-    );
+    // The app paints an exit's end blur of 0 as no filters at all.
+    let exiting = filter(lens([0.0, 1.0, 0.0]), smallvec![], Some(exit));
 
     let bare = render(&mut renderer, None, 1100);
     let ended = render(&mut renderer, Some(exiting.clone()), 1100);
@@ -727,7 +724,8 @@ fn appearing_glass_is_the_backdrop_at_presence_zero_and_unchanged_at_one() {
         None,
     );
     let started = render(&mut renderer, Some(exiting), 1000);
-    let reference = render(&mut renderer, Some(full), 1000);
+    let mut fresh = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let reference = render(&mut fresh, Some(full), 1000);
     assert!(
         started.as_raw() == reference.as_raw(),
         "presence 1 is the unfaded glass"
