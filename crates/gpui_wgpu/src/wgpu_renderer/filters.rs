@@ -66,13 +66,14 @@ impl WgpuRenderer {
 
     /// Runs the blur passes of a filter composite (unless `blurred_ready`) and returns the
     /// texture the composite reads with its content extent; `None` when the composite draws
-    /// nothing.
+    /// nothing. `frame_size` is the extent of the frame being encoded.
     pub(super) fn prepare_composite(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
         blurred_ready: bool,
+        [full_width, full_height]: [u32; 2],
     ) -> Option<(wgpu::TextureView, [f32; 2])> {
         if parameters.blur_radius <= 0.0
             && !parameters.lens.is_active()
@@ -81,8 +82,6 @@ impl WgpuRenderer {
             return None;
         }
 
-        let full_width = self.target.width();
-        let full_height = self.target.height();
         let full_size = [full_width as f32, full_height as f32];
         let Some(kernel) = BlurKernel::for_radius(parameters.blur_radius) else {
             return Some((source.clone(), full_size));
@@ -174,8 +173,9 @@ impl WgpuRenderer {
         (prepared, prepared_extent): &(wgpu::TextureView, [f32; 2]),
         source: &wgpu::TextureView,
         parameters: FilterCompositeParameters,
+        frame_size: [u32; 2],
     ) {
-        let full_size = [self.target.width() as f32, self.target.height() as f32];
+        let full_size = [frame_size[0] as f32, frame_size[1] as f32];
         let (uniforms, pipeline) =
             self.composite_draw(parameters, full_size, *prepared_extent, 0.0);
         self.draw_filter(pass, pipeline, prepared, uniforms);
@@ -192,7 +192,7 @@ impl WgpuRenderer {
     fn composite_draw(
         &self,
         parameters: FilterCompositeParameters,
-        source_size: [f32; 2],
+        frame_size: [f32; 2],
         source_extent: [f32; 2],
         sharp_rim: f32,
     ) -> (BlurUniforms, &pipelines::WgpuRenderPipeline) {
@@ -211,11 +211,8 @@ impl WgpuRenderer {
             parameters.corner_smoothing,
             parameters.opacity,
             parameters.clip,
-            source_size,
-            {
-                let size = self.target.viewport_size();
-                [size.width.0 as f32, size.height.0 as f32]
-            },
+            frame_size,
+            frame_size,
         )
         .with_lens(parameters.lens)
         .with_composite_scale(parameters.scale, parameters.scale_origin)
@@ -247,6 +244,7 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         sources: impl Iterator<Item = &'a wgpu::TextureView>,
         region: Bounds<ScaledPixels>,
+        full_extent: [u32; 2],
     ) -> wgpu::TextureView {
         let target = self
             .resources()
@@ -254,7 +252,6 @@ impl WgpuRenderer {
             .as_ref()
             .expect("backdrop snapshot was prepared")
             .clone();
-        let full_extent = [self.target.width(), self.target.height()];
         let full_size = [full_extent[0] as f32, full_extent[1] as f32];
         let bounds = region;
         let scissor = ScissorRectangle {

@@ -572,8 +572,7 @@ impl<'a> FrameEncoder<'a> {
                         }
                         let (lens, radius) =
                             backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
-                        let width = self.renderer.target.width();
-                        let height = self.renderer.target.height();
+                        let [width, height] = self.size;
                         let region = gpui_render::blur::backdrop_snapshot_region(
                             filter.bounds,
                             radius,
@@ -614,12 +613,14 @@ impl<'a> FrameEncoder<'a> {
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
                                 region,
+                                self.size,
                             ))
                         } else if lens.is_active() {
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 std::iter::once(self.targets.current()),
                                 region,
+                                self.size,
                             ))
                         } else {
                             None
@@ -645,6 +646,7 @@ impl<'a> FrameEncoder<'a> {
                             &source,
                             parameters,
                             hit,
+                            self.size,
                         );
                         if let (false, Some(key)) = (hit, key) {
                             let resources = self.renderer.resources();
@@ -687,7 +689,7 @@ impl<'a> FrameEncoder<'a> {
                         if let Some(prepared) = prepared {
                             let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                             self.renderer
-                                .draw_composite(pass, &prepared, &source, parameters);
+                                .draw_composite(pass, &prepared, &source, parameters, self.size);
                         }
                     }
                 }
@@ -775,11 +777,12 @@ impl<'a> FrameEncoder<'a> {
                         &filtered,
                         parameters,
                         false,
+                        self.size,
                     );
                     if let Some(prepared) = prepared {
                         let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                         self.renderer
-                            .draw_composite(pass, &prepared, &filtered, parameters);
+                            .draw_composite(pass, &prepared, &filtered, parameters, self.size);
                     }
                 }
                 RenderCommand::BeginFilter {

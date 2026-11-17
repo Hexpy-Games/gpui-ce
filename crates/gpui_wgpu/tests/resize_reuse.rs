@@ -3,8 +3,8 @@
 #![cfg(feature = "test-support")]
 
 use gpui::{
-    BackdropFilter, Background, Bounds, ContentMask, DevicePixels, FilterBoundary, LayerMotion,
-    PlatformHeadlessRenderer, Point, Quad, ScaledFilter, ScaledPixels, Scene, Size,
+    BackdropFilter, BackdropLens, Background, Bounds, ContentMask, DevicePixels, FilterBoundary,
+    LayerMotion, PlatformHeadlessRenderer, Point, Quad, ScaledFilter, ScaledPixels, Scene, Size,
     linear_color_stop, linear_gradient, solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
@@ -27,8 +27,8 @@ fn color(hex: u32) -> gpui::Hsla {
     gpui::rgb_to_hsla(gpui::rgb(hex))
 }
 
-/// A full-frame background, a glass touching the right and bottom edges (its blur taps cross
-/// the content edge), and the same edge glass inside an opacity group.
+/// A full-frame background, a lens glass touching the right and bottom edges (its blur taps
+/// cross the content edge), and a plain edge glass inside an opacity group.
 fn scene(target: Size<DevicePixels>, background: Background) -> Scene {
     let (w, h) = (target.width.0 as f32, target.height.0 as f32);
     let frame = bounds(0.0, 0.0, w, h);
@@ -36,7 +36,7 @@ fn scene(target: Size<DevicePixels>, background: Background) -> Scene {
         bounds: frame,
         ..Default::default()
     };
-    let glass = |glass_bounds| BackdropFilter {
+    let glass = |glass_bounds, lens| BackdropFilter {
         order: 0,
         bounds: glass_bounds,
         content_mask: mask,
@@ -44,7 +44,7 @@ fn scene(target: Size<DevicePixels>, background: Background) -> Scene {
         corner_smoothing: 0.0,
         filters: smallvec![ScaledFilter::Blur(ScaledPixels(4.0))],
         opacity: 1.0,
-        lens: Default::default(),
+        lens,
         appear: None,
         wallpaper: None,
     };
@@ -71,7 +71,12 @@ fn scene(target: Size<DevicePixels>, background: Background) -> Scene {
         background,
         ..Default::default()
     });
-    scene.insert_primitive(glass(bounds(w - 100.0, h - 60.0, 100.0, 60.0)));
+    // The lens of `gpui::scene::damage`'s partial-redraw test.
+    let lens = BackdropLens {
+        bezel: 4.0,
+        ..Default::default()
+    };
+    scene.insert_primitive(glass(bounds(w - 100.0, h - 60.0, 100.0, 60.0), lens));
     scene.insert_primitive(group.clone());
     scene.insert_primitive(Quad {
         bounds: bounds(20.0, 20.0, 80.0, 60.0),
@@ -79,7 +84,10 @@ fn scene(target: Size<DevicePixels>, background: Background) -> Scene {
         background: solid_background(color(0xffffff)),
         ..Default::default()
     });
-    scene.insert_primitive(glass(bounds(w - 60.0, h - 100.0, 60.0, 100.0)));
+    scene.insert_primitive(glass(
+        bounds(w - 60.0, h - 100.0, 60.0, 100.0),
+        BackdropLens::default(),
+    ));
     scene.insert_primitive(FilterBoundary {
         is_start: false,
         ..group
@@ -95,9 +103,15 @@ fn smaller_frame_on_reused_targets_matches_fresh_render() {
         width: DevicePixels(320),
         height: DevicePixels(200),
     };
+    // Odd sizes leave a half-resolution texel half covered at the right and bottom edges.
     let small = Size {
-        width: DevicePixels(300),
-        height: DevicePixels(180),
+        width: DevicePixels(301),
+        height: DevicePixels(181),
+    };
+    // Grows past the larger frame: the intermediates are reallocated in 256 px buckets.
+    let grown = Size {
+        width: DevicePixels(517),
+        height: DevicePixels(301),
     };
     let gradient = || {
         linear_gradient(
@@ -112,14 +126,16 @@ fn smaller_frame_on_reused_targets_matches_fresh_render() {
     reused
         .render_scene_to_image(&scene(large, solid_background(color(0xff0000))), large)
         .expect("larger frame");
-    let actual = reused
-        .render_scene_to_image(&scene(small, gradient()), small)
-        .expect("smaller frame on reused targets");
+    for size in [small, grown] {
+        let actual = reused
+            .render_scene_to_image(&scene(size, gradient()), size)
+            .expect("frame on reused targets");
 
-    let mut fresh = WgpuHeadlessRenderer::new().expect("headless renderer");
-    let expected = fresh
-        .render_scene_to_image(&scene(small, gradient()), small)
-        .expect("smaller frame on fresh targets");
+        let mut fresh = WgpuHeadlessRenderer::new().expect("headless renderer");
+        let expected = fresh
+            .render_scene_to_image(&scene(size, gradient()), size)
+            .expect("frame on fresh targets");
 
-    assert_eq!(actual.as_raw(), expected.as_raw());
+        assert!(actual.as_raw() == expected.as_raw(), "{size:?} differs");
+    }
 }
