@@ -50,6 +50,7 @@ pub(super) fn render_damage_to_view(
             &mut encoder,
             resources.scene_color_view.as_ref()?,
             frame_view,
+            [renderer.target.width(), renderer.target.height()],
         );
         if let Some(readback) = readback {
             encoder.copy_texture_to_buffer(

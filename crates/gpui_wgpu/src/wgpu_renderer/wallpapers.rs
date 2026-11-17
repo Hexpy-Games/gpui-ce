@@ -278,6 +278,7 @@ impl WgpuRenderer {
                 &views[index],
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 None,
+                [pass.width, pass.height],
             );
             draw.set_pipeline(pipeline);
             draw.set_bind_group(0, &resources.globals_bind_group, &[]);

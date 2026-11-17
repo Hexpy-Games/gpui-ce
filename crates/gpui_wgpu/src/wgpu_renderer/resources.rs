@@ -27,6 +27,8 @@ use super::{
 
 const INITIAL_FILTER_UNIFORM_CAPACITY: u64 = 16;
 const INITIAL_SURFACE_UNIFORM_CAPACITY: u64 = 8;
+/// Growth step, per axis in device px, for an intermediate that no longer fits.
+const RESIZE_BUCKET: u32 = 256;
 
 /// Device-owned state that is replaced atomically during GPU recovery.
 pub(super) struct WgpuResources {
@@ -233,6 +235,28 @@ impl WgpuResources {
         self.filter_group_views.clear();
     }
 
+    /// Whether any intermediate is larger than a `width` x `height` frame needs.
+    pub(super) fn holds_surplus(&self, width: u32, height: u32) -> bool {
+        let larger = |texture: &wgpu::Texture, (w, h): (u32, u32)| {
+            texture.width() > w || texture.height() > h
+        };
+        let blur = (downsampled_dimension(width), downsampled_dimension(height));
+        [
+            &self.path_intermediate_texture,
+            &self.path_msaa_texture,
+            &self.scene_color_texture,
+            &self.backdrop_snapshot_texture,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(&self.filter_group_textures)
+        .any(|texture| larger(texture, (width, height)))
+            || [&self.blur_ping_texture, &self.blur_pong_texture]
+                .into_iter()
+                .flatten()
+                .any(|texture| larger(texture, blur))
+    }
+
     pub(super) fn release_unused(&mut self, planned: &ScenePlanRequirements) {
         let mut released = false;
         if !planned.uses_path_target {
@@ -303,21 +327,20 @@ impl WgpuResources {
 
 impl WgpuRenderer {
     pub(super) fn ensure_path_textures(&mut self, size: gpui::Size<gpui::DevicePixels>) {
-        if self
-            .resources()
-            .path_intermediate_texture
-            .as_ref()
-            .is_some_and(|texture| {
-                texture.width() == size.width.0 as u32 && texture.height() == size.height.0 as u32
-            })
-        {
-            return;
-        }
         let format = self.target.format();
-        let width = size.width.0 as u32;
-        let height = size.height.0 as u32;
         let sample_count = self.rendering_params.path_sample_count;
         let resources = self.resources_mut();
+        let Some((width, height)) = alloc_extent(
+            resources.path_intermediate_texture.as_ref(),
+            (size.width.0 as u32, size.height.0 as u32),
+            resources.device.limits().max_texture_dimension_2d,
+        ) else {
+            return;
+        };
+        if resources.path_intermediate_texture.is_some() {
+            resources.instances.invalidate_texture_bindings();
+            resources.blur_bind_groups.get_mut().groups.clear();
+        }
         let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
         resources.path_intermediate_texture = Some(texture);
         resources.path_intermediate_view = Some(view);
@@ -329,27 +352,36 @@ impl WgpuRenderer {
         }
     }
 
-    pub(super) fn ensure_filter_textures(&mut self, requirements: &ScenePlanRequirements) {
+    pub(super) fn ensure_filter_textures(
+        &mut self,
+        size: gpui::Size<gpui::DevicePixels>,
+        requirements: &ScenePlanRequirements,
+    ) {
         let format = self.target.format();
-        let width = self.target.width();
-        let height = self.target.height();
-        let blur_width = downsampled_dimension(width);
-        let blur_height = downsampled_dimension(height);
+        let full = (size.width.0 as u32, size.height.0 as u32);
+        let blur = (downsampled_dimension(full.0), downsampled_dimension(full.1));
         let resources = self.resources_mut();
+        let max = resources.device.limits().max_texture_dimension_2d;
+        let mut replaced = false;
 
-        if resources.scene_color_texture.is_none() {
+        if let Some((width, height)) =
+            alloc_extent(resources.scene_color_texture.as_ref(), full, max)
+        {
+            replaced |= resources.scene_color_texture.is_some();
             let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
             resources.scene_color_texture = Some(texture);
             resources.scene_color_view = Some(view);
         }
 
-        if requirements.uses_blur_target && resources.blur_ping_texture.is_none() {
-            let (texture, view) =
-                sampled_render_texture(&resources.device, format, blur_width, blur_height);
+        if requirements.uses_blur_target
+            && let Some((width, height)) =
+                alloc_extent(resources.blur_ping_texture.as_ref(), blur, max)
+        {
+            replaced |= resources.blur_ping_texture.is_some();
+            let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
             resources.blur_ping_texture = Some(texture);
             resources.blur_ping_view = Some(view);
-            let (texture, view) =
-                sampled_render_texture(&resources.device, format, blur_width, blur_height);
+            let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
             resources.blur_pong_texture = Some(texture);
             resources.blur_pong_view = Some(view);
         }
@@ -357,16 +389,35 @@ impl WgpuRenderer {
         let needs_snapshot = (requirements.backdrop_filter_count > 0
             && requirements.isolated_target_count > 0)
             || requirements.backdrop_lens_count > 0;
-        if needs_snapshot && resources.backdrop_snapshot_texture.is_none() {
+        if needs_snapshot
+            && let Some((width, height)) =
+                alloc_extent(resources.backdrop_snapshot_texture.as_ref(), full, max)
+        {
+            replaced |= resources.backdrop_snapshot_texture.is_some();
             let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
             resources.backdrop_snapshot_texture = Some(texture);
             resources.backdrop_snapshot_view = Some(view);
         }
 
-        while resources.filter_group_views.len() < requirements.isolated_target_count {
+        for index in 0..requirements.isolated_target_count {
+            let existing = resources.filter_group_textures.get(index);
+            let Some((width, height)) = alloc_extent(existing, full, max) else {
+                continue;
+            };
             let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
-            resources.filter_group_textures.push(texture);
-            resources.filter_group_views.push(view);
+            if index < resources.filter_group_textures.len() {
+                resources.filter_group_textures[index] = texture;
+                resources.filter_group_views[index] = view;
+                replaced = true;
+            } else {
+                resources.filter_group_textures.push(texture);
+                resources.filter_group_views.push(view);
+            }
+        }
+
+        if replaced {
+            resources.instances.invalidate_texture_bindings();
+            resources.blur_bind_groups.get_mut().groups.clear();
         }
     }
 
@@ -407,6 +458,24 @@ impl WgpuRenderer {
             return false;
         }
         true
+    }
+}
+
+/// The size to allocate an intermediate at, or `None` to reuse `existing`: an existing texture
+/// at least `needed` is reused (shrinking never reallocates), one that no longer fits grows to
+/// `needed` rounded up to `RESIZE_BUCKET` per axis, and a first allocation is exact.
+fn alloc_extent(
+    existing: Option<&wgpu::Texture>,
+    needed: (u32, u32),
+    max: u32,
+) -> Option<(u32, u32)> {
+    match existing {
+        Some(texture) if texture.width() >= needed.0 && texture.height() >= needed.1 => None,
+        Some(_) => Some((
+            needed.0.next_multiple_of(RESIZE_BUCKET).min(max),
+            needed.1.next_multiple_of(RESIZE_BUCKET).min(max),
+        )),
+        None => Some(needed),
     }
 }
 
