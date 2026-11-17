@@ -294,6 +294,12 @@ impl WgpuResources {
         }
     }
 
+    /// Drops the cached blur bind groups; call when a texture they may bind is replaced, so a
+    /// bind group never keeps a dropped texture alive.
+    pub(super) fn clear_blur_bind_groups(&self) {
+        self.blur_bind_groups.borrow_mut().groups.clear();
+    }
+
     pub(super) fn finish_frame_uploads(&self) {
         self.filter_uniforms.finish_upload();
         self.surface_uniforms.finish_upload();
