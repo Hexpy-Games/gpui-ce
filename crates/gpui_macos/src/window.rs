@@ -857,6 +857,9 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    /// The newest vsync (animation-clock ns) a synchronous draw has served; link ticks at or
+    /// before it would draw a second frame for the same refresh. 0 = none.
+    served_vsync_ns: u64,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1052,6 +1055,24 @@ impl MacWindowState {
     fn stop_display_link(&mut self) {
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
+        }
+    }
+
+    fn vsync_ns(&self) -> Option<u64> {
+        self.frame_source
+            .as_ref()
+            .and_then(WindowFrameSource::vsync)
+            .map(|vsync| vsync.at_ns)
+    }
+
+    /// Starts the link if it is not running; never restarts a running one.
+    fn ensure_display_link(&mut self) {
+        if !self
+            .frame_source
+            .as_ref()
+            .is_some_and(WindowFrameSource::is_running)
+        {
+            self.start_display_link();
         }
     }
 
@@ -1301,6 +1322,7 @@ impl MacWindow {
                 frame_source: None,
                 renderer,
                 force_render_pending: false,
+                served_vsync_ns: 0,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3457,18 +3479,8 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
-                lock.renderer.set_presents_with_transaction(true);
-                lock.stop_display_link();
-                let request = lock.next_frame_request();
-                drop(lock);
-                callback(request);
-
-                let mut lock = window_state.lock();
-                lock.request_frame_callback = Some(callback);
-                lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link();
-            }
+            drop(lock);
+            draw_in_transaction(&window_state);
         } else {
             lock.activated_least_once = true;
         }
@@ -3578,21 +3590,31 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     };
 }
 
+/// Draws one frame now, inside the current Core Animation transaction (live resize,
+/// activation). The display link keeps running, so the frame carries the link's vsync,
+/// and the ticks up to the vsync current when the draw ends are marked served.
+fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
+    let mut lock = window_state.lock();
+    let Some(mut callback) = lock.request_frame_callback.take() else {
+        return;
+    };
+    lock.renderer.set_presents_with_transaction(true);
+    let request = lock.next_frame_request();
+    drop(lock);
+    callback(request);
+
+    let mut lock = window_state.lock();
+    lock.request_frame_callback = Some(callback);
+    lock.renderer.set_presents_with_transaction(false);
+    if let Some(vsync_ns) = lock.vsync_ns() {
+        lock.served_vsync_ns = vsync_ns;
+    }
+    lock.ensure_display_link();
+}
+
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.lock();
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        lock.renderer.set_presents_with_transaction(true);
-        lock.stop_display_link();
-        let request = lock.next_frame_request();
-        drop(lock);
-        callback(request);
-
-        let mut lock = window_state.lock();
-        lock.request_frame_callback = Some(callback);
-        lock.renderer.set_presents_with_transaction(false);
-        lock.start_display_link();
-    }
+    draw_in_transaction(&window_state);
 }
 
 extern "C" fn step(view: *mut c_void) {
@@ -3601,6 +3623,13 @@ extern "C" fn step(view: *mut c_void) {
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
 
+        // A synchronous draw already presented for this tick's refresh.
+        if lock
+            .vsync_ns()
+            .is_some_and(|vsync_ns| vsync_ns <= lock.served_vsync_ns)
+        {
+            return;
+        }
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
             drop(lock);
