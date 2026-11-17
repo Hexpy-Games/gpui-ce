@@ -321,6 +321,8 @@ pub struct Style {
     pub align_items: Option<AlignItems>,
     /// How this node should be aligned in the cross/block axis. Falls back to the parents [`AlignItems`] if not set
     pub align_self: Option<AlignSelf>,
+    /// How this node should be aligned in the inline axis. Only applies to grid items; falls back to the parent's `justify_items` if not set
+    pub justify_self: Option<JustifySelf>,
     /// How this element aligns vertically when it participates in an inline formatting context.
     pub vertical_align: VerticalAlign,
     /// How should content contained within this item be aligned in the cross/block axis
@@ -1170,6 +1172,7 @@ impl Default for Style {
             // Alignment
             align_items: None,
             align_self: None,
+            justify_self: None,
             vertical_align: VerticalAlign::Baseline,
             align_content: None,
             justify_content: None,

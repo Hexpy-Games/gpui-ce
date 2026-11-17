@@ -3,7 +3,7 @@ use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Edges, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures,
     FontStyle, FontWeight, FontWidth, GridPlacement, GridTemplate, GridTemplateMinSize,
-    JustifyContent, LayoutDirection, Length, OverflowWrap, Pixels, SharedString,
+    JustifyContent, JustifySelf, LayoutDirection, Length, OverflowWrap, Pixels, SharedString,
     StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
     TextTransform, TextWrap, UnderlineStyle, UnicodeBidi, VerticalAlign, WhiteSpace, WordBreak, px,
     relative, rems,
@@ -575,6 +575,55 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/align-self#stretch)
     fn self_stretch(mut self) -> Self {
         self.style().align_self = Some(AlignSelf::Stretch);
+        self
+    }
+
+    /// Sets this grid item's alignment against the start of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#start)
+    fn justify_self_start(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Start);
+        self
+    }
+
+    /// Sets this grid item's alignment against the end of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#end)
+    fn justify_self_end(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::End);
+        self
+    }
+
+    /// Sets this grid item's alignment against the start of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#flex-start)
+    fn justify_self_flex_start(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::FlexStart);
+        self
+    }
+
+    /// Sets this grid item's alignment against the end of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#flex-end)
+    fn justify_self_flex_end(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::FlexEnd);
+        self
+    }
+
+    /// Sets this grid item's alignment along the center of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#center)
+    fn justify_self_center(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Center);
+        self
+    }
+
+    /// Sets this grid item's alignment along the baseline of the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#baseline)
+    fn justify_self_baseline(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Baseline);
+        self
+    }
+
+    /// Sets this grid item's alignment to fill the available space along the container's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#stretch)
+    fn justify_self_stretch(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Stretch);
         self
     }
 
