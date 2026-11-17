@@ -3,10 +3,7 @@ use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Display, Edges, GridTemplate, InlineContent,
     LayoutDirection, Length, Pixels, Point, Position, ResolvedDirection, SharedString, Size, Style,
     UnicodeBidi, VerticalAlign, Window, size,
-    util::{
-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
-        round_to_device_pixel,
-    },
+    util::{round_half_toward_zero, round_stroke_to_device_pixel, round_to_device_pixel},
 };
 use collections::{FxHashMap, FxHashSet};
 use std::{cell::Cell, fmt::Debug, ops::Range, rc::Rc, sync::Arc};
@@ -556,8 +553,7 @@ impl TaffyLayoutEngine {
                     window.measurement_unicode_bidi = previous_unicode_bidi;
 
                     taffy::LeafMeasure {
-                        size: snap_measured_size_to_device_pixels(measured.size, scale_factor)
-                            .into(),
+                        size: ceil_measured_size_to_layout_unit(measured.size, scale_factor).into(),
                         first_baseline: measured.baseline.map(|baseline| baseline.0 * scale_factor),
                     }
                 },
@@ -591,8 +587,11 @@ impl TaffyLayoutEngine {
     //  1. Pre-layout metric snapping. Before Taffy computes layout, all
     //     authored absolute lengths are rounded in `to_taffy`. This
     //     includes borders, padding, gaps, and explicit sizes.
-    //     Custom-measured leaf nodes have their measured sizes rounded up
-    //     to integer device-pixel lengths.
+    //     Custom-measured leaf nodes (text) are not snapped to device
+    //     pixels: their measured sizes are rounded up to the next layout
+    //     unit (1/64 logical px), as Blink does for shaped text widths. A
+    //     whole-device-pixel ceil would widen every text box by up to 1 dp
+    //     and that excess would accumulate along a row.
     //
     //  2. Post-layout edge snapping. After Taffy resolves the tree, layout
     //     relationships such as flex shares, grid tracks, percentages, and
@@ -735,8 +734,18 @@ impl From<LayoutId> for NodeId {
     }
 }
 
-fn snap_measured_size_to_device_pixels(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
-    size.map(|d| ceil_to_device_pixel(d.0.max(0.0), scale_factor))
+/// Layout units per logical pixel (Blink's `LayoutUnit` is 1/64 CSS px).
+const LAYOUT_UNITS_PER_PIXEL: f32 = 64.0;
+
+/// Rounds a measured size up to the next layout unit and converts it to device space.
+///
+/// Rounding up keeps a box at least as wide as its glyph run, so measuring again at that
+/// width cannot wrap or truncate the text (Blink's `LayoutUnit::FromFloatCeil` of shaped
+/// text widths). Device-pixel snapping is left to the final edges in [`TaffyLayoutEngine::layout_bounds`].
+fn ceil_measured_size_to_layout_unit(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
+    size.map(|d| {
+        (d.0.max(0.0) * LAYOUT_UNITS_PER_PIXEL).ceil() / LAYOUT_UNITS_PER_PIXEL * scale_factor
+    })
 }
 
 fn border_widths_to_taffy(
@@ -1344,6 +1353,14 @@ mod tests {
         let padding = style.to_taffy(Pixels(16.0), 2.0).padding;
         assert_eq!(padding.top, LengthPercentage::length(13.5));
         assert_eq!(padding.bottom, LengthPercentage::length(13.5));
+    }
+
+    #[test]
+    fn measured_size_rounds_up_to_layout_unit_not_device_pixel() {
+        let measured = size(px(58.3), px(16.0));
+        let snapped = ceil_measured_size_to_layout_unit(measured, 2.0);
+        assert_eq!(snapped, size(58.3125 * 2.0, 32.0));
+        assert!(snapped.width / 2.0 >= measured.width.0);
     }
 
     #[test]
