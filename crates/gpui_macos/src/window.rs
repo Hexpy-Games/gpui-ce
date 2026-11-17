@@ -860,10 +860,14 @@ struct MacWindowState {
     /// The newest vsync (animation-clock ns) a synchronous draw has served; link ticks at or
     /// before it would draw a second frame for the same refresh. 0 = none.
     served_vsync_ns: u64,
-    /// Set by each synchronous draw and cleared by the next link tick, which does not draw
-    /// during live resize: AppKit draws the next resize step itself, and the refresh keeps
-    /// one present.
-    forced_draw_since_tick: bool,
+    /// Set when `setFrameSize:` changes the size; taken by the next link tick, which does not
+    /// draw: AppKit's display pass draws the new size inside the Core Animation transaction
+    /// that carries the new geometry, and the refresh keeps one present.
+    resized_since_tick: bool,
+    /// Set when `setFrameSize:` changes the size; cleared when a frame is drawn in a
+    /// transaction. Still set on the tick after the one that yielded: AppKit did not display,
+    /// so that tick draws the new size in a transaction itself.
+    resize_draw_pending: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1327,7 +1331,8 @@ impl MacWindow {
                 renderer,
                 force_render_pending: false,
                 served_vsync_ns: 0,
-                forced_draw_since_tick: false,
+                resized_since_tick: false,
+                resize_draw_pending: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3590,6 +3595,8 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.resized_since_tick = true;
+    lock.resize_draw_pending = true;
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3600,14 +3607,15 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     };
 }
 
-/// Draws one frame now, inside the current Core Animation transaction (live resize,
-/// activation). The display link keeps running, so the frame carries the link's vsync,
+/// Draws one frame now, inside a Core Animation transaction (display pass, resize
+/// fallback, activation). The display link keeps running, so the frame carries the link's vsync,
 /// and the ticks up to the vsync current when the draw ends are marked served.
 fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
     let mut lock = window_state.lock();
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
+    lock.resize_draw_pending = false;
     lock.renderer.set_presents_with_transaction(true);
     let request = lock.next_frame_request();
     drop(lock);
@@ -3616,7 +3624,6 @@ fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
     let mut lock = window_state.lock();
     lock.request_frame_callback = Some(callback);
     lock.renderer.set_presents_with_transaction(false);
-    lock.forced_draw_since_tick = true;
     if let Some(vsync_ns) = lock.vsync_ns() {
         lock.served_vsync_ns = vsync_ns;
     }
@@ -3633,8 +3640,8 @@ extern "C" fn step(view: *mut c_void) {
         let view = view as ObjcId;
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
-        // Taken before either skip, so one synchronous draw suppresses at most one tick.
-        let follows_forced_draw = mem::take(&mut lock.forced_draw_since_tick);
+        // Taken before the served-vsync skip, so one size change defers at most one tick.
+        let resized = mem::take(&mut lock.resized_since_tick);
 
         // A synchronous draw already presented for this tick's refresh.
         if lock
@@ -3643,16 +3650,19 @@ extern "C" fn step(view: *mut c_void) {
         {
             return;
         }
-        // During live resize AppKit draws every resize step synchronously. The tick after such
-        // a draw waits one tick: if the next step's draw comes first, it renders the current
-        // state and the refresh keeps one present; if not (the pointer holds still, or the
-        // resize ended), the next tick draws. The synchronous draw runs this same frame
-        // callback, so animations advance at its rate.
-        if follows_forced_draw {
-            let in_live_resize: Bool = msg_send![view, inLiveResize];
-            if in_live_resize.as_bool() {
-                return;
-            }
+        // The size changed since the last tick. AppKit draws the new size in its display pass,
+        // inside the transaction that carries the new geometry: before this tick in live
+        // resize, after it for a programmatic frame change (zoom, tiling, accessibility). This
+        // tick does not draw, so the refresh keeps one present.
+        if resized {
+            return;
+        }
+        // A tick has passed without that display: draw the new size here, still in a
+        // transaction, so it never reaches the screen in the old layer bounds.
+        if lock.resize_draw_pending {
+            drop(lock);
+            draw_in_transaction(&window_state);
+            return;
         }
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
