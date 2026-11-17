@@ -1304,6 +1304,10 @@ impl DirectXRenderer {
                                 self.dx_draw_wallpaper(current_rtv, filter, paint)?;
                                 continue;
                             }
+                            let presence = backdrop_presence(filter, self.animation_time_ms);
+                            if presence <= 0.0 {
+                                continue;
+                            }
                             let (lens, radius) =
                                 backdrop_appear_parameters(filter, self.animation_time_ms);
                             let region = backdrop_snapshot_region(
@@ -1357,7 +1361,7 @@ impl DirectXRenderer {
                                 filter.corner_radii,
                                 filter.corner_smoothing,
                                 radius,
-                                filter.opacity,
+                                filter.opacity * presence,
                                 FilterCompositeClip::RoundedBounds,
                                 Bounds::default(),
                                 1.0,

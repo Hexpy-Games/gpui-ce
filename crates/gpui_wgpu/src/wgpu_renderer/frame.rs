@@ -8,7 +8,7 @@ use super::{
 use gpui::{
     BackdropFilter, Bounds, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite,
     Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements,
-    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters,
+    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters, backdrop_presence,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
@@ -557,6 +557,10 @@ impl<'a> FrameEncoder<'a> {
                             }
                             continue;
                         }
+                        let presence = backdrop_presence(filter, self.renderer.animation_time_ms);
+                        if presence <= 0.0 {
+                            continue;
+                        }
                         let (lens, radius) =
                             backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
                         let width = self.renderer.target.width();
@@ -618,7 +622,7 @@ impl<'a> FrameEncoder<'a> {
                             corner_radii: filter.corner_radii,
                             corner_smoothing: filter.corner_smoothing,
                             blur_radius: radius,
-                            opacity: filter.opacity,
+                            opacity: filter.opacity * presence,
                             scale: 1.0,
                             scale_origin: Point::default(),
                             composite_offset: Point::default(),

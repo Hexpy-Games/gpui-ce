@@ -1622,7 +1622,8 @@ pub struct BackdropFilter {
     pub wallpaper: Option<WallpaperPaint>,
 }
 
-/// Starting lens and blur in device pixels, with appearance timing.
+/// Starting lens and blur in device pixels, with appearance timing; the motion's opacity is the
+/// filter's presence (see [`backdrop_presence`]).
 #[derive(Debug, Clone, Copy)]
 #[expect(missing_docs)]
 pub struct BackdropAppear {
@@ -1643,6 +1644,16 @@ pub fn backdrop_appear_parameters(filter: &BackdropFilter, now_ms: u32) -> (Back
     } else {
         (filter.lens, blur)
     }
+}
+
+/// How present a backdrop filter is at the wrapping animation clock value: its appear motion's
+/// opacity, 1 without one. The composite fades by it, so a glass at presence 0 draws nothing and
+/// one at presence 1 draws as if it had no appear motion.
+pub fn backdrop_presence(filter: &BackdropFilter, now_ms: u32) -> f32 {
+    filter.appear.map_or(1.0, |appear| {
+        let (from, to) = appear.motion.opacity;
+        from + (to - from) * appear.motion.progress(now_ms)
+    })
 }
 
 /// One fullscreen shader pass of a [`WallpaperPaint`], rendered into its own cached texture of

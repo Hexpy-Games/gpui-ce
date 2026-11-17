@@ -5,11 +5,11 @@
 #![cfg(feature = "test-support")]
 
 use gpui::{
-    AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ColorSpace, ContentMask, Corners,
-    DevicePixels, Edges, FrameLoop, Hsla, MonochromeSprite, PlatformHeadlessRenderer, Point,
-    PolychromeSprite, Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene,
-    ShaderBool, Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient,
-    solid_background,
+    AtlasKey, AtlasTile, BackdropAppear, BackdropFilter, BackdropLens, BorderStyle, Bounds,
+    ColorSpace, ContentMask, Corners, DevicePixels, Edges, FrameLoop, Hsla, LayerMotion,
+    MonochromeSprite, PlatformHeadlessRenderer, Point, PolychromeSprite, Quad, RenderImageParams,
+    RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool, Shadow, Size, Underline,
+    checkerboard, linear_color_stop, linear_gradient, solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;
@@ -654,4 +654,82 @@ fn scale_group_matches_prescaled_quad_about_external_origin() {
         .render_scene_to_image(&grouped, target)
         .expect("render scale group");
     assert_eq!(grouped, reference);
+}
+
+// test-category: pure-logic
+#[test]
+fn appearing_glass_is_the_backdrop_at_presence_zero_and_unchanged_at_one() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let target = gpui::size(DevicePixels(200), DevicePixels(120));
+    let lens = |tone| BackdropLens {
+        bezel: 22.0,
+        tone,
+        exact: true,
+        ..Default::default()
+    };
+    let backdrop = Quad {
+        bounds: bounds(0.0, 0.0, 200.0, 120.0),
+        content_mask: full_mask(),
+        background: checkerboard(gpui::white(), 2.0),
+        ..Default::default()
+    };
+    let render = |renderer: &mut WgpuHeadlessRenderer, filter: Option<BackdropFilter>, now| {
+        let mut scene = Scene::default();
+        scene.insert_primitive(backdrop);
+        if let Some(filter) = filter {
+            scene.insert_primitive(filter);
+        }
+        scene.finish();
+        renderer.set_animation_time_ms(now);
+        renderer
+            .render_scene_to_image(&scene, target)
+            .expect("render must succeed")
+    };
+    let filter = |lens, filters, appear| BackdropFilter {
+        order: 0,
+        bounds: bounds(40.0, 30.0, 120.0, 60.0),
+        content_mask: full_mask(),
+        corner_radii: Corners::all(ScaledPixels(18.0)),
+        corner_smoothing: 1.0,
+        filters,
+        opacity: 1.0,
+        lens,
+        appear,
+        wallpaper: None,
+    };
+    let start_lens = lens([0.05, 0.8, 0.0]);
+    let exit = BackdropAppear {
+        lens: start_lens,
+        blur: 12.0,
+        motion: LayerMotion {
+            start_ms: 1000,
+            duration_ms: 100,
+            opacity: (1.0, 0.0),
+            ..LayerMotion::NONE
+        },
+    };
+    let exiting = filter(
+        lens([0.0, 1.0, 0.0]),
+        smallvec![ScaledFilter::Blur(ScaledPixels(12.0))],
+        Some(exit),
+    );
+
+    let bare = render(&mut renderer, None, 1100);
+    let ended = render(&mut renderer, Some(exiting.clone()), 1100);
+    assert!(
+        ended.as_raw() == bare.as_raw(),
+        "presence 0 draws the backdrop"
+    );
+
+    let full = filter(
+        start_lens,
+        smallvec![ScaledFilter::Blur(ScaledPixels(12.0))],
+        None,
+    );
+    let started = render(&mut renderer, Some(exiting), 1000);
+    let reference = render(&mut renderer, Some(full), 1000);
+    assert!(
+        started.as_raw() == reference.as_raw(),
+        "presence 1 is the unfaded glass"
+    );
 }
