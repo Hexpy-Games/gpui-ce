@@ -23,7 +23,9 @@ use crate::{
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
-    point, px, rems, size, transparent_black,
+    point, px, rems, size,
+    taffy::Measured,
+    transparent_black,
     util::{
         atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel,
         round_half_toward_zero, round_half_toward_zero_f64, round_stroke_to_device_pixel,
@@ -6049,6 +6051,25 @@ impl Window {
     pub fn request_measured_layout<F>(&mut self, style: Style, measure: F) -> LayoutId
     where
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+            + 'static,
+    {
+        self.request_measured_layout_with_baseline(
+            style,
+            move |known_dimensions, available_space, window, cx| Measured {
+                size: measure(known_dimensions, available_space, window, cx),
+                baseline: None,
+            },
+        )
+    }
+
+    /// [`Self::request_measured_layout`] for a leaf that also reports its first baseline (text).
+    pub(crate) fn request_measured_layout_with_baseline<F>(
+        &mut self,
+        style: Style,
+        measure: F,
+    ) -> LayoutId
+    where
+        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Measured
             + 'static,
     {
         self.invalidator.debug_assert_prepaint();

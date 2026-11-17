@@ -1,3 +1,4 @@
+// Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
 use crate::elements::div::ScrollHandle;
 use crate::elements::text::{
     TruncationCandidate, balanced, text_layout_fits, truncate_with_measured_candidates,
@@ -6,7 +7,7 @@ use crate::{
     App, AvailableSpace, Bounds, Display, InlineBidiScope, InlineBoxRequest, InlineLayout,
     InlineLayoutRequest, InlineTextMetrics, InlineTextStyle, LayoutId, Pixels, Point, Position,
     SharedString, Size, Style, TextLayout, TextLayoutTruncation, TextRun, TextStyle, UnicodeBidi,
-    Window, WindowTextSystem, place_inline_layout, size,
+    Window, WindowTextSystem, place_inline_layout, size, taffy::Measured,
 };
 
 use collections::FxHashMap;
@@ -198,6 +199,17 @@ struct InlineParagraphMeasurement {
     layout: Arc<InlineLayout>,
 }
 
+/// A paragraph's size, and its first line's baseline where `paint_inline_layout` puts it.
+fn measured(layout: &InlineLayout) -> Measured {
+    Measured {
+        size: layout.size,
+        baseline: layout
+            .lines
+            .first()
+            .map(|line| line.origin.y + line.baseline),
+    }
+}
+
 struct InlineParagraph {
     layout_id: LayoutId,
     document: Rc<InlineDocument>,
@@ -373,7 +385,7 @@ impl InlineParagraphCollector<'_> {
         let measurement_cache = measurement.clone();
         let unicode_bidi = self.unicode_bidi;
 
-        let layout_id = self.window.request_measured_layout(
+        let layout_id = self.window.request_measured_layout_with_baseline(
             Style {
                 display: Display::Block,
                 ..Style::default()
@@ -395,7 +407,7 @@ impl InlineParagraphCollector<'_> {
                     && measurement.options == options
                     && measurement.bidi_scopes == bidi_scopes
                 {
-                    return measurement.layout.size;
+                    return measured(&measurement.layout);
                 }
 
                 let request = InlineLayoutRequest {
@@ -412,7 +424,7 @@ impl InlineParagraphCollector<'_> {
                 let (document, layout) =
                     measured_document.layout(request, &truncation, window.text_system());
 
-                let size = layout.size;
+                let output = measured(&layout);
                 measurement_cache
                     .borrow_mut()
                     .replace(InlineParagraphMeasurement {
@@ -423,7 +435,7 @@ impl InlineParagraphCollector<'_> {
                         layout,
                     });
 
-                size
+                output
             },
         );
 
