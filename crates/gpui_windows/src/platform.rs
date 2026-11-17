@@ -1199,13 +1199,19 @@ impl WindowsPlatformInner {
             self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
         }
         if wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
-            // SAFETY: for PBT_POWERSETTINGCHANGE, lparam points to a POWERBROADCAST_SETTING.
-            let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
-            if setting.PowerSetting == GUID_SESSION_DISPLAY_STATUS && setting.DataLength >= 4 {
-                // 0 = off, 1 = on, 2 = dimmed (still visible).
-                let state =
-                    unsafe { std::ptr::read_unaligned(setting.Data.as_ptr().cast::<u32>()) };
-                self.session_visibility.set_display_off(state == 0);
+            // SAFETY: for PBT_POWERSETTINGCHANGE, lparam points to a POWERBROADCAST_SETTING
+            // followed by `DataLength` bytes of payload. Read through the raw pointer without
+            // creating a reference, since `Data` is declared as `[u8; 1]`.
+            unsafe {
+                let p = lparam.0 as *const POWERBROADCAST_SETTING;
+                let power_setting = std::ptr::addr_of!((*p).PowerSetting).read_unaligned();
+                let data_length = std::ptr::addr_of!((*p).DataLength).read_unaligned();
+                if power_setting == GUID_SESSION_DISPLAY_STATUS && data_length >= 4 {
+                    // 0 = off, 1 = on, 2 = dimmed (still visible).
+                    let state =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*p).Data).cast::<u32>());
+                    self.session_visibility.set_display_off(state == 0);
+                }
             }
         }
         Some(1)
