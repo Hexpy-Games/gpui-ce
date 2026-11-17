@@ -276,7 +276,7 @@ pub struct X11WindowState {
     maximized_vertical: bool,
     maximized_horizontal: bool,
     visible: bool,
-    hidden: bool,
+    pub(crate) hidden: bool,
     active: bool,
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,

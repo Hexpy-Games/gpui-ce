@@ -974,6 +974,10 @@ impl X11Client {
                     .property_notify(event)
                     .context("X11: Failed to handle property notify")
                     .log_err();
+                let mut state = self.0.borrow_mut();
+                if event.atom == state.atoms._NET_WM_STATE {
+                    state.update_refresh_loop(event.window);
+                }
             }
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;
@@ -1907,7 +1911,9 @@ impl X11ClientState {
         let Some(window_ref) = self.windows.get_mut(&x_window) else {
             return;
         };
+        // Some WMs keep minimised windows mapped and only set _NET_WM_STATE_HIDDEN.
         let is_visible = window_ref.is_mapped
+            && !window_ref.window.state.borrow().hidden
             && !matches!(window_ref.last_visibility, Visibility::FULLY_OBSCURED);
         match (is_visible, window_ref.refresh_state.take()) {
             (false, refresh_state @ Some(RefreshState::Hidden { .. }))
