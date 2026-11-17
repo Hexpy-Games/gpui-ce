@@ -860,6 +860,10 @@ struct MacWindowState {
     /// The newest vsync (animation-clock ns) a synchronous draw has served; link ticks at or
     /// before it would draw a second frame for the same refresh. 0 = none.
     served_vsync_ns: u64,
+    /// Set by each synchronous draw and cleared by the next link tick, which does not draw
+    /// during live resize: AppKit draws the next resize step itself, and the refresh keeps
+    /// one present.
+    forced_draw_since_tick: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1323,6 +1327,7 @@ impl MacWindow {
                 renderer,
                 force_render_pending: false,
                 served_vsync_ns: 0,
+                forced_draw_since_tick: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3611,6 +3616,7 @@ fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
     let mut lock = window_state.lock();
     lock.request_frame_callback = Some(callback);
     lock.renderer.set_presents_with_transaction(false);
+    lock.forced_draw_since_tick = true;
     if let Some(vsync_ns) = lock.vsync_ns() {
         lock.served_vsync_ns = vsync_ns;
     }
@@ -3627,6 +3633,8 @@ extern "C" fn step(view: *mut c_void) {
         let view = view as ObjcId;
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
+        // Taken before either skip, so one synchronous draw suppresses at most one tick.
+        let follows_forced_draw = mem::take(&mut lock.forced_draw_since_tick);
 
         // A synchronous draw already presented for this tick's refresh.
         if lock
@@ -3634,6 +3642,17 @@ extern "C" fn step(view: *mut c_void) {
             .is_some_and(|vsync_ns| vsync_ns <= lock.served_vsync_ns)
         {
             return;
+        }
+        // During live resize AppKit draws every resize step synchronously. The tick after such
+        // a draw waits one tick: if the next step's draw comes first, it renders the current
+        // state and the refresh keeps one present; if not (the pointer holds still, or the
+        // resize ended), the next tick draws. The synchronous draw runs this same frame
+        // callback, so animations advance at its rate.
+        if follows_forced_draw {
+            let in_live_resize: Bool = msg_send![view, inLiveResize];
+            if in_live_resize.as_bool() {
+                return;
+            }
         }
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
