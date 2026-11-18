@@ -120,6 +120,8 @@ pub(super) struct PreparedTargets {
     presentation: wgpu::TextureView,
     offscreen: Option<wgpu::TextureView>,
     instances: InstanceUpload,
+    /// The frame's extent: the viewport of every pass into a frame-sized target.
+    size: [u32; 2],
 }
 
 impl PreparedTargets {
@@ -168,9 +170,10 @@ impl PreparedTargets {
             renderer.ensure_path_textures(size);
         }
         if requirements.planned.uses_offscreen_target {
-            renderer.ensure_filter_textures(&requirements.planned);
+            renderer.ensure_filter_textures(size, &requirements.planned);
         }
         write_shader_globals(renderer, size);
+        let frame_size = [size.width.0 as u32, size.height.0 as u32];
 
         if requirements.planned.uses_offscreen_target {
             let resources = renderer.resources();
@@ -184,6 +187,7 @@ impl PreparedTargets {
                 presentation: frame_view.clone(),
                 offscreen: Some(offscreen),
                 instances,
+                size: frame_size,
             })
         } else {
             Some(Self {
@@ -191,6 +195,7 @@ impl PreparedTargets {
                 presentation: frame_view.clone(),
                 offscreen: None,
                 instances,
+                size: frame_size,
             })
         }
     }
@@ -404,6 +409,7 @@ pub(super) struct FrameEncoder<'a> {
     presentation: wgpu::TextureView,
     instances: InstanceUpload,
     backdrop_keys: Vec<Option<u64>>,
+    size: [u32; 2],
 }
 
 /// Whether compositing `filter` reads a blurred backdrop that the cache can supply.
@@ -455,6 +461,7 @@ impl<'a> FrameEncoder<'a> {
             presentation: targets.presentation,
             instances: targets.instances,
             backdrop_keys,
+            size: targets.size,
         }
     }
 
@@ -465,8 +472,12 @@ impl<'a> FrameEncoder<'a> {
         let result = self.encode_commands();
         if result.is_ok() {
             if let Some(offscreen) = &self.offscreen {
-                self.renderer
-                    .blit_to_frame(&mut self.encoder, offscreen, &self.presentation);
+                self.renderer.blit_to_frame(
+                    &mut self.encoder,
+                    offscreen,
+                    &self.presentation,
+                    self.size,
+                );
             }
             if let Some(readback) = readback {
                 self.encoder.copy_texture_to_buffer(
@@ -521,6 +532,7 @@ impl<'a> FrameEncoder<'a> {
                 ]),
                 wgpu::LoadOp::Load,
                 Some(scissor),
+                self.size,
             );
             wgpu::LoadOp::Load
         } else {
@@ -545,6 +557,7 @@ impl<'a> FrameEncoder<'a> {
                         &mut self.encoder,
                         paths,
                         &mut self.instances,
+                        self.size,
                     )?;
                     let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                     self.renderer
@@ -574,8 +587,7 @@ impl<'a> FrameEncoder<'a> {
                         }
                         let (lens, radius) =
                             backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
-                        let width = self.renderer.target.width();
-                        let height = self.renderer.target.height();
+                        let [width, height] = self.size;
                         let region = gpui_render::blur::backdrop_snapshot_region(
                             filter.bounds,
                             radius,
@@ -616,12 +628,14 @@ impl<'a> FrameEncoder<'a> {
                                 &mut self.encoder,
                                 self.targets.backdrop_layers(),
                                 region,
+                                self.size,
                             ))
                         } else if lens.is_active() {
                             Some(self.renderer.snapshot_backdrop(
                                 &mut self.encoder,
                                 std::iter::once(self.targets.current()),
                                 region,
+                                self.size,
                             ))
                         } else {
                             None
@@ -647,6 +661,7 @@ impl<'a> FrameEncoder<'a> {
                             &source,
                             parameters,
                             hit,
+                            self.size,
                         );
                         if let (false, Some(key)) = (hit, key) {
                             let resources = self.renderer.resources();
@@ -689,7 +704,7 @@ impl<'a> FrameEncoder<'a> {
                         if let Some(prepared) = prepared {
                             let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                             self.renderer
-                                .draw_composite(pass, &prepared, &source, parameters);
+                                .draw_composite(pass, &prepared, &source, parameters, self.size);
                         }
                     }
                 }
@@ -777,11 +792,12 @@ impl<'a> FrameEncoder<'a> {
                         &filtered,
                         parameters,
                         false,
+                        self.size,
                     );
                     if let Some(prepared) = prepared {
                         let pass = self.scene_pass(&mut pass, &mut pending_load, scissor);
                         self.renderer
-                            .draw_composite(pass, &prepared, &filtered, parameters);
+                            .draw_composite(pass, &prepared, &filtered, parameters, self.size);
                     }
                 }
                 RenderCommand::BeginFilter {
@@ -816,6 +832,7 @@ impl<'a> FrameEncoder<'a> {
                 self.targets.current(),
                 *pending_load,
                 scissor,
+                self.size,
             )
             .forget_lifetime();
             *pending_load = wgpu::LoadOp::Load;
@@ -831,8 +848,9 @@ fn begin_scene_render_pass<'a>(
     target: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
     scissor: Option<ScissorRectangle>,
+    viewport: [u32; 2],
 ) -> wgpu::RenderPass<'a> {
-    let mut pass = begin_color_render_pass(encoder, label, target, load, scissor);
+    let mut pass = begin_color_render_pass(encoder, label, target, load, scissor, viewport);
     pass.set_bind_group(
         shader_interface::GLOBAL_BIND_GROUP,
         &renderer.resources().globals_bind_group,

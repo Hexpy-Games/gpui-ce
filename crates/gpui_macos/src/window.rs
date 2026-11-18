@@ -857,6 +857,22 @@ struct MacWindowState {
     renderer: renderer::Renderer,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
+    /// The newest vsync (animation-clock ns) a synchronous draw has served; link ticks at or
+    /// before it would draw a second frame for the same refresh. 0 = none.
+    served_vsync_ns: u64,
+    /// Set when `setFrameSize:` changes the size; taken by the next link tick, which does not
+    /// draw: AppKit's display pass draws the new size inside the Core Animation transaction
+    /// that carries the new geometry, and the refresh keeps one present.
+    resized_since_tick: bool,
+    /// Set when `setFrameSize:` changes the size; cleared when a frame is drawn in a
+    /// transaction. Still set on the tick after the one that yielded: AppKit did not display,
+    /// so that tick draws the new size in a transaction itself.
+    resize_draw_pending: bool,
+    /// Set when a tick yielded to the display pass for the pending resize draw; the next tick
+    /// draws it, so a stream of size changes cannot suppress every tick.
+    resize_tick_yielded: bool,
+    /// The scale factor last applied to the layer and drawable; a different one is a resize.
+    applied_scale_factor: f32,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1052,6 +1068,24 @@ impl MacWindowState {
     fn stop_display_link(&mut self) {
         if let Some(frame_source) = self.frame_source.as_mut() {
             frame_source.stop();
+        }
+    }
+
+    fn vsync_ns(&self) -> Option<u64> {
+        self.frame_source
+            .as_ref()
+            .and_then(WindowFrameSource::vsync)
+            .map(|vsync| vsync.at_ns)
+    }
+
+    /// Starts the link if it is not running; never restarts a running one.
+    fn ensure_display_link(&mut self) {
+        if !self
+            .frame_source
+            .as_ref()
+            .is_some_and(WindowFrameSource::is_running)
+        {
+            self.start_display_link();
         }
     }
 
@@ -1301,6 +1335,11 @@ impl MacWindow {
                 frame_source: None,
                 renderer,
                 force_render_pending: false,
+                served_vsync_ns: 0,
+                resized_since_tick: false,
+                resize_draw_pending: false,
+                resize_tick_yielded: false,
+                applied_scale_factor: get_scale_factor(native_window),
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -2395,6 +2434,11 @@ impl PlatformWindow for MacWindow {
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
 
+    #[cfg(feature = "wgpu")]
+    fn release_resize_surplus(&self) {
+        self.0.lock().renderer.trim_intermediates();
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         let executor = self.0.lock().foreground_executor.clone();
         executor
@@ -3389,6 +3433,11 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    if lock.applied_scale_factor != scale_factor {
+        lock.applied_scale_factor = scale_factor;
+        lock.resized_since_tick = true;
+        lock.resize_draw_pending = true;
+    }
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3457,18 +3506,8 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
         let mut lock = window_state.lock();
 
         if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
-                lock.renderer.set_presents_with_transaction(true);
-                lock.stop_display_link();
-                let request = lock.next_frame_request();
-                drop(lock);
-                callback(request);
-
-                let mut lock = window_state.lock();
-                lock.request_frame_callback = Some(callback);
-                lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link();
-            }
+            drop(lock);
+            draw_in_transaction(&window_state);
         } else {
             lock.activated_least_once = true;
         }
@@ -3568,6 +3607,8 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.resized_since_tick = true;
+    lock.resize_draw_pending = true;
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3578,21 +3619,33 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     };
 }
 
+/// Draws one frame now, inside a Core Animation transaction (display pass, resize
+/// fallback, activation). The display link keeps running, so the frame carries the link's vsync,
+/// and the ticks up to the vsync current when the draw ends are marked served.
+fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
+    let mut lock = window_state.lock();
+    let Some(mut callback) = lock.request_frame_callback.take() else {
+        return;
+    };
+    lock.resize_draw_pending = false;
+    lock.resize_tick_yielded = false;
+    lock.renderer.set_presents_with_transaction(true);
+    let request = lock.next_frame_request();
+    drop(lock);
+    callback(request);
+
+    let mut lock = window_state.lock();
+    lock.request_frame_callback = Some(callback);
+    lock.renderer.set_presents_with_transaction(false);
+    if let Some(vsync_ns) = lock.vsync_ns() {
+        lock.served_vsync_ns = vsync_ns;
+    }
+    lock.ensure_display_link();
+}
+
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.lock();
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        lock.renderer.set_presents_with_transaction(true);
-        lock.stop_display_link();
-        let request = lock.next_frame_request();
-        drop(lock);
-        callback(request);
-
-        let mut lock = window_state.lock();
-        lock.request_frame_callback = Some(callback);
-        lock.renderer.set_presents_with_transaction(false);
-        lock.start_display_link();
-    }
+    draw_in_transaction(&window_state);
 }
 
 extern "C" fn step(view: *mut c_void) {
@@ -3600,7 +3653,32 @@ extern "C" fn step(view: *mut c_void) {
         let view = view as ObjcId;
         let window_state = get_window_state(&*view);
         let mut lock = window_state.lock();
+        // Taken before the served-vsync skip, so one size change defers at most one tick.
+        let resized = mem::take(&mut lock.resized_since_tick);
 
+        // A synchronous draw already presented for this tick's refresh.
+        if lock
+            .vsync_ns()
+            .is_some_and(|vsync_ns| vsync_ns <= lock.served_vsync_ns)
+        {
+            return;
+        }
+        // A pending resize draw with no fresh resize: AppKit did not display (or the yield
+        // was spent), so draw the new size here, still in a transaction, so it never reaches
+        // the screen in the old layer bounds and is never a plain link present.
+        if lock.resize_draw_pending && (lock.resize_tick_yielded || !resized) {
+            drop(lock);
+            draw_in_transaction(&window_state);
+            return;
+        }
+        // The size changed since the last tick. AppKit draws the new size in its display pass,
+        // inside the transaction that carries the new geometry: before this tick in live
+        // resize, after it for a programmatic frame change (zoom, tiling, accessibility). This
+        // tick does not draw, so the refresh keeps one present.
+        if resized {
+            lock.resize_tick_yielded = lock.resize_draw_pending;
+            return;
+        }
         if let Some(mut callback) = lock.request_frame_callback.take() {
             let request = lock.next_frame_request();
             drop(lock);

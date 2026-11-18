@@ -253,6 +253,7 @@ impl WgpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
         instances: &mut InstanceUpload,
+        viewport: [u32; 2],
     ) -> frame::DrawResult {
         let vertex_count = path_types::rasterization_vertex_count(paths);
         if vertex_count == 0 {
@@ -294,6 +295,8 @@ impl WgpuRenderer {
             depth_stencil_attachment: None,
             ..Default::default()
         });
+        // The intermediate may be larger than the frame (reused across a resize).
+        pass.set_viewport(0.0, 0.0, viewport[0] as f32, viewport[1] as f32, 0.0, 1.0);
         pass.set_pipeline(&resources.pipelines.path_rasterization);
         pass.set_bind_group(
             shader_interface::GLOBAL_BIND_GROUP,

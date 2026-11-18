@@ -164,9 +164,24 @@ impl WgpuRenderer {
         let Some(resources) = self.resources.as_mut() else {
             return;
         };
-        resources.invalidate_intermediate_textures();
+        // Intermediates are reused while they fit (passes draw into the frame's extent); only
+        // the backdrop cache, keyed by the target size, can no longer hit.
+        resources.backdrop_cache.get_mut().clear();
         if let Some(surface) = resources.surface.as_ref() {
             surface.configure(&resources.device, &config);
+        }
+    }
+
+    /// Frees intermediates larger than the current size (left by a resize); the next frame
+    /// recreates them at the exact size.
+    pub fn trim_intermediates(&mut self) {
+        let (width, height) = (self.target.width(), self.target.height());
+        let Some(resources) = self.resources.as_mut() else {
+            return;
+        };
+        if resources.holds_surplus(width, height) {
+            resources.invalidate_intermediate_textures();
+            self.retained = None;
         }
     }
 
@@ -410,6 +425,7 @@ fn begin_color_render_pass<'encoder>(
     target: &'encoder wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
     scissor: Option<gpui_render::blur::ScissorRectangle>,
+    viewport: [u32; 2],
 ) -> wgpu::RenderPass<'encoder> {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
@@ -425,6 +441,8 @@ fn begin_color_render_pass<'encoder>(
         depth_stencil_attachment: None,
         ..Default::default()
     });
+    // The target may be larger than the content (reused across a resize).
+    pass.set_viewport(0.0, 0.0, viewport[0] as f32, viewport[1] as f32, 0.0, 1.0);
     if let Some(scissor) = scissor {
         pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
     }

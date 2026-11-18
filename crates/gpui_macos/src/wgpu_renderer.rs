@@ -116,6 +116,10 @@ impl MacWgpuRenderer {
         self.renderer.update_drawable_size(size);
     }
 
+    pub fn trim_intermediates(&mut self) {
+        self.renderer.trim_intermediates();
+    }
+
     /// The surface's alpha mode sets the layer's opacity whenever WGPU
     /// configures it, so it must not be set on the layer directly.
     pub fn update_transparency(&mut self, transparent: bool) {

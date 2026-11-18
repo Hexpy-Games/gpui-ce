@@ -93,9 +93,12 @@ pub mod path {
     ) -> PathVarying {
         let sprite = get!(PATH_SPRITES)[instance_id as usize];
         let vertex = rectangle_vertex(vertex_id, sprite.bounds);
+        // The intermediate may be larger than the viewport (reused across a resize).
+        let dimensions = texture_dimensions(PATH_TEXTURE);
         PathVarying {
             position: vertex.clip_position,
-            texture_coords: vertex.viewport_position / get!(GLOBALS).viewport_size,
+            texture_coords: vertex.viewport_position
+                / vec2f(dimensions.x as f32, dimensions.y as f32),
         }
     }
 

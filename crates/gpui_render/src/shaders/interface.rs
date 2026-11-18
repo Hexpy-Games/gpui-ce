@@ -273,7 +273,7 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         composite_scale_padding,
         composite_scale_origin,
         composite_offset,
-        composite_offset_padding,
+        source_extent,
         composite_rotation,
         composite_rotation_padding0,
         composite_rotation_padding1,

@@ -113,6 +113,12 @@ impl BlurUniforms {
         }
     }
 
+    /// The texels of the source texture that hold content, when the texture may be larger.
+    pub fn with_source_extent(mut self, extent: [f32; 2]) -> Self {
+        self.source_extent = vec2f(extent[0], extent[1]);
+        self
+    }
+
     /// Adds a liquid-glass lens to composite uniforms; a zero bezel leaves them unchanged.
     pub fn with_lens(mut self, lens: BackdropLens) -> Self {
         self.lens_bezel = lens.bezel;
@@ -404,7 +410,7 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         composite_scale_padding: 0.0,
         composite_scale_origin: vec2f(0.0, 0.0),
         composite_offset: vec2f(0.0, 0.0),
-        composite_offset_padding: vec2f(0.0, 0.0),
+        source_extent: vec2f(0.0, 0.0),
         composite_rotation: 0.0,
         composite_rotation_padding0: 0.0,
         composite_rotation_padding1: 0.0,
