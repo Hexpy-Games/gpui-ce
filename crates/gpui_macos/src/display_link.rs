@@ -286,6 +286,11 @@ impl WindowFrameSource {
         })
     }
 
+    /// Whether this source is subscribed to a display's link.
+    pub fn is_running(&self) -> bool {
+        self.registration.is_some()
+    }
+
     pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
         let frame_requests = unsafe {
             let frame_requests = DispatchSource::new(

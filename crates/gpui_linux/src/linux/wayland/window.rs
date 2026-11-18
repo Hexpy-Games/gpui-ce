@@ -2324,6 +2324,10 @@ impl PlatformWindow for WaylandWindow {
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
 
+    fn release_resize_surplus(&self) {
+        self.borrow_mut().renderer.trim_intermediates();
+    }
+
     fn gpu_device_lost(&self) -> Option<bool> {
         // Only loads an atomic flag — safe even mid-recovery, when
         // `gpu_context` would panic on the torn-down resources.
