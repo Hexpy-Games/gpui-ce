@@ -697,10 +697,6 @@ impl EditableTextState {
         if self.layout_data.scroll_bounds.is_empty() {
             return None;
         }
-        let Some(content_size) = self.layout_data.state.size else {
-            return None;
-        };
-
         // point will be relative to content_size, and may or may not be within the current scroll_bounds
         let point = self.find_point_for_caret(self.visible_caret());
 
@@ -727,8 +723,9 @@ impl EditableTextState {
         }
 
         if let Cow::Owned(mut offset) = scroll_offset {
-            offset.x = offset.x.clamp(Pixels::ZERO, content_size.width);
-            offset.y = offset.y.clamp(Pixels::ZERO, content_size.height);
+            let max = self.layout_data.scroll_max;
+            offset.x = offset.x.clamp(Pixels::ZERO, max.x);
+            offset.y = offset.y.clamp(Pixels::ZERO, max.y);
             return Some(offset);
         }
         None

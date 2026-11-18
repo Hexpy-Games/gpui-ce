@@ -3182,11 +3182,6 @@ impl Interactivity {
         window: &mut Window,
         cx: &mut App,
     ) -> Point<Pixels> {
-        fn round_to_two_decimals(pixels: Pixels) -> Pixels {
-            const ROUNDING_FACTOR: f32 = 100.0;
-            (pixels * ROUNDING_FACTOR).round() / ROUNDING_FACTOR
-        }
-
         if let Some(scroll_offset) = self.scroll_offset.as_ref() {
             let mut scroll_to_bottom = false;
             let mut tracked_scroll_handle = self
@@ -3208,16 +3203,16 @@ impl Interactivity {
                 .to_pixels(bounds.size.into(), rem_size)
                 .map(|edge| window.pixel_snap(*edge));
             let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
-            // The floating point values produced by Taffy and ours often vary
-            // slightly after ~5 decimal places. This can lead to cases where after
-            // subtracting these, the container becomes scrollable for less than
-            // 0.00000x pixels. As we generally don't benefit from a precision that
-            // high for the maximum scroll, we round the scroll max to 2 decimal
-            // places here.
             let padded_content_size = self.content_size + padding_size;
-            let scroll_max = Point::from(padded_content_size - bounds.size)
-                .map(round_to_two_decimals)
-                .max(&Default::default());
+            let scale_factor = window.scale_factor();
+            let scroll_max = point(
+                device_pixel_scroll_max(padded_content_size.width, bounds.size.width, scale_factor),
+                device_pixel_scroll_max(
+                    padded_content_size.height,
+                    bounds.size.height,
+                    scale_factor,
+                ),
+            );
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
@@ -5465,9 +5460,33 @@ impl ScrollHandle {
     }
 }
 
+/// The scrollable range of a box whose content measures `content` and whose laid-out size is
+/// `bounds`, in whole device pixels (never negative).
+///
+/// Taffy snaps a box's size to the device pixel grid while measured content is fractional, so
+/// their raw difference can be a sub-pixel range that makes the box scroll by a hair. Like
+/// Blink, only whole device pixels of overflow count as scrollable. The difference is first
+/// rounded to two decimals of a device pixel to drop float noise from the two layouts.
+pub fn device_pixel_scroll_max(content: Pixels, bounds: Pixels, scale_factor: f32) -> Pixels {
+    let device_overflow = ((content - bounds).0 * scale_factor * 100.0).round() / 100.0;
+    px(device_overflow.floor().max(0.0) / scale_factor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_max_counts_only_whole_device_pixels() {
+        let max = |content: f32, bounds: f32, scale: f32| {
+            device_pixel_scroll_max(px(content), px(bounds), scale).0
+        };
+        assert_eq!(max(100.2, 100.0, 2.0), 0.0);
+        assert_eq!(max(101.3, 100.0, 2.0), 1.0);
+        assert_eq!(max(100.9, 100.0, 1.0), 0.0);
+        assert_eq!(max(102.3, 100.0, 1.0), 2.0);
+        assert_eq!(max(90.0, 100.0, 2.0), 0.0);
+    }
 
     #[gpui::test]
     fn wheel_lines_glide_to_the_unsmoothed_offset_and_pixels_jump(cx: &mut TestAppContext) {

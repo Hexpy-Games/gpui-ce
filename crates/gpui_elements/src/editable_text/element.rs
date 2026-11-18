@@ -529,6 +529,21 @@ impl Element for EditableTextElement {
                     // this is converted into positive for usage with bounds
                     state.layout_data.scroll_bounds =
                         Bounds::new(-scroll_offset, inner_bounds.size);
+                    let scale_factor = window.scale_factor();
+                    let content = state.layout_data.state.size.unwrap_or_default();
+                    let padding_size = bounds.size - inner_bounds.size;
+                    state.layout_data.scroll_max = point(
+                        device_pixel_scroll_max(
+                            content.width + padding_size.width,
+                            bounds.size.width,
+                            scale_factor,
+                        ),
+                        device_pixel_scroll_max(
+                            content.height + padding_size.height,
+                            bounds.size.height,
+                            scale_factor,
+                        ),
+                    );
                 });
                 let document_offset = request_layout.state.read(cx).layout_data.document_offset;
                 InteractivityPrepaint {
@@ -861,6 +876,7 @@ impl PrelayoutState {
                     accepts_input: self.accepts_input,
                     // updated during prepaint
                     scroll_bounds: Bounds::default(),
+                    scroll_max: Point::default(),
                     state: EditableTextLayoutState {
                         size: Some(size),
                         last_seen_storage_version: self.storage_version,
