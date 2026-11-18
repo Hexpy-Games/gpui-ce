@@ -3627,6 +3627,7 @@ fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
+    lock.resized_since_tick = false;
     lock.resize_draw_pending = false;
     lock.resize_tick_yielded = false;
     lock.renderer.set_presents_with_transaction(true);
