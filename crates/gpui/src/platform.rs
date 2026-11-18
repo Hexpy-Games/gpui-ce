@@ -1126,6 +1126,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
+    /// Frees GPU memory held beyond the current size after a resize has settled.
+    fn release_resize_surplus(&self) {}
+
     // Mobile platform methods.
 
     /// The regions of this window currently obscured or reserved by the

@@ -128,6 +128,7 @@ impl WgpuRenderer {
                     .map(|(k, _)| *k)
                 {
                     let removed = cache.entries.remove(&oldest).expect("oldest wallpaper");
+                    resources.clear_blur_bind_groups();
                     if let Some((id, _)) = removed.image {
                         cache.release_image(id);
                     }
@@ -179,6 +180,8 @@ impl WgpuRenderer {
                     .zip(&paint.passes)
                     .all(|(e, p)| e.0 == p.width && e.1 == p.height);
             if !fits {
+                // The composite binds the last pass view (`draw_wallpaper`).
+                resources.clear_blur_bind_groups();
                 entry.passes = paint
                     .passes
                     .iter()
@@ -278,6 +281,7 @@ impl WgpuRenderer {
                 &views[index],
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 None,
+                [pass.width, pass.height],
             );
             draw.set_pipeline(pipeline);
             draw.set_bind_group(0, &resources.globals_bind_group, &[]);

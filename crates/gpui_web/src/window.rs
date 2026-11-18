@@ -886,6 +886,10 @@ impl PlatformWindow for WebWindow {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 
+    fn release_resize_surplus(&self) {
+        self.inner.state.borrow_mut().renderer.trim_intermediates();
+    }
+
     fn request_decorations(&self, _decorations: WindowDecorations) {}
 
     fn show_window_menu(&self, _position: Point<Pixels>) {}

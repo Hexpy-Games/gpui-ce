@@ -104,6 +104,9 @@ fn quantize_color_glyph_origin(origin: Point<ScaledPixels>) -> (Point<ScaledPixe
     )
 }
 
+/// How long the window size must stay unchanged before surplus GPU memory left by a resize is freed.
+const RESIZE_SETTLE: Duration = Duration::from_millis(500);
+
 /// Default window size used when no explicit size is provided.
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
 
@@ -1338,6 +1341,8 @@ pub struct Window {
     /// a given rem size.
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
+    last_resize_at: Instant,
+    resize_trim_pending: bool,
     layout_engine: Option<TaffyLayoutEngine>,
     pub(crate) collecting_inline: bool,
     pub(crate) box_morph: Option<Arc<BoxMorph>>,
@@ -2139,6 +2144,8 @@ impl Window {
             rem_size: px(16.),
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
+            last_resize_at: cx.background_executor().now(),
+            resize_trim_pending: false,
             zoom: 1.,
             layout_engine: Some(TaffyLayoutEngine::new()),
             collecting_inline: false,
@@ -2940,11 +2947,18 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
+        let (previous_scale_factor, previous_viewport_size) =
+            (self.scale_factor, self.viewport_size);
         self.scale_factor = self.platform_window.scale_factor() * self.zoom;
         self.viewport_size = self
             .platform_window
             .content_size()
             .map(|length| px(length.0 / self.zoom));
+        if self.scale_factor != previous_scale_factor
+            || self.viewport_size != previous_viewport_size
+        {
+            self.schedule_resize_trim(cx);
+        }
         self.display_id = self.platform_window.display().map(|display| display.id());
         self.mouse_position = self
             .platform_window
@@ -2956,6 +2970,33 @@ impl Window {
         self.bounds_observers
             .clone()
             .retain(&(), |callback| callback(self, cx));
+    }
+
+    /// Frees the renderer's surplus GPU memory once the size has stayed unchanged for `RESIZE_SETTLE`.
+    fn schedule_resize_trim(&mut self, cx: &mut App) {
+        let executor = cx.background_executor().clone();
+        self.last_resize_at = executor.now();
+        if self.resize_trim_pending {
+            return;
+        }
+        self.resize_trim_pending = true;
+        self.spawn(cx, async move |cx| {
+            loop {
+                executor.timer(RESIZE_SETTLE).await;
+                let settled = cx.update(|window, _| {
+                    let settled = executor.now() - window.last_resize_at >= RESIZE_SETTLE;
+                    if settled {
+                        window.resize_trim_pending = false;
+                        window.platform_window.release_resize_surplus();
+                    }
+                    settled
+                });
+                if settled.unwrap_or(true) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Returns the bounds of the current window in the global coordinate space, which could span across multiple displays.

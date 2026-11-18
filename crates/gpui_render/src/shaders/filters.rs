@@ -149,7 +149,8 @@ pub mod blur {
         pub composite_scale_padding: f32,
         pub composite_scale_origin: Vec2f,
         pub composite_offset: Vec2f,
-        pub composite_offset_padding: Vec2f,
+        /// Texels of the bound `BLUR_TEXTURE` that hold content; (0, 0) = the whole texture.
+        pub source_extent: Vec2f,
         pub composite_rotation: f32,
         pub composite_rotation_padding0: f32,
         pub composite_rotation_padding1: f32,
@@ -207,11 +208,27 @@ pub mod blur {
         }
     }
 
+    /// `uv` in the content's 0..1 → the texture's uv, clamped to the content's texel centres.
+    /// Identity when `source_extent` is 0 (whole texture).
+    pub fn source_uv(uv: Vec2f) -> Vec2f {
+        let extent = get!(BLUR_LOCALS).source_extent;
+        if extent.x <= 0.0 {
+            return uv;
+        }
+        let dimensions = texture_dimensions(BLUR_TEXTURE);
+        let size = vec2f(dimensions.x as f32, dimensions.y as f32);
+        clamp(
+            uv * (extent / size),
+            vec2f(0.5, 0.5) / size,
+            (extent - vec2f(0.5, 0.5)) / size,
+        )
+    }
+
     pub fn sample_composite_source(position: Vec2f) -> Vec4f {
         texture_sample_level(
             BLUR_TEXTURE,
             BLUR_SAMPLER,
-            position / get!(BLUR_LOCALS).source_size,
+            source_uv(position / get!(BLUR_LOCALS).source_size),
             0.0,
         )
     }
@@ -696,22 +713,27 @@ pub mod blur {
         }
         if get!(BLUR_LOCALS).downsample_mode == DownsampleMode::HalfResolution {
             let destination = floor(input.position.xy());
-            let source_coordinates = min(
+            let source_coordinates = source_uv(min(
                 (destination + 0.5) / get!(BLUR_LOCALS).target_size,
                 (get!(BLUR_LOCALS).source_size - 0.5) / get!(BLUR_LOCALS).source_size,
-            );
+            ));
             return texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, source_coordinates, 0.0);
         }
         texture_sample_level(
             BLUR_TEXTURE,
             BLUR_SAMPLER,
-            input.position.xy() / get!(BLUR_LOCALS).source_size,
+            source_uv(input.position.xy() / get!(BLUR_LOCALS).source_size),
             0.0,
         )
     }
 
     pub fn sample_blur_texture(texture_coordinates: Vec2f) -> Vec4f {
-        texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, texture_coordinates, 0.0)
+        texture_sample_level(
+            BLUR_TEXTURE,
+            BLUR_SAMPLER,
+            source_uv(texture_coordinates),
+            0.0,
+        )
     }
 
     pub fn gaussian_blur(texture_coordinates: Vec2f) -> Vec4f {

@@ -30,6 +30,8 @@ pub(super) struct EditableTextLayoutResult {
     pub accepts_input: bool,
     /// The last seen scroll position and size of the element
     pub scroll_bounds: Bounds<Pixels>,
+    /// The scrollable range of the element, as the scroll container computes it.
+    pub scroll_max: Point<Pixels>,
     pub state: EditableTextLayoutState,
     /// The document layout produced by the painter's `prepaint`.
     /// Cached so IME `bounds_for_range` / `character_index_for_point` can evaluate without re-shaping.
