@@ -889,9 +889,14 @@ impl Scene {
     }
 
     /// Damage over a retained frame, including wallpaper slots not yet drawn by the renderer.
+    /// A backdrop filter's appear motion damages it while it runs at `now_ms`, and once more
+    /// when the retained frame was drawn at `drawn_ms` before it ended, so the settled state is
+    /// painted.
     pub fn damage_plan_with_wallpapers(
         &self,
         retained: Option<u64>,
+        now_ms: u32,
+        drawn_ms: u32,
         changed: impl Fn(&WallpaperPaint) -> bool,
     ) -> Option<std::borrow::Cow<'_, DamagePlan>> {
         if !self.backdrop_filters.iter().any(|filter| {
@@ -899,6 +904,9 @@ impl Scene {
                 .wallpaper
                 .as_ref()
                 .is_some_and(|paint| paint.clock.is_some())
+                || filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_animated())
         }) {
             return self
                 .damage_plan_over(retained)
@@ -916,7 +924,10 @@ impl Scene {
             )
         };
         Some(std::borrow::Cow::Owned(damage::plan_with_wallpapers(
-            self, seed, changed,
+            self,
+            seed,
+            changed,
+            |motion| motion.is_active(now_ms) || motion.is_active(drawn_ms),
         )))
     }
 

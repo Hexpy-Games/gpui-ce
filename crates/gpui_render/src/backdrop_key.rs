@@ -4,7 +4,7 @@
 use crate::{path_types::rasterization_vertices, shaders::interface::bytes_of};
 use gpui::{
     BackdropFilter, Bounds, Corners, DevicePixels, DrawOrder, PaintedBounds, ScaledPixels, Scene,
-    Size,
+    Size, backdrop_presence,
 };
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -18,12 +18,24 @@ const TAG_POLYCHROME: u8 = 6;
 const TAG_FILTER: u8 = 7;
 const TAG_BOUNDARY: u8 = 8;
 
+/// Identity of a scene's keys at `now_ms`: its generation, changed by an appear motion ending,
+/// so keys kept for a generation are recomputed once a motion that blocked them has ended.
+pub fn keys_epoch(scene: &Scene, now_ms: u32) -> u64 {
+    let running = scene
+        .backdrop_filters
+        .iter()
+        .filter(|filter| filter.appear.is_some_and(|a| a.motion.is_active(now_ms)))
+        .count() as u64;
+    scene.generation() ^ (running << 48)
+}
+
 /// Cache identity of each `scene.backdrop_filters[i]`'s blurred backdrop for a `target`-sized
-/// frame, or `None` when it cannot be reused (it must be blurred this frame).
-pub fn backdrop_keys(scene: &Scene, target: Size<DevicePixels>) -> Vec<Option<u64>> {
+/// frame at animation time `now_ms`, or `None` when it cannot be reused (it must be blurred this
+/// frame).
+pub fn backdrop_keys(scene: &Scene, target: Size<DevicePixels>, now_ms: u32) -> Vec<Option<u64>> {
     let mut keys: Vec<Option<u64>> = Vec::with_capacity(scene.backdrop_filters.len());
     for (index, filter) in scene.backdrop_filters.iter().enumerate() {
-        let key = filter_key(scene, target, index, filter, &keys);
+        let key = filter_key(scene, target, index, filter, &keys, now_ms);
         keys.push(key);
     }
     keys
@@ -35,9 +47,11 @@ fn filter_key(
     index: usize,
     filter: &BackdropFilter,
     keys: &[Option<u64>],
+    now_ms: u32,
 ) -> Option<u64> {
-    // An animating appear changes its blur every tick; it is re-blurred each frame instead.
-    if filter.wallpaper.is_some() || filter.appear.is_some_and(|a| a.motion.is_animated()) {
+    // A running appear changes its blur every tick; it is re-blurred each frame instead. Once it
+    // has ended the filter is static, and its settled presence is part of the key.
+    if filter.wallpaper.is_some() || filter.appear.is_some_and(|a| a.motion.is_active(now_ms)) {
         return None;
     }
     let region = filter.sampling_region();
@@ -173,6 +187,9 @@ fn filter_key(
     hash_bounds(&mut hasher, &filter.bounds);
     filter.max_blur_radius().to_bits().hash(&mut hasher);
     filter.lens.is_active().hash(&mut hasher);
+    backdrop_presence(filter, now_ms)
+        .to_bits()
+        .hash(&mut hasher);
     for (_, tag, hash) in entries {
         tag.hash(&mut hasher);
         hash.hash(&mut hasher);
@@ -249,7 +266,7 @@ mod tests {
         });
         scene.finish();
         let target = size(DevicePixels(1000), DevicePixels(1000));
-        let keys = backdrop_keys(&scene, target);
+        let keys = backdrop_keys(&scene, target, 0);
         assert_eq!(keys.len(), 1);
         keys[0]
     }
@@ -306,7 +323,7 @@ mod tests {
                 ..Default::default()
             });
             scene.finish();
-            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)))[0]
+            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)), 0)[0]
         };
         assert!(key_with_motion(LayerMotion::NONE).is_some());
         assert!(
@@ -317,6 +334,49 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn ended_appear_is_keyed_and_no_longer_damaged() {
+        let mask = ContentMask {
+            bounds: scaled_bounds(0.0, 0.0, 1000.0),
+            ..Default::default()
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(BackdropFilter {
+            bounds: scaled_bounds(100.0, 100.0, 100.0),
+            content_mask: mask,
+            filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
+                .into_iter()
+                .collect(),
+            opacity: 1.0,
+            appear: Some(gpui::BackdropAppear {
+                lens: Default::default(),
+                blur: 0.0,
+                motion: LayerMotion {
+                    duration_ms: 100,
+                    opacity: (0.0, 1.0),
+                    ..LayerMotion::NONE
+                },
+            }),
+            ..Default::default()
+        });
+        scene.finish();
+        let target = size(DevicePixels(1000), DevicePixels(1000));
+        assert!(backdrop_keys(&scene, target, 50)[0].is_none());
+        assert!(backdrop_keys(&scene, target, 200)[0].is_some());
+        let reblurred = |now, drawn| {
+            let plan = scene
+                .damage_plan_with_wallpapers(Some(scene.generation()), now, drawn, |_| false)
+                .unwrap();
+            let gpui::DamagePlan::Partial(plan) = plan.into_owned() else {
+                panic!("expected a partial redraw");
+            };
+            plan.reblur
+        };
+        assert_eq!(reblurred(50, 40).as_slice(), &[0]);
+        assert_eq!(reblurred(200, 50).as_slice(), &[0]);
+        assert!(reblurred(300, 200).is_empty());
     }
 
     #[test]
@@ -360,7 +420,7 @@ mod tests {
                 ..Default::default()
             });
             scene.finish();
-            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)))
+            backdrop_keys(&scene, size(DevicePixels(1000), DevicePixels(1000)), 0)
         };
         let keys = keys_with_clock(None);
         assert!(keys[1].is_some());

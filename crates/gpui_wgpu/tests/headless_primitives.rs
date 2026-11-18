@@ -708,7 +708,7 @@ fn appearing_glass_is_the_backdrop_at_presence_zero_and_unchanged_at_one() {
             ..LayerMotion::NONE
         },
     };
-    // The app paints an exit's end blur of 0 as no filters at all.
+    // An ended exit is at presence 0, which the renderer skips like no glass at all.
     let exiting = filter(lens([0.0, 1.0, 0.0]), smallvec![], Some(exit));
 
     let bare = render(&mut renderer, None, 1100);

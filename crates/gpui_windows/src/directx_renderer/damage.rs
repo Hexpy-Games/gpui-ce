@@ -9,6 +9,12 @@ pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
 }
 
 impl DirectXRenderer {
+    /// Moves the animation clock to the next frame's time, remembering the last frame's.
+    pub(super) fn begin_frame_at(&mut self, ms: u32) {
+        self.drawn_animation_time_ms = self.animation_time_ms;
+        self.animation_time_ms = ms;
+    }
+
     /// Presents an animation tick of the scene last passed to `draw`: a damage redraw over the
     /// retained frame when the scene allows it, a full encode otherwise.
     pub(crate) fn draw_animation_frame(
@@ -19,7 +25,7 @@ impl DirectXRenderer {
         if self.skip_draws {
             return Ok(());
         }
-        self.animation_time_ms = gpui::animation_time_ms();
+        self.begin_frame_at(gpui::animation_time_ms());
         self.retain_surfaces(scene);
         if !self.render_damage(scene)? {
             self.render(scene, background_appearance, false)?;
@@ -31,11 +37,16 @@ impl DirectXRenderer {
     /// `false` when this frame needs a full encode (no retained frame for this scene, a `Full`
     /// plan, or a missing cache entry).
     pub(super) fn render_damage(&mut self, scene: &Scene) -> Result<bool> {
-        let Some(damage) = scene.damage_plan_with_wallpapers(self.retained, |paint| {
-            self.wallpapers
-                .borrow()
-                .slot_changed(paint, self.animation_time_ms)
-        }) else {
+        let Some(damage) = scene.damage_plan_with_wallpapers(
+            self.retained,
+            self.animation_time_ms,
+            self.drawn_animation_time_ms,
+            |paint| {
+                self.wallpapers
+                    .borrow()
+                    .slot_changed(paint, self.animation_time_ms)
+            },
+        ) else {
             return Ok(false);
         };
         let DamagePlan::Partial(plan) = damage.as_ref() else {
@@ -68,10 +79,11 @@ impl DirectXRenderer {
         if !gpui_render::damage_fits(scissor, target) {
             return Ok(false);
         }
-        if self.frame_keys.0 != generation {
+        let epoch = gpui_render::backdrop_key::keys_epoch(scene, self.animation_time_ms);
+        if self.frame_keys.0 != epoch {
             self.frame_keys = (
-                generation,
-                gpui_render::backdrop_key::backdrop_keys(scene, target),
+                epoch,
+                gpui_render::backdrop_key::backdrop_keys(scene, target, self.animation_time_ms),
             );
         }
         if !self.backdrops_cached(scene, plan) {

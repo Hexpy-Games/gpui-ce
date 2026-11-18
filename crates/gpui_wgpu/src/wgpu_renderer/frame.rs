@@ -52,7 +52,10 @@ pub(super) fn render_to_view(
     let keys = encoder.backdrop_keys.clone();
     let submission = submit(renderer, encoder, readback);
     renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
-    renderer.frame_keys = (scene.generation(), keys);
+    renderer.frame_keys = (
+        gpui_render::backdrop_key::keys_epoch(scene, renderer.animation_time_ms),
+        keys,
+    );
     renderer.retained_atlas_epoch = renderer.atlas.removal_epoch();
     if submission.is_some() && release_unused {
         renderer.resources_mut().release_unused(&planned);
@@ -424,13 +427,21 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
-        let backdrop_keys = if damage.is_some() && renderer.frame_keys.0 == scene.generation() {
-            // Reuse keys only for the same generation.
+        let animation_time_ms = renderer.animation_time_ms;
+        let backdrop_keys = if damage.is_some()
+            && renderer.frame_keys.0
+                == gpui_render::backdrop_key::keys_epoch(scene, animation_time_ms)
+        {
+            // Reuse keys only for the same generation and appear motions still running.
             renderer.frame_keys.1.clone()
         } else if scene.backdrop_filters.is_empty() {
             Vec::new()
         } else {
-            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size())
+            gpui_render::backdrop_key::backdrop_keys(
+                scene,
+                renderer.target.viewport_size(),
+                animation_time_ms,
+            )
         };
         Self {
             renderer,
