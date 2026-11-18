@@ -3507,7 +3507,7 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
 
         if lock.activated_least_once {
             drop(lock);
-            draw_in_transaction(&window_state);
+            draw_in_transaction(&window_state, true);
         } else {
             lock.activated_least_once = true;
         }
@@ -3622,12 +3622,17 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
 /// Draws one frame now, inside a Core Animation transaction (display pass, resize
 /// fallback, activation). The display link keeps running, so the frame carries the link's vsync,
 /// and the ticks up to the vsync current when the draw ends are marked served.
-fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
+///
+/// `clear_resize_mark` is false during AppKit live resize: the mark must survive the display
+/// pass so the next tick yields to the following drag display pass instead of drawing again.
+fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>, clear_resize_mark: bool) {
     let mut lock = window_state.lock();
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
-    lock.resized_since_tick = false;
+    if clear_resize_mark {
+        lock.resized_since_tick = false;
+    }
     lock.resize_draw_pending = false;
     lock.resize_tick_yielded = false;
     lock.renderer.set_presents_with_transaction(true);
@@ -3646,7 +3651,8 @@ fn draw_in_transaction(window_state: &Arc<Mutex<MacWindowState>>) {
 
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    draw_in_transaction(&window_state);
+    let in_live_resize: Bool = unsafe { msg_send![this, inLiveResize] };
+    draw_in_transaction(&window_state, !in_live_resize.as_bool());
 }
 
 extern "C" fn step(view: *mut c_void) {
@@ -3669,7 +3675,7 @@ extern "C" fn step(view: *mut c_void) {
         // the screen in the old layer bounds and is never a plain link present.
         if lock.resize_draw_pending && (lock.resize_tick_yielded || !resized) {
             drop(lock);
-            draw_in_transaction(&window_state);
+            draw_in_transaction(&window_state, true);
             return;
         }
         // The size changed since the last tick. AppKit draws the new size in its display pass,
