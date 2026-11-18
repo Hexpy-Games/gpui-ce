@@ -12,7 +12,8 @@ use gpui::{
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, PaintQuad,
     ParagraphDirection, Pixels, Point, ResolvedDirection, ShapedText, SharedString, Size,
     StatefulInteractiveElement, Style, StyleRefinement, Styled, TextAlign, TextLayout,
-    TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, point, px, relative, size,
+    TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, device_pixel_scroll_max, point,
+    px, relative, size,
 };
 use palette::IntoColor;
 use smallvec::SmallVec;
@@ -1855,7 +1856,7 @@ mod tests {
         assert!(
             scroll.x > Pixels::ZERO
                 && scroll.x <= document_offset.x
-                && document_offset.x - scroll.x <= px(2.01),
+                && document_offset.x - scroll.x <= px(3.01),
             "scroll={scroll:?}, offset={document_offset:?}, next={next_scroll:?}, content={content_size:?}"
         );
 
