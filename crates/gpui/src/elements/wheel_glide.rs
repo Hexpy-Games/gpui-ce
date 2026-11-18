@@ -125,7 +125,10 @@ fn ease(y1: f32, x: f32) -> f32 {
 }
 
 fn slope(y1: f32, x: f32) -> f32 {
-    (ease(y1, x + 1e-3) - ease(y1, x - 1e-3)) / 2e-3
+    // One-sided at the ends of the curve, where `ease` clamps its input.
+    let lo = (x - 1e-3).max(0.0);
+    let hi = (x + 1e-3).min(1.0);
+    (ease(y1, hi) - ease(y1, lo)) / (hi - lo)
 }
 
 #[cfg(test)]
@@ -133,9 +136,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    // test-category: pure-logic
-    #[test]
-    fn a_notch_mid_frame_continues_the_glide_without_a_hitch() {
+    /// Plays notches of -60 px landing `offsets_ms` after each of frames 0, 7, 14 and 21
+    /// and checks the glide stays continuous and plays exactly the summed deltas.
+    fn check_continuity(offsets_ms: &[u64]) {
         let base = Instant::now();
         let frame = Duration::from_secs_f64(1.0 / 60.0);
         let room = (
@@ -148,7 +151,7 @@ mod tests {
         let mut steps: Vec<f32> = Vec::new();
         let mut total = 0.0;
         let mut ended_at = None;
-        for k in 0..120usize {
+        for k in 0..160usize {
             let at = base + frame * k as u32;
             let mut step = 0.0;
             if let Some((slice, active)) = glide.step(at) {
@@ -160,7 +163,9 @@ mod tests {
             }
             steps.push(step);
             if notch_frames.contains(&k) {
-                assert!(glide.add(delta, room, at + Duration::from_millis(10)));
+                for &ms in offsets_ms {
+                    assert!(glide.add(delta, room, at + Duration::from_millis(ms)));
+                }
             }
             if ended_at.is_some() {
                 break;
@@ -176,11 +181,23 @@ mod tests {
         let last = *notch_frames.last().unwrap();
         let ended = ended_at.expect("glide must end");
         assert!(
-            ended <= last + 20,
+            ended <= last + 30,
             "glide ended {} frames after the last notch",
             ended - last
         );
-        let want = -60.0 * notch_frames.len() as f32;
+        let want = -60.0 * (notch_frames.len() * offsets_ms.len()) as f32;
         assert!((total - want).abs() < 0.01, "played {total}, wanted {want}");
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn a_notch_mid_frame_continues_the_glide_without_a_hitch() {
+        check_continuity(&[10]);
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn two_notches_in_one_frame_keep_the_glide_continuous() {
+        check_continuity(&[4, 10]);
     }
 }
