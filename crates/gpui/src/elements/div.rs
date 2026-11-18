@@ -5486,6 +5486,7 @@ mod tests {
         assert_eq!(max(100.9, 100.0, 1.0), 0.0);
         assert_eq!(max(102.3, 100.0, 1.0), 2.0);
         assert_eq!(max(90.0, 100.0, 2.0), 0.0);
+        assert_eq!(max(101.0, 100.0, 1.25), 0.8);
     }
 
     #[gpui::test]

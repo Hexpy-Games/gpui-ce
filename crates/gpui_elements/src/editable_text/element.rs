@@ -517,7 +517,8 @@ impl Element for EditableTextElement {
                 let inner_bounds = {
                     let padding = style
                         .padding
-                        .to_pixels(bounds.size.into(), window.rem_size());
+                        .to_pixels(bounds.size.into(), window.rem_size())
+                        .map(|edge| window.pixel_snap(*edge));
 
                     let mut bounds = bounds;
                     bounds.origin += point(padding.left, padding.top);
@@ -531,16 +532,15 @@ impl Element for EditableTextElement {
                     state.layout_data.scroll_bounds =
                         Bounds::new(-scroll_offset, inner_bounds.size);
                     let scale_factor = window.scale_factor();
-                    let content = state.layout_data.state.size.unwrap_or_default();
                     let padding_size = bounds.size - inner_bounds.size;
                     state.layout_data.scroll_max = point(
                         device_pixel_scroll_max(
-                            content.width + padding_size.width,
+                            content_size.width + padding_size.width,
                             bounds.size.width,
                             scale_factor,
                         ),
                         device_pixel_scroll_max(
-                            content.height + padding_size.height,
+                            content_size.height + padding_size.height,
                             bounds.size.height,
                             scale_factor,
                         ),
@@ -1843,22 +1843,16 @@ mod tests {
             1.0,
             LayoutDirection::RightToLeft,
         );
-        let (scroll, document_offset, next_scroll, content_size) = fixture.cx.update(|cx| {
+        let (scroll, document_offset, scroll_max) = fixture.cx.update(|cx| {
             let layout = &fixture.input.read(cx).layout_data;
             (
                 layout.scroll_bounds.origin,
                 layout.document_offset,
-                layout.next_scroll_offset,
-                layout.state.size,
+                layout.scroll_max,
             )
         });
         assert!(document_offset.x > Pixels::ZERO);
-        assert!(
-            scroll.x > Pixels::ZERO
-                && scroll.x <= document_offset.x
-                && document_offset.x - scroll.x <= px(3.01),
-            "scroll={scroll:?}, offset={document_offset:?}, next={next_scroll:?}, content={content_size:?}"
-        );
+        assert_eq!(scroll.x, scroll_max.x);
 
         fixture.scroll(Point::default());
         let position = fixture.point(3);
