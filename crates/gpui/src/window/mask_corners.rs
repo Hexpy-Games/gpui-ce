@@ -114,6 +114,31 @@ impl MaskCorners {
         )
     }
 
+    /// Whether `point` lies inside the rounded rectangle (on or within its corner arcs), for a
+    /// mask whose bounds have the given edges; the same test the shaders anti-alias.
+    pub fn contains(&self, bounds: Edges<f32>, x: f32, y: f32) -> bool {
+        if !self.is_rounded() {
+            return true;
+        }
+        let radii = self.radii();
+        let outsets = self.outsets();
+        let (top, right) = (bounds.top - outsets.top, bounds.right + outsets.right);
+        let (bottom, left) = (bounds.bottom + outsets.bottom, bounds.left - outsets.left);
+        // Each corner: its radius, its point and its outward direction.
+        [
+            (radii.top_left, left, top, -1.0, -1.0),
+            (radii.top_right, right, top, 1.0, -1.0),
+            (radii.bottom_right, right, bottom, 1.0, 1.0),
+            (radii.bottom_left, left, bottom, -1.0, 1.0),
+        ]
+        .into_iter()
+        .all(|(radius, corner_x, corner_y, out_x, out_y)| {
+            let dx = ((x - (corner_x - out_x * radius)) * out_x).max(0.0);
+            let dy = ((y - (corner_y - out_y * radius)) * out_y).max(0.0);
+            radius <= 0.0 || dx.hypot(dy) <= radius
+        })
+    }
+
     /// Whether the rounded corners clip anything inside `visible`, for a mask whose bounds have
     /// the given edges (all as top, right, bottom, left).
     pub fn clips(&self, bounds: Edges<f32>, visible: Edges<f32>) -> bool {

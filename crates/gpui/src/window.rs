@@ -988,7 +988,7 @@ pub struct Hitbox {
 impl Hitbox {
     /// Tests the actual regions, including the content mask, without occlusion checks.
     pub fn contains(&self, point: &Point<Pixels>) -> bool {
-        self.content_mask.bounds.contains(point)
+        self.content_mask.contains(point)
             && self.fragments.as_ref().map_or_else(
                 || self.bounds.contains(point),
                 |fragments| fragments.iter().any(|bounds| bounds.contains(point)),
@@ -2288,6 +2288,14 @@ impl ContentMask<Pixels> {
             fade_out: Edges::default(),
             corners: MaskCorners::new(radii.map(|radius| radius.0), Edges::default()),
         }
+    }
+
+    /// Whether `point` is visible through the mask: inside its bounds and its rounded corners.
+    pub fn contains(&self, point: &Point<Pixels>) -> bool {
+        self.bounds.contains(point)
+            && self
+                .corners
+                .contains(mask_edges(&self.bounds, f32::from), point.x.0, point.y.0)
     }
 
     /// Scale the content mask's pixel units by the given scaling factor.
