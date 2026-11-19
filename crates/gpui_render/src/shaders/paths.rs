@@ -9,6 +9,7 @@ pub mod path_rasterization {
         pub curve_position: Vec2f,
         pub color: Background,
         pub bounds: Bounds,
+        pub mask_corners: MaskCorners,
     }
     storage!(group(1), binding(0), PATH_VERTICES: RuntimeArray<PathRasterizationVertex>);
 
@@ -61,7 +62,8 @@ pub mod path_rasterization {
         let vertex = get!(PATH_VERTICES)[input.vertex_id as usize];
         let paint = Paint::new(vertex.color, vertex.bounds);
         let color = paint_color(paint, input.position.xy(), prepare_paint(paint));
-        premultiply(color, coverage)
+        let mask = MaskCorners::alpha(vertex.mask_corners, vertex.bounds, input.position.xy());
+        premultiply(color, coverage * mask)
     }
 }
 

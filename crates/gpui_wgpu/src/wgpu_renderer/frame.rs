@@ -628,7 +628,7 @@ impl<'a> FrameEncoder<'a> {
                         let source = snapshot.unwrap_or_else(|| self.targets.current().clone());
                         let parameters = FilterCompositeParameters {
                             bounds: filter.bounds,
-                            content_mask: filter.content_mask.bounds,
+                            content_mask: filter.content_mask,
                             corner_radii: filter.corner_radii,
                             corner_smoothing: filter.corner_smoothing,
                             blur_radius: radius,
@@ -757,7 +757,7 @@ impl<'a> FrameEncoder<'a> {
                         );
                     let parameters = FilterCompositeParameters {
                         bounds: boundary.bounds,
-                        content_mask: boundary.content_mask.bounds,
+                        content_mask: boundary.content_mask,
                         corner_radii: clip.map_or(boundary.corner_radii, |(_, radii)| radii),
                         corner_smoothing: boundary.corner_smoothing,
                         blur_radius: boundary.max_blur_radius(),

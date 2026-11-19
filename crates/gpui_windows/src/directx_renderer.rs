@@ -16,7 +16,7 @@ use gpui_render::{
         GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle, backdrop_snapshot_region,
         downsampled_dimension,
     },
-    path_types::{PathRasterizationVertex, PathSprite},
+    path_types::{self, PathRasterizationVertex, PathSprite},
     shaders::{
         common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool, SurfaceColorFormat},
         interface as shader_interface,
@@ -1353,7 +1353,7 @@ impl DirectXRenderer {
                                 &source,
                                 current_rtv,
                                 filter.bounds,
-                                filter.content_mask.bounds,
+                                filter.content_mask,
                                 filter.corner_radii,
                                 filter.corner_smoothing,
                                 radius,
@@ -1428,7 +1428,7 @@ impl DirectXRenderer {
                         &source,
                         parent_rtv,
                         boundary.bounds,
-                        boundary.content_mask.bounds,
+                        boundary.content_mask,
                         clip.map_or(boundary.corner_radii, |(_, radii)| radii),
                         boundary.corner_smoothing,
                         boundary.max_blur_radius(),
@@ -1846,15 +1846,8 @@ impl DirectXRenderer {
         self.path_rasterization_vertices.clear();
         self.path_rasterization_vertices
             .reserve(rasterization_vertex_count);
-        for path in paths {
-            self.path_rasterization_vertices
-                .extend(path.vertices.iter().map(|vertex| PathRasterizationVertex {
-                    xy_position: vertex.xy_position,
-                    curve_position: vertex.st_position,
-                    color: path.color,
-                    bounds: path.clipped_bounds(),
-                }));
-        }
+        self.path_rasterization_vertices
+            .extend(path_types::rasterization_vertices(paths));
         debug_assert_eq!(
             self.path_rasterization_vertices.len(),
             rasterization_vertex_count
@@ -2228,7 +2221,7 @@ impl DirectXRenderer {
         source_srv: &Option<ID3D11ShaderResourceView>,
         target_rtv: &Option<ID3D11RenderTargetView>,
         bounds: Bounds<ScaledPixels>,
-        content_mask: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
         corner_radii: Corners<ScaledPixels>,
         corner_smoothing: f32,
         blur_radius: f32,
@@ -2451,7 +2444,10 @@ impl DirectXRenderer {
                 source,
                 target,
                 bounds,
-                bounds,
+                ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 Corners::default(),
                 0.0,
                 0.0,
@@ -4650,6 +4646,55 @@ mod tests {
             renderer.gpu_adapter_luid()?,
             crate::directx_devices::luid_to_u64(desc.AdapterLuid)
         );
+        Ok(())
+    }
+
+    /// A rounded content mask clips a shared-texture surface (a browser page) and a quad to its
+    /// arcs on the Direct3D 11 pipelines.
+    #[test]
+    fn rounded_content_mask_clips_shared_surfaces_and_quads() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let (_window, mut renderer) = shared_renderer(&devices)?;
+        let producer = SharedTextureProducer::new(&devices, 40, 20, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        let mask = ContentMask::rounded(
+            Bounds::new(
+                gpui::point(gpui::px(10.), gpui::px(10.)),
+                gpui::size(gpui::px(40.), gpui::px(20.)),
+            ),
+            Corners::all(gpui::px(8.)),
+        )
+        .scale(1.0);
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds: scaled(10.0, 10.0, 40.0, 20.0),
+            content_mask: mask,
+            source: producer.paint(RED, 1)?.into(),
+        });
+        scene.insert_primitive(Quad {
+            bounds: scaled(30.0, 10.0, 20.0, 20.0),
+            content_mask: mask,
+            background: solid_background(rgb_to_hsla(rgb(0x00ff00))),
+            ..Default::default()
+        });
+        scene.finish();
+        let image = renderer.render_to_image(&scene, WindowBackgroundAppearance::Opaque)?;
+        expect_pixel(
+            &image,
+            "surface outside its corner arc",
+            10,
+            10,
+            [255, 255, 255],
+        );
+        expect_pixel(&image, "surface inside", 20, 20, [255, 0, 0]);
+        expect_pixel(
+            &image,
+            "quad outside its corner arc",
+            49,
+            29,
+            [255, 255, 255],
+        );
+        expect_pixel(&image, "quad inside", 40, 20, [0, 255, 0]);
         Ok(())
     }
 

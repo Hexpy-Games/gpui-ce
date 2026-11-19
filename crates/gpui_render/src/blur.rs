@@ -3,10 +3,10 @@ pub use crate::shaders::{
     blur::BlurUniforms,
     common::{
         BlurCompositeClip as ShaderBlurCompositeClip, Bounds as ShaderBounds,
-        Corners as ShaderCorners, DownsampleMode,
+        Corners as ShaderCorners, DownsampleMode, MaskCorners as ShaderMaskCorners,
     },
 };
-use gpui::{BackdropLens, Bounds, Corners, ScaledPixels, WallpaperPass};
+use gpui::{BackdropLens, Bounds, ContentMask, Corners, ScaledPixels, WallpaperPass};
 use wgsl_rs::std::vec2f;
 
 pub const DOWNSAMPLE_FACTOR: u32 = gpui::BLUR_DOWNSAMPLE_FACTOR;
@@ -35,7 +35,7 @@ pub enum FilterCompositeClip {
 #[derive(Clone, Copy)]
 pub struct FilterCompositeParameters {
     pub bounds: Bounds<ScaledPixels>,
-    pub content_mask: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub corner_smoothing: f32,
     pub blur_radius: f32,
@@ -216,7 +216,7 @@ impl BlurUniforms {
 
     pub fn composite(
         bounds: Bounds<ScaledPixels>,
-        content_mask: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
         corner_radii: Corners<ScaledPixels>,
         corner_smoothing: f32,
         opacity: f32,
@@ -226,7 +226,8 @@ impl BlurUniforms {
     ) -> Self {
         Self {
             bounds: bounds.into(),
-            content_mask: content_mask.into(),
+            content_mask: content_mask.bounds.into(),
+            content_mask_corners: content_mask.corners.into(),
             corner_radii: corner_radii.into(),
             corner_smoothing,
             opacity,
@@ -352,6 +353,12 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
     BlurUniforms {
         bounds,
         content_mask: bounds,
+        content_mask_corners: ShaderMaskCorners {
+            radii_top: 0,
+            radii_bottom: 0,
+            outsets_top_right: 0,
+            outsets_bottom_left: 0,
+        },
         corner_radii: ShaderCorners {
             top_left: 0.0,
             top_right: 0.0,
@@ -422,7 +429,7 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
 #[cfg(test)]
 mod tests {
     use super::{BlurUniforms, FilterCompositeClip, downsampled_dimension};
-    use gpui::{BackdropLens, Bounds, Corners};
+    use gpui::{BackdropLens, Bounds, ContentMask, Corners};
 
     #[test]
     fn downsampled_dimensions_cover_odd_edges() {
@@ -437,7 +444,7 @@ mod tests {
     fn lens_saturation_defaults_to_one_and_uses_the_requested_amount() {
         let uniforms = BlurUniforms::composite(
             Bounds::default(),
-            Bounds::default(),
+            ContentMask::default(),
             Corners::default(),
             0.0,
             1.0,

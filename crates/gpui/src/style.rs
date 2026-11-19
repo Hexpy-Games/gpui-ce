@@ -3,9 +3,9 @@ use crate::{
     AbsoluteLength, App, Background, BorderStyle, Bounds, ColorExt, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length,
-    OverflowWrap, PaintQuad, Pixels, Point, PointRefinement, ScaledPixels, SharedString, Size,
-    SizeRefinement, Styled, TextRun, TextWrap, Window, WordBreak, black, phi, point, px, rems,
-    size,
+    MaskCorners, OverflowWrap, PaintQuad, Pixels, Point, PointRefinement, ScaledPixels,
+    SharedString, Size, SizeRefinement, Styled, TextRun, TextWrap, Window, WordBreak, black, phi,
+    point, px, rems, size,
 };
 use collections::HashSet;
 use palette::{Hsla, IntoColor, rgb::Rgba};
@@ -918,15 +918,40 @@ impl Style {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
 
-                if self
+                let border = if self
                     .border_color
                     .is_some_and(|background| !background.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
-                }
+                    self.border_widths.to_pixels(rem_size)
+                } else {
+                    Edges::default()
+                };
+                min.x += border.left;
+                max.x -= border.right;
+                min.y += border.top;
+                max.y -= border.bottom;
+
+                // Like CSS, clipping both axes also clips to the padding box's rounded corners:
+                // the box's radii less the adjacent border widths.
+                let corners = if self.overflow.x != Overflow::Visible
+                    && self.overflow.y != Overflow::Visible
+                {
+                    let radii = self
+                        .corner_radii
+                        .to_pixels(rem_size)
+                        .clamp_radii_for_quad_size(bounds.size);
+                    MaskCorners::new(
+                        Corners {
+                            top_left: (radii.top_left - border.top.max(border.left)).0,
+                            top_right: (radii.top_right - border.top.max(border.right)).0,
+                            bottom_right: (radii.bottom_right - border.bottom.max(border.right)).0,
+                            bottom_left: (radii.bottom_left - border.bottom.max(border.left)).0,
+                        },
+                        Edges::default(),
+                    )
+                } else {
+                    MaskCorners::default()
+                };
 
                 let bounds = match (
                     self.overflow.x == Overflow::Visible,
@@ -958,7 +983,11 @@ impl Style {
                     fade_out.bottom = Pixels::ZERO;
                 }
 
-                Some(ContentMask { bounds, fade_out })
+                Some(ContentMask {
+                    bounds,
+                    fade_out,
+                    corners,
+                })
             }
         }
     }

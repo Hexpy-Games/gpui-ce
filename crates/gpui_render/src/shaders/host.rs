@@ -26,11 +26,29 @@ impl From<gpui::Edges<gpui::ScaledPixels>> for common::Edges {
     }
 }
 
+impl From<gpui::MaskCorners> for common::MaskCorners {
+    fn from(corners: gpui::MaskCorners) -> Self {
+        let [
+            radii_top,
+            radii_bottom,
+            outsets_top_right,
+            outsets_bottom_left,
+        ] = corners.packed();
+        Self {
+            radii_top,
+            radii_bottom,
+            outsets_top_right,
+            outsets_bottom_left,
+        }
+    }
+}
+
 impl From<gpui::ContentMask<gpui::ScaledPixels>> for common::ContentMask {
     fn from(mask: gpui::ContentMask<gpui::ScaledPixels>) -> Self {
         Self {
             bounds: mask.bounds.into(),
             fade_out: mask.fade_out.into(),
+            corners: mask.corners.into(),
         }
     }
 }

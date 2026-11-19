@@ -1,5 +1,5 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
-use gpui::{Bounds, Corners, Point, ScaledPixels};
+use gpui::{Bounds, ContentMask, Corners, Point, ScaledPixels};
 use gpui_render::shaders::interface as shader_interface;
 use gpui_render::{
     blur::{
@@ -20,7 +20,7 @@ pub(super) struct FrameUniformRequirements {
     pub(super) surface_count: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 496);
+const _: () = assert!(std::mem::size_of::<BlurUniforms>() == 512);
 
 impl WgpuRenderer {
     pub(super) fn draw_filter_pass(
@@ -282,7 +282,10 @@ impl WgpuRenderer {
             let (uniforms, pipeline) = self.composite_draw(
                 FilterCompositeParameters {
                     bounds,
-                    content_mask: bounds,
+                    content_mask: ContentMask {
+                        bounds,
+                        ..Default::default()
+                    },
                     corner_radii: Corners::default(),
                     corner_smoothing: 0.0,
                     blur_radius: 0.0,

@@ -140,20 +140,96 @@ mod source {
         pub size: Vec2f,
     }
 
+    /// `gpui::MaskCorners`: pairs of signed 16-bit fixed-point values (1/16 px, low half first)
+    /// of the rounded rectangle's radii and of how far it extends past the mask's bounds.
+    #[repr(C)]
+    #[derive(Clone, Copy, Wgsl)]
+    pub struct MaskCorners {
+        /// Top-left, top-right radius.
+        pub radii_top: u32,
+        /// Bottom-right, bottom-left radius.
+        pub radii_bottom: u32,
+        /// Top, right outset.
+        pub outsets_top_right: u32,
+        /// Bottom, left outset.
+        pub outsets_bottom_left: u32,
+    }
+
+    impl MaskCorners {
+        /// Coverage of the rounded rectangle at `position`: 1 inside, 0 outside its corner
+        /// arcs, anti-aliased like a quad's edge; 1 everywhere when no corner is rounded.
+        pub fn alpha(corners: MaskCorners, bounds: Bounds, position: Vec2f) -> f32 {
+            if corners.radii_top == 0u32 && corners.radii_bottom == 0u32 {
+                return 1.0;
+            }
+            let top_radii = unpack_mask_pair(corners.radii_top);
+            let bottom_radii = unpack_mask_pair(corners.radii_bottom);
+            let top_right = unpack_mask_pair(corners.outsets_top_right);
+            let bottom_left = unpack_mask_pair(corners.outsets_bottom_left);
+            let near = bounds.origin - vec2f(bottom_left.y, top_right.x);
+            let far = bounds.origin + bounds.size + vec2f(top_right.y, bottom_left.x);
+            let distance = max(
+                max(
+                    mask_corner_distance(near, vec2f(-1.0, -1.0), top_radii.x, position),
+                    mask_corner_distance(
+                        vec2f(far.x, near.y),
+                        vec2f(1.0, -1.0),
+                        top_radii.y,
+                        position,
+                    ),
+                ),
+                max(
+                    mask_corner_distance(far, vec2f(1.0, 1.0), bottom_radii.x, position),
+                    mask_corner_distance(
+                        vec2f(near.x, far.y),
+                        vec2f(-1.0, 1.0),
+                        bottom_radii.y,
+                        position,
+                    ),
+                ),
+            );
+            antialiased_coverage(distance)
+        }
+    }
+
+    /// The two signed 16-bit fixed-point halves of a `MaskCorners` word, low half first.
+    pub fn unpack_mask_pair(word: u32) -> Vec2f {
+        let bits = word as i32;
+        vec2f(((bits << 16u32) >> 16u32) as f32, (bits >> 16u32) as f32) / 16.0
+    }
+
+    /// Signed distance outside one rounded corner of a rectangle (the corner point and its
+    /// outward direction), or -1 when the corner is square: the arc's distance in the corner's
+    /// square, the straight edges' distance beside it.
+    pub fn mask_corner_distance(
+        corner: Vec2f,
+        outward: Vec2f,
+        radius: f32,
+        position: Vec2f,
+    ) -> f32 {
+        if radius <= 0.0 {
+            return -1.0;
+        }
+        let center = corner - outward * radius;
+        length(max((position - center) * outward, vec2f(0.0, 0.0))) - radius
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Wgsl)]
     pub struct ContentMask {
         pub bounds: Bounds,
         pub fade_out: Edges,
+        pub corners: MaskCorners,
     }
 
     impl ContentMask {
         /// The mask's coverage at the given window-space position: 1 inside,
-        /// 0 outside, and a linear ramp to 0 across each edge's fade distance.
+        /// 0 outside, a linear ramp to 0 across each edge's fade distance, and the
+        /// anti-aliased rounded corners.
         pub fn alpha(content_mask: ContentMask, position: Vec2f) -> f32 {
             let bounds = content_mask.bounds;
             let fade = content_mask.fade_out;
-            let mut alpha = 1.0;
+            let mut alpha = MaskCorners::alpha(content_mask.corners, bounds, position);
             if fade.left > 0.0 {
                 alpha *= saturate((position.x - bounds.origin.x) / fade.left);
             }

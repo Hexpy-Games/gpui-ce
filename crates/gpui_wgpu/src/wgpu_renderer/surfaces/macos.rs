@@ -369,6 +369,7 @@ mod tests {
                 content_mask: ContentMask {
                     bounds: bounds(4.0),
                     fade_out: Default::default(),
+                    ..Default::default()
                 },
                 source,
             });

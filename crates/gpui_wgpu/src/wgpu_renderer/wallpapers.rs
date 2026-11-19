@@ -302,7 +302,7 @@ impl WgpuRenderer {
         let size = [last.width as f32, last.height as f32];
         let uniforms = BlurUniforms::composite(
             filter.bounds,
-            filter.content_mask.bounds,
+            filter.content_mask,
             filter.corner_radii,
             0.0,
             filter.opacity,
