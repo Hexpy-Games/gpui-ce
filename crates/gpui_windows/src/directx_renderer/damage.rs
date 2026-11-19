@@ -9,9 +9,9 @@ pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
 }
 
 impl DirectXRenderer {
-    /// Moves the animation clock to the next frame's time, remembering the last frame's.
+    /// Moves the animation clock to the next frame's time. The drawn time is recorded where a
+    /// frame is retained, so a frame that is not retained never advances it.
     pub(super) fn begin_frame_at(&mut self, ms: u32) {
-        self.drawn_animation_time_ms = self.animation_time_ms;
         self.animation_time_ms = ms;
     }
 
@@ -169,6 +169,7 @@ impl DirectXRenderer {
         }
         self.dx_blit(&scene_srv, &swapchain_rtv)?;
         self.retained = Some(generation);
+        self.drawn_animation_time_ms = self.animation_time_ms;
         Ok(true)
     }
 

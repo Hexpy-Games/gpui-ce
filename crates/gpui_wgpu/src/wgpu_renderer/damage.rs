@@ -119,6 +119,9 @@ pub(super) fn render_damage_to_view(
     );
     let submission = submit(renderer, encoder, readback);
     renderer.retained = submission.as_ref().map(|_| generation);
+    if renderer.retained.is_some() {
+        renderer.drawn_animation_time_ms = renderer.animation_time_ms;
+    }
     submission
 }
 

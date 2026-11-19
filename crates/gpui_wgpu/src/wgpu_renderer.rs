@@ -301,9 +301,9 @@ impl WgpuRenderer {
         self.begin_frame_at(ms);
     }
 
-    /// Moves the animation clock to the next frame's time, remembering the last frame's.
+    /// Moves the animation clock to the next frame's time. The drawn time is recorded where a
+    /// frame is retained, so a frame that is not retained never advances it.
     fn begin_frame_at(&mut self, ms: u32) {
-        self.drawn_animation_time_ms = self.animation_time_ms;
         self.animation_time_ms = ms;
     }
 

@@ -1192,6 +1192,9 @@ impl DirectXRenderer {
         }
         self.active_render_target = None;
         self.retained = use_offscreen.then(|| scene.generation());
+        if self.retained.is_some() {
+            self.drawn_animation_time_ms = self.animation_time_ms;
+        }
         self.retained_atlas_epoch = self.atlas.removal_epoch();
         if release_unused {
             unsafe {

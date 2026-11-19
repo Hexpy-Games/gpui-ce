@@ -52,6 +52,9 @@ pub(super) fn render_to_view(
     let keys = encoder.backdrop_keys.clone();
     let submission = submit(renderer, encoder, readback);
     renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
+    if renderer.retained.is_some() {
+        renderer.drawn_animation_time_ms = renderer.animation_time_ms;
+    }
     renderer.frame_keys = (
         gpui_render::backdrop_key::keys_epoch(scene, renderer.animation_time_ms),
         keys,
