@@ -3,7 +3,7 @@ use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Display, Edges, GridTemplate, InlineContent,
     LayoutDirection, Length, Pixels, Point, Position, ResolvedDirection, SharedString, Size, Style,
     UnicodeBidi, VerticalAlign, Window, size,
-    util::{round_half_toward_zero, round_stroke_to_device_pixel, round_to_device_pixel},
+    util::{round_half_toward_zero, round_stroke_to_device_pixel},
 };
 use collections::{FxHashMap, FxHashSet};
 use std::{cell::Cell, fmt::Debug, ops::Range, rc::Rc, sync::Arc};
@@ -372,11 +372,11 @@ impl TaffyLayoutEngine {
         let mut style = style.clone();
         if stretch_width {
             style.size.width =
-                taffy::style::Dimension::length(round_to_device_pixel(size.width.0, scale_factor));
+                taffy::style::Dimension::length(round_to_layout_unit(size.width.0, scale_factor));
         }
         if stretch_height {
             style.size.height =
-                taffy::style::Dimension::length(round_to_device_pixel(size.height.0, scale_factor));
+                taffy::style::Dimension::length(round_to_layout_unit(size.height.0, scale_factor));
         }
         self.taffy.set_style(id.0, style).expect(EXPECT_MESSAGE);
     }
@@ -561,83 +561,11 @@ impl TaffyLayoutEngine {
             .expect(EXPECT_MESSAGE);
     }
 
-    // Pixel snapping
-    //
-    // Painting primitives at non-integer pixel coordinates produces blurry
-    // output. Pixel snapping converts layout coordinates into integer
-    // device-pixel coordinates so painted edges land exactly on physical
-    // pixel boundaries.
-    //
-    // Non-integer coordinates can arise for several reasons, including:
-    //   - flex distribution, percentages, centering, and text measurement
-    //     can produce fractional element sizes and positions;
-    //   - at fractional scale factors (for example 125% or 150%), integer
-    //     logical-pixel values can map to non-integer device-pixel values.
-    //
-    // We pixel-snap by rounding in device-pixel space, after multiplying
-    // by `scale_factor`, so that snapping targets physical pixels. Bounds
-    // are divided by `scale_factor` before being returned to GPUI.
-    //
-    // Midpoints are rounded toward zero. This is a stylistic choice: a
-    // 1-logical-pixel line at 150% scale should render as 1 dp rather than
-    // 2 dp.
-    //
-    // Pixel snapping is done in two phases:
-    //
-    //  1. Pre-layout metric snapping. Before Taffy computes layout, all
-    //     authored absolute lengths are rounded in `to_taffy`. This
-    //     includes borders, padding, gaps, and explicit sizes.
-    //     Custom-measured leaf nodes (text) are not snapped to device
-    //     pixels: their measured sizes are rounded up to the next layout
-    //     unit (1/64 logical px), as Blink does for shaped text widths. A
-    //     whole-device-pixel ceil would widen every text box by up to 1 dp
-    //     and that excess would accumulate along a row.
-    //
-    //  2. Post-layout edge snapping. After Taffy resolves the tree, layout
-    //     relationships such as flex shares, grid tracks, percentages, and
-    //     centering can produce new fractional edge positions. Boxes now
-    //     have edges in absolute coordinates, and snapping must decide
-    //     where those edges land on the device-pixel grid.
-    //
-    // Ideally, post-layout snapping would satisfy:
-    //
-    //  - Edge closure. Two raw layout edges at the same absolute position
-    //    should snap to the same pixel column.
-    //  - Translation stability. A component's internal geometry should not
-    //    change when it moves to a new absolute position.
-    //
-    // These goals are in tension because rounding is not associative.
-    // The simple local schemes make different tradeoffs:
-    //
-    //  - Absolute edge rounding gives each window coordinate one answer,
-    //    so coincident edges always close globally. But a span's snapped
-    //    length is `round(far) - round(near)`, which may change by 1 dp
-    //    as its absolute origin moves.
-    //
-    //  - Parent-relative edge rounding rounds each child inside its
-    //    parent's coordinate space. This guarantees translation stability,
-    //    but a shared edge reached through different parents can
-    //    accumulate different rounding, causing non-closure between
-    //    cousins.
-    //
-    //  - Length rounding rounds each width, height, and thickness
-    //    independently and then places boxes from those rounded lengths.
-    //    Sizes stay stable under translation, but neighboring boxes derive
-    //    their shared boundary from different sources, so closure is not
-    //    guaranteed.
-    //
-    // We apply absolute edge rounding for each element's outer box in
-    // post-layout rounding to preserve closure. Border and padding widths
-    // are not touched by post-layout rounding; they keep their pre-layout
-    // rounded value so that they remain stable under translation.
-    //
-    // This gives both closure and translation stability in the case that
-    // all local metrics are integer device-pixel lengths. Pre-layout
-    // rounding covers that in most cases. The exception is metrics
-    // resolved by layout relationships, such as percentages. Outer box
-    // edges will still close globally, and painted border widths are still
-    // snapped independently, but the raw content-box origin can carry a
-    // 1dp residual into descendants.
+    // Authored absolute lengths round to the nearest 1/64 logical pixel before scaling,
+    // preserving fractional device-pixel lengths throughout layout.
+    // Measured text sizes round up to the same layout unit.
+    // Border widths retain whole-device-pixel stroke snapping before layout.
+    // After layout, absolute box edges snap to device pixels in layout_bounds.
 
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
@@ -737,6 +665,10 @@ impl From<LayoutId> for NodeId {
 /// Layout units per logical pixel (Blink's `LayoutUnit` is 1/64 CSS px).
 const LAYOUT_UNITS_PER_PIXEL: f32 = 64.0;
 
+fn round_to_layout_unit(logical: f32, scale_factor: f32) -> f32 {
+    (logical * LAYOUT_UNITS_PER_PIXEL).round() / LAYOUT_UNITS_PER_PIXEL * scale_factor
+}
+
 /// Rounds a measured size up to the next layout unit and converts it to device space.
 ///
 /// Rounding up keeps a box at least as wide as its glyph run, so measuring again at that
@@ -764,90 +696,6 @@ fn border_widths_to_taffy(
         right: snap(&widths.right),
         bottom: snap(&widths.bottom),
         left: snap(&widths.left),
-    }
-}
-
-// Converts padding, snapping each auto-sized axis as a proportional pair.
-fn padding_to_taffy(
-    padding: &Edges<DefiniteLength>,
-    rem_size: Pixels,
-    scale_factor: f32,
-    proportional_horizontal: bool,
-    proportional_vertical: bool,
-) -> TaffyRect<taffy::style::LengthPercentage> {
-    // Snaps the combined length, then divides it by the authored ratio.
-    fn snap_absolute_pair(
-        first: AbsoluteLength,
-        second: AbsoluteLength,
-        rem_size: Pixels,
-        scale_factor: f32,
-    ) -> (f32, f32) {
-        let first = first.to_pixels(rem_size).0;
-        let second = second.to_pixels(rem_size).0;
-        let total = first + second;
-
-        if first < 0.0 || second < 0.0 || total == 0.0 {
-            return (
-                round_to_device_pixel(first, scale_factor),
-                round_to_device_pixel(second, scale_factor),
-            );
-        }
-
-        let snapped_total = round_to_device_pixel(total, scale_factor);
-        let snapped_first = snapped_total * (first / total);
-
-        (snapped_first, snapped_total - snapped_first)
-    }
-
-    // Keeps normal per-edge conversion for explicit axes and percentage padding.
-    fn convert_pair(
-        first: &DefiniteLength,
-        second: &DefiniteLength,
-        rem_size: Pixels,
-        scale_factor: f32,
-        proportional: bool,
-    ) -> (
-        taffy::style::LengthPercentage,
-        taffy::style::LengthPercentage,
-    ) {
-        if proportional
-            && let (DefiniteLength::Absolute(first), DefiniteLength::Absolute(second)) =
-                (*first, *second)
-        {
-            let (first, second) = snap_absolute_pair(first, second, rem_size, scale_factor);
-
-            (
-                taffy::style::LengthPercentage::length(first),
-                taffy::style::LengthPercentage::length(second),
-            )
-        } else {
-            (
-                first.to_taffy(rem_size, scale_factor),
-                second.to_taffy(rem_size, scale_factor),
-            )
-        }
-    }
-
-    let (left, right) = convert_pair(
-        &padding.left,
-        &padding.right,
-        rem_size,
-        scale_factor,
-        proportional_horizontal,
-    );
-    let (top, bottom) = convert_pair(
-        &padding.top,
-        &padding.bottom,
-        rem_size,
-        scale_factor,
-        proportional_vertical,
-    );
-
-    TaffyRect {
-        top,
-        right,
-        bottom,
-        left,
     }
 }
 
@@ -911,13 +759,7 @@ impl ToTaffy<taffy::style::Style> for Style {
             max_size: self.max_size.to_taffy(rem_size, scale_factor),
             aspect_ratio: self.aspect_ratio,
             margin: self.margin.to_taffy(rem_size, scale_factor),
-            padding: padding_to_taffy(
-                &self.padding,
-                rem_size,
-                scale_factor,
-                self.size.width == Length::Auto,
-                self.size.height == Length::Auto,
-            ),
+            padding: self.padding.to_taffy(rem_size, scale_factor),
             border: border_widths_to_taffy(&self.border_widths, rem_size, scale_factor),
             align_items: self.align_items.map(|x| x.into()),
             align_self: self.align_self.map(|x| x.into()),
@@ -949,7 +791,7 @@ impl ToTaffy<taffy::style::Style> for Style {
 
 impl ToTaffy<f32> for AbsoluteLength {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> f32 {
-        round_to_device_pixel(self.to_pixels(rem_size).0, scale_factor)
+        round_to_layout_unit(self.to_pixels(rem_size).0, scale_factor)
     }
 }
 
@@ -1334,15 +1176,15 @@ mod tests {
         };
 
         let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
-        let expected_left = 7.0 * (2.5 / 7.5);
+        let expected_left = 2.5;
         assert_eq!(padding.left, LengthPercentage::length(expected_left));
-        assert_eq!(padding.right, LengthPercentage::length(7.0 - expected_left));
+        assert_eq!(padding.right, LengthPercentage::length(5.0));
         assert_eq!(padding.top, LengthPercentage::length(6.5));
         assert_eq!(padding.bottom, LengthPercentage::length(6.5));
 
         style.size.width = Length::Definite(Pixels(100.0).into());
         let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
-        assert_eq!(padding.left, LengthPercentage::length(2.0));
+        assert_eq!(padding.left, LengthPercentage::length(2.5));
         assert_eq!(padding.right, LengthPercentage::length(5.0));
         assert_eq!(padding.top, LengthPercentage::length(6.5));
         assert_eq!(padding.bottom, LengthPercentage::length(6.5));
