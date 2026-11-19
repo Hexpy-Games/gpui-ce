@@ -889,9 +889,14 @@ impl Scene {
     }
 
     /// Damage over a retained frame, including wallpaper slots not yet drawn by the renderer.
+    /// A backdrop filter's appear motion damages it while it runs at `now_ms`, and once more
+    /// when the retained frame was drawn at `drawn_ms` before it ended, so the settled state is
+    /// painted.
     pub fn damage_plan_with_wallpapers(
         &self,
         retained: Option<u64>,
+        now_ms: u32,
+        drawn_ms: u32,
         changed: impl Fn(&WallpaperPaint) -> bool,
     ) -> Option<std::borrow::Cow<'_, DamagePlan>> {
         if !self.backdrop_filters.iter().any(|filter| {
@@ -899,6 +904,9 @@ impl Scene {
                 .wallpaper
                 .as_ref()
                 .is_some_and(|paint| paint.clock.is_some())
+                || filter
+                    .appear
+                    .is_some_and(|appear| appear.motion.is_animated())
         }) {
             return self
                 .damage_plan_over(retained)
@@ -916,7 +924,10 @@ impl Scene {
             )
         };
         Some(std::borrow::Cow::Owned(damage::plan_with_wallpapers(
-            self, seed, changed,
+            self,
+            seed,
+            changed,
+            |motion| motion.is_active(now_ms) || motion.is_active(drawn_ms),
         )))
     }
 
@@ -1622,7 +1633,8 @@ pub struct BackdropFilter {
     pub wallpaper: Option<WallpaperPaint>,
 }
 
-/// Starting lens and blur in device pixels, with appearance timing.
+/// Starting lens and blur in device pixels, with appearance timing; the motion's opacity is the
+/// filter's presence (see [`backdrop_presence`]).
 #[derive(Debug, Clone, Copy)]
 #[expect(missing_docs)]
 pub struct BackdropAppear {
@@ -1643,6 +1655,16 @@ pub fn backdrop_appear_parameters(filter: &BackdropFilter, now_ms: u32) -> (Back
     } else {
         (filter.lens, blur)
     }
+}
+
+/// How present a backdrop filter is at the wrapping animation clock value: its appear motion's
+/// opacity, 1 without one. The composite fades by it, so a glass at presence 0 draws nothing and
+/// one at presence 1 draws as if it had no appear motion.
+pub fn backdrop_presence(filter: &BackdropFilter, now_ms: u32) -> f32 {
+    filter.appear.map_or(1.0, |appear| {
+        let (from, to) = appear.motion.opacity;
+        (from + (to - from) * appear.motion.progress(now_ms)).clamp(0.0, 1.0)
+    })
 }
 
 /// One fullscreen shader pass of a [`WallpaperPaint`], rendered into its own cached texture of
@@ -1750,6 +1772,13 @@ impl BackdropFilter {
     /// Largest gaussian blur radius in this filter chain, in device pixels.
     pub fn max_blur_radius(&self) -> f32 {
         max_blur_radius(&self.filters)
+    }
+
+    /// Largest blur radius this filter draws with over its appear range, in device pixels: what
+    /// its blur targets, sampling region and cache requirement must cover.
+    pub fn required_blur_radius(&self) -> f32 {
+        self.max_blur_radius()
+            .max(self.appear.map_or(0.0, |appear| appear.blur))
     }
 }
 

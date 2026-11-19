@@ -123,7 +123,7 @@ impl WgpuRenderer {
 
     /// Acquires, renders, and presents one native or canvas surface frame.
     pub fn draw(&mut self, scene: &Scene) -> bool {
-        self.animation_time_ms = gpui::animation_time_ms();
+        self.begin_frame_at(gpui::animation_time_ms());
         self.present_frame(|renderer, view| {
             damage::render_damage_to_view(renderer, scene, view, None).is_some()
                 || renderer.render_to_view(scene, view)
@@ -134,7 +134,7 @@ impl WgpuRenderer {
     /// animated area over the retained frame, and falls back to a full encode when that is not
     /// possible. Returns what [`Self::draw`] returns.
     pub fn draw_animation_frame(&mut self, scene: &Scene) -> bool {
-        self.animation_time_ms = gpui::animation_time_ms();
+        self.begin_frame_at(gpui::animation_time_ms());
         self.present_frame(|renderer, view| {
             damage::render_damage_to_view(renderer, scene, view, None).is_some()
                 || frame::render_to_view(renderer, scene, view, None, false).is_some()

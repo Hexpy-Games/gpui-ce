@@ -103,6 +103,8 @@ pub(crate) struct DirectXRenderer {
     wallpapers: wallpapers::DxWallpaperCacheCell,
     /// The animation clock the shaders read, in milliseconds.
     animation_time_ms: u32,
+    /// The animation clock of the frame before, which the offscreen scene target still holds.
+    drawn_animation_time_ms: u32,
     /// Generation of the scene whose complete frame the offscreen scene target holds.
     retained: Option<u64>,
     retained_atlas_epoch: u64,
@@ -705,6 +707,7 @@ impl DirectXRenderer {
             path_sprites: Vec::new(),
             wallpapers: Default::default(),
             animation_time_ms: 0,
+            drawn_animation_time_ms: 0,
             retained: None,
             retained_atlas_epoch: 0,
             uploaded_generation: None,
@@ -945,7 +948,7 @@ impl DirectXRenderer {
             });
             keys.push(Some(group.key));
         }
-        self.animation_time_ms = gpui::animation_time_ms();
+        self.begin_frame_at(gpui::animation_time_ms());
         self.retain_surfaces(scene);
         if !self.render_damage(scene)? {
             self.render(scene, background_appearance, true)?;
@@ -1189,6 +1192,9 @@ impl DirectXRenderer {
         }
         self.active_render_target = None;
         self.retained = use_offscreen.then(|| scene.generation());
+        if self.retained.is_some() {
+            self.drawn_animation_time_ms = self.animation_time_ms;
+        }
         self.retained_atlas_epoch = self.atlas.removal_epoch();
         if release_unused {
             unsafe {
@@ -1232,8 +1238,9 @@ impl DirectXRenderer {
             .as_ref()
             .and_then(|devices| devices.annotation.clone())
             .filter(|annotation| unsafe { annotation.GetStatus().as_bool() });
-        let backdrop_keys = if damage.is_some() && self.frame_keys.0 == scene.generation() {
-            // Reuse keys only for the same generation.
+        let epoch = gpui_render::backdrop_key::keys_epoch(scene, self.animation_time_ms);
+        let backdrop_keys = if damage.is_some() && self.frame_keys.0 == epoch {
+            // Reuse keys only for the same generation and appear motions still running.
             self.frame_keys.1.clone()
         } else if scene.backdrop_filters.is_empty() {
             Vec::new()
@@ -1244,9 +1251,10 @@ impl DirectXRenderer {
                     DevicePixels(self.width as i32),
                     DevicePixels(self.height as i32),
                 ),
+                self.animation_time_ms,
             )
         };
-        self.frame_keys = (scene.generation(), backdrop_keys.clone());
+        self.frame_keys = (epoch, backdrop_keys.clone());
         for command in commands {
             let _annotation = annotation
                 .as_ref()
@@ -1304,6 +1312,10 @@ impl DirectXRenderer {
                                 self.dx_draw_wallpaper(current_rtv, filter, paint)?;
                                 continue;
                             }
+                            let presence = backdrop_presence(filter, self.animation_time_ms);
+                            if presence <= 0.0 {
+                                continue;
+                            }
                             let (lens, radius) =
                                 backdrop_appear_parameters(filter, self.animation_time_ms);
                             let region = backdrop_snapshot_region(
@@ -1357,7 +1369,7 @@ impl DirectXRenderer {
                                 filter.corner_radii,
                                 filter.corner_smoothing,
                                 radius,
-                                filter.opacity,
+                                filter.opacity * presence,
                                 FilterCompositeClip::RoundedBounds,
                                 Bounds::default(),
                                 1.0,

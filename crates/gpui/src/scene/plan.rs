@@ -165,8 +165,9 @@ pub(super) fn requirements_for(scene: &Scene, commands: &[RenderCommand]) -> Sce
             RenderCommand::Batch(batch) => {
                 if let PrimitiveBatch::BackdropFilters(range) = batch {
                     let filters = &scene.backdrop_filters[range.clone()];
-                    requirements.uses_blur_target |=
-                        filters.iter().any(|filter| filter.max_blur_radius() > 0.0);
+                    requirements.uses_blur_target |= filters
+                        .iter()
+                        .any(|filter| filter.required_blur_radius() > 0.0);
                     requirements.backdrop_lens_count += filters
                         .iter()
                         .filter(|filter| filter.lens.is_active())

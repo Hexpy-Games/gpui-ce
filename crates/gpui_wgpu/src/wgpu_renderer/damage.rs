@@ -16,13 +16,18 @@ pub(super) fn render_damage_to_view(
     frame_view: &wgpu::TextureView,
     readback: Option<ReadbackCopy<'_>>,
 ) -> Option<wgpu::SubmissionIndex> {
-    let damage = scene.damage_plan_with_wallpapers(renderer.retained, |paint| {
-        renderer
-            .resources()
-            .wallpapers
-            .borrow()
-            .slot_changed(paint, renderer.animation_time_ms)
-    })?;
+    let damage = scene.damage_plan_with_wallpapers(
+        renderer.retained,
+        renderer.animation_time_ms,
+        renderer.drawn_animation_time_ms,
+        |paint| {
+            renderer
+                .resources()
+                .wallpapers
+                .borrow()
+                .slot_changed(paint, renderer.animation_time_ms)
+        },
+    )?;
     let DamagePlan::Partial(plan) = damage.as_ref() else {
         return None;
     };
@@ -77,10 +82,15 @@ pub(super) fn render_damage_to_view(
     if !gpui_render::damage_fits(scissor, renderer.target.viewport_size()) {
         return None;
     }
-    if renderer.frame_keys.0 != generation {
+    let epoch = gpui_render::backdrop_key::keys_epoch(scene, renderer.animation_time_ms);
+    if renderer.frame_keys.0 != epoch {
         renderer.frame_keys = (
-            generation,
-            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size()),
+            epoch,
+            gpui_render::backdrop_key::backdrop_keys(
+                scene,
+                renderer.target.viewport_size(),
+                renderer.animation_time_ms,
+            ),
         );
     }
     if !backdrops_cached(renderer, scene, plan) {
@@ -109,6 +119,9 @@ pub(super) fn render_damage_to_view(
     );
     let submission = submit(renderer, encoder, readback);
     renderer.retained = submission.as_ref().map(|_| generation);
+    if renderer.retained.is_some() {
+        renderer.drawn_animation_time_ms = renderer.animation_time_ms;
+    }
     submission
 }
 

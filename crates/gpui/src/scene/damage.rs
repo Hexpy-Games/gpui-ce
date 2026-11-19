@@ -378,6 +378,7 @@ fn changed_area(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
     wallpaper_changed: impl Fn(&super::WallpaperPaint) -> bool,
+    appear_changed: impl Fn(&super::LayerMotion) -> bool,
 ) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize; 4]>)> {
     let mut changed: Vec<(Bounds<ScaledPixels>, DrawOrder)> = Vec::new();
     for sprite in scene
@@ -433,7 +434,7 @@ fn changed_area(
         }
         if filter
             .appear
-            .is_some_and(|appear| appear.motion.is_animated())
+            .is_some_and(|appear| appear_changed(&appear.motion))
         {
             changed.push((filter.painted_bounds(), filter.order));
             reblur.push(index);
@@ -487,7 +488,9 @@ fn changed_area(
 }
 
 pub(super) fn plan(scene: &Scene) -> DamagePlan {
-    let Some((rect, reblur)) = changed_area(scene, None, |_| false) else {
+    let Some((rect, reblur)) =
+        changed_area(scene, None, |_| false, super::LayerMotion::is_animated)
+    else {
         return DamagePlan::Full;
     };
     if rect.is_empty() {
@@ -502,8 +505,14 @@ pub(super) fn plan(scene: &Scene) -> DamagePlan {
 }
 
 pub(super) fn plan_over(scene: &Scene, rect: Option<Bounds<ScaledPixels>>) -> DamagePlan {
-    let Some((rect, reblur)) = rect.and_then(|rect| changed_area(scene, Some(rect), |_| false))
-    else {
+    let Some((rect, reblur)) = rect.and_then(|rect| {
+        changed_area(
+            scene,
+            Some(rect),
+            |_| false,
+            super::LayerMotion::is_animated,
+        )
+    }) else {
         return DamagePlan::Full;
     };
     select_commands(scene, rect, reblur)
@@ -513,8 +522,9 @@ pub(super) fn plan_with_wallpapers(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
     changed: impl Fn(&super::WallpaperPaint) -> bool,
+    appear_changed: impl Fn(&super::LayerMotion) -> bool,
 ) -> DamagePlan {
-    let Some((rect, reblur)) = changed_area(scene, seed, changed) else {
+    let Some((rect, reblur)) = changed_area(scene, seed, changed, appear_changed) else {
         return DamagePlan::Full;
     };
     select_commands(scene, rect, reblur)

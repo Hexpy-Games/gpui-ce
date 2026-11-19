@@ -8,7 +8,7 @@ use super::{
 use gpui::{
     BackdropFilter, Bounds, DamageRedraw, DevicePixels, FilterRenderTarget, MonochromeSprite,
     Point, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements,
-    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters,
+    Shadow, Size, SubpixelSprite, Underline, backdrop_appear_parameters, backdrop_presence,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{
@@ -52,7 +52,13 @@ pub(super) fn render_to_view(
     let keys = encoder.backdrop_keys.clone();
     let submission = submit(renderer, encoder, readback);
     renderer.retained = (submission.is_some() && offscreen).then(|| scene.generation());
-    renderer.frame_keys = (scene.generation(), keys);
+    if renderer.retained.is_some() {
+        renderer.drawn_animation_time_ms = renderer.animation_time_ms;
+    }
+    renderer.frame_keys = (
+        gpui_render::backdrop_key::keys_epoch(scene, renderer.animation_time_ms),
+        keys,
+    );
     renderer.retained_atlas_epoch = renderer.atlas.removal_epoch();
     if submission.is_some() && release_unused {
         renderer.resources_mut().release_unused(&planned);
@@ -411,7 +417,7 @@ pub(super) struct FrameEncoder<'a> {
 
 /// Whether compositing `filter` reads a blurred backdrop that the cache can supply.
 pub(super) fn uses_blurred_backdrop(filter: &BackdropFilter) -> bool {
-    BlurKernel::for_radius(filter.max_blur_radius()).is_some() || filter.lens.is_active()
+    BlurKernel::for_radius(filter.required_blur_radius()).is_some() || filter.lens.is_active()
 }
 
 impl<'a> FrameEncoder<'a> {
@@ -430,13 +436,21 @@ impl<'a> FrameEncoder<'a> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("gpui_frame"),
                 });
-        let backdrop_keys = if damage.is_some() && renderer.frame_keys.0 == scene.generation() {
-            // Reuse keys only for the same generation.
+        let animation_time_ms = renderer.animation_time_ms;
+        let backdrop_keys = if damage.is_some()
+            && renderer.frame_keys.0
+                == gpui_render::backdrop_key::keys_epoch(scene, animation_time_ms)
+        {
+            // Reuse keys only for the same generation and appear motions still running.
             renderer.frame_keys.1.clone()
         } else if scene.backdrop_filters.is_empty() {
             Vec::new()
         } else {
-            gpui_render::backdrop_key::backdrop_keys(scene, renderer.target.viewport_size())
+            gpui_render::backdrop_key::backdrop_keys(
+                scene,
+                renderer.target.viewport_size(),
+                animation_time_ms,
+            )
         };
         Self {
             renderer,
@@ -570,6 +584,10 @@ impl<'a> FrameEncoder<'a> {
                             }
                             continue;
                         }
+                        let presence = backdrop_presence(filter, self.renderer.animation_time_ms);
+                        if presence <= 0.0 {
+                            continue;
+                        }
                         let (lens, radius) =
                             backdrop_appear_parameters(filter, self.renderer.animation_time_ms);
                         let [width, height] = self.size;
@@ -632,7 +650,7 @@ impl<'a> FrameEncoder<'a> {
                             corner_radii: filter.corner_radii,
                             corner_smoothing: filter.corner_smoothing,
                             blur_radius: radius,
-                            opacity: filter.opacity,
+                            opacity: filter.opacity * presence,
                             scale: 1.0,
                             scale_origin: Point::default(),
                             composite_offset: Point::default(),
