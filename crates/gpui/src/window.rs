@@ -7097,9 +7097,12 @@ impl Window {
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
-                // If this was a mouse move event, redraw the window so that the
-                // active drag can follow the mouse cursor.
-                self.refresh();
+                // A drag move redraws without rebuilding cached views: the drag preview is laid
+                // out on every draw, and elements with drag-over styles notify their own view
+                // when the pointer enters or leaves them (div.rs).
+                if self.invalidator.not_drawing() {
+                    self.invalidator.set_dirty(true);
+                }
             } else if event.is::<MouseUpEvent>() {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
@@ -9858,6 +9861,112 @@ mod tests {
         .unwrap();
 
         assert_eq!(child_bounds.get().size, size(px(300.), px(200.)));
+    }
+
+    struct DragSourceView(Rc<Cell<usize>>);
+
+    impl Render for DragSourceView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            div()
+                .id("drag-source")
+                .size_full()
+                .on_drag((), |_, _, _, cx| cx.new(|_| Empty))
+        }
+    }
+
+    struct DragOverView(Rc<Cell<usize>>);
+
+    impl Render for DragOverView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            div()
+                .size_full()
+                .on_drag_over::<()>(|style, _, _, _| style.bg(crate::red()))
+        }
+    }
+
+    struct CachedDragRoot {
+        source: Entity<DragSourceView>,
+        target: Entity<DragOverView>,
+    }
+
+    impl Render for CachedDragRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().w(px(200.)).h(px(100.)).children(
+                [
+                    AnyView::from(self.source.clone()),
+                    AnyView::from(self.target.clone()),
+                ]
+                .into_iter()
+                .map(|view| view.cached(crate::StyleRefinement::default().size(px(100.)))),
+            )
+        }
+    }
+
+    #[test]
+    fn drag_move_rebuilds_only_views_whose_drag_over_state_changes() {
+        let source_renders = Rc::new(Cell::new(0));
+        let target_renders = Rc::new(Cell::new(0));
+        let mut app = TestApp::new();
+        let mut test_window = app.open_window(|_, cx| CachedDragRoot {
+            source: cx.new(|_| DragSourceView(source_renders.clone())),
+            target: cx.new(|_| DragOverView(target_renders.clone())),
+        });
+        test_window.draw();
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(20.), px(20.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.active_drag.is_some());
+        });
+        test_window.draw();
+        let source_count = source_renders.get();
+        let target_count = target_renders.get();
+        let mut event = MouseMoveEvent {
+            position: point(px(30.), px(20.)),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Default::default(),
+        };
+        for x in [30., 40.] {
+            event.position.x = px(x);
+            test_window.update(|_, window, cx| {
+                window.dispatch_event(event.clone().to_platform_input(), cx);
+            });
+            test_window.draw();
+            assert_eq!(source_renders.get(), source_count);
+            assert_eq!(target_renders.get(), target_count);
+        }
+        event.position.x = px(110.);
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(event.clone().to_platform_input(), cx);
+        });
+        test_window.draw();
+        assert!(target_renders.get() > target_count);
+        let target_count = target_renders.get();
+        event.position.x = px(120.);
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(event.to_platform_input(), cx);
+        });
+        test_window.draw();
+        assert_eq!(target_renders.get(), target_count);
     }
 
     struct FileDragView {

@@ -3811,6 +3811,43 @@ impl Interactivity {
             });
         }
 
+        // Drag-over styles resolve while the view renders; a drag move no longer refreshes
+        // the window, so the view is notified when the pointer crosses this element (or
+        // its drag-over group).
+        if cx.active_drag.is_some()
+            && (self.has_drag_over_styles() || !self.group_drag_over_styles.is_empty())
+        {
+            let hitbox = hitbox.clone();
+            let groups: Vec<_> = self
+                .group_drag_over_styles
+                .iter()
+                .filter_map(|(_, group)| GroupHitboxes::get(&group.group, cx))
+                .collect();
+            let painted = (
+                hitbox.is_hovered(window),
+                groups
+                    .iter()
+                    .map(|id| id.is_hovered(window))
+                    .collect::<Vec<_>>(),
+            );
+            let current_view = window.current_view();
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture {
+                    return;
+                }
+                let now = (
+                    hitbox.is_hovered(window),
+                    groups
+                        .iter()
+                        .map(|id| id.is_hovered(window))
+                        .collect::<Vec<_>>(),
+                );
+                if now != painted {
+                    cx.notify(current_view);
+                }
+            });
+        }
+
         if let Some(group_hover) = self.group_hover_style.as_ref() {
             if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
                 let hover_state = element_state
