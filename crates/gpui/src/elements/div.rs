@@ -5712,6 +5712,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn rounded_overflow_clip_excludes_its_corners_from_hit_testing(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            div()
+                .size(px(100.))
+                .rounded(px(20.))
+                .overflow_hidden()
+                .child(div().id("child").size_full().on_click(|_, _, _| {}))
+        });
+
+        let hitbox = window.update(|window, _| {
+            window
+                .rendered_frame
+                .hitboxes
+                .last()
+                .expect("the child should insert a hitbox")
+                .clone()
+        });
+        // Outside the corner arc (centre (20, 20), radius 20), then just inside it.
+        assert!(!hitbox.contains(&point(px(3.), px(3.))));
+        assert!(hitbox.contains(&point(px(7.), px(7.))));
+        assert!(hitbox.contains(&point(px(0.5), px(50.))));
+    }
+
+    #[gpui::test]
     fn inline_div_places_element_children_in_text_flow(cx: &mut TestAppContext) {
         let placed_children = Rc::new(RefCell::new(Vec::new()));
         let captured_bounds = placed_children.clone();

@@ -220,6 +220,7 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         "BlurUniforms",
         bounds,
         content_mask,
+        content_mask_corners,
         corner_radii,
         direction,
         standard_deviation,
@@ -287,6 +288,7 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         xy_position,
         curve_position,
         color,
-        bounds
+        bounds,
+        mask_corners
     ),
 ];

@@ -78,10 +78,12 @@ use crate::Inspector;
 use crate::profiler;
 
 pub(crate) mod a11y;
+mod mask_corners;
 mod prompts;
 
 use a11y::A11y;
 pub use a11y::A11ySubtreeBuilder;
+pub use mask_corners::MaskCorners;
 pub use prompts::*;
 
 fn quantize_glyph_origin(origin: Point<ScaledPixels>) -> (Point<ScaledPixels>, Point<u8>) {
@@ -986,7 +988,7 @@ pub struct Hitbox {
 impl Hitbox {
     /// Tests the actual regions, including the content mask, without occlusion checks.
     pub fn contains(&self, point: &Point<Pixels>) -> bool {
-        self.content_mask.bounds.contains(point)
+        self.content_mask.contains(point)
             && self.fragments.as_ref().map_or_else(
                 || self.bounds.contains(point),
                 |fragments| fragments.iter().any(|bounds| bounds.contains(point)),
@@ -2249,9 +2251,9 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future. Edge fades are evaluated in
-/// window space against these axis-aligned bounds and are not transform-aware.
+/// rendered. The mask is its axis-aligned `bounds`, optionally further clipped to a rounded
+/// rectangle (`corners`). Edge fades and corners are evaluated in window space and are not
+/// transform-aware.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2259,14 +2261,49 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Edge fade distances. A zero distance leaves that edge fully opaque.
     pub fade_out: Edges<P>,
+    /// The rounded rectangle the mask also clips to, relative to `bounds` and in the same units.
+    /// The default clips to `bounds` alone.
+    pub corners: MaskCorners,
+}
+
+/// A rectangle's edges as plain numbers, the form [`MaskCorners`] works in.
+pub(crate) fn mask_edges<P>(bounds: &Bounds<P>, value: impl Fn(P) -> f32) -> Edges<f32>
+where
+    P: Clone + Debug + Default + PartialEq + std::ops::Add<Output = P>,
+{
+    Edges {
+        top: value(bounds.top()),
+        right: value(bounds.right()),
+        bottom: value(bounds.bottom()),
+        left: value(bounds.left()),
+    }
 }
 
 impl ContentMask<Pixels> {
+    /// A mask that clips to `bounds` with the given corner radii (clamped to half the short side).
+    pub fn rounded(bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>) -> Self {
+        let radii = corner_radii.clamp_radii_for_quad_size(bounds.size);
+        Self {
+            bounds,
+            fade_out: Edges::default(),
+            corners: MaskCorners::new(radii.map(|radius| radius.0), Edges::default()),
+        }
+    }
+
+    /// Whether `point` is visible through the mask: inside its bounds and its rounded corners.
+    pub fn contains(&self, point: &Point<Pixels>) -> bool {
+        self.bounds.contains(point)
+            && self
+                .corners
+                .contains(mask_edges(&self.bounds, f32::from), point.x.0, point.y.0)
+    }
+
     /// Scale the content mask's pixel units by the given scaling factor.
     pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             fade_out: self.fade_out.scale(factor),
+            corners: self.corners.scale(factor),
         }
     }
 
@@ -2274,6 +2311,8 @@ impl ContentMask<Pixels> {
     ///
     /// For each edge, the mask that actually clips at that edge contributes its
     /// fade; when both masks clip at the same coordinate, the stronger fade wins.
+    /// `self` is the inner mask: the result clips to its rounded rectangle when it has one, and
+    /// otherwise to `other`'s, so a plain mask inside a rounded one keeps the rounded corners.
     pub fn intersect(&self, other: &Self) -> Self {
         fn edge_fade(
             a: Pixels,
@@ -2291,8 +2330,13 @@ impl ContentMask<Pixels> {
             }
         }
 
+        let bounds = self.bounds.intersect(&other.bounds);
+        let rounded = if self.corners.is_rounded() {
+            self
+        } else {
+            other
+        };
         ContentMask {
-            bounds: self.bounds.intersect(&other.bounds),
             fade_out: Edges {
                 top: edge_fade(
                     self.bounds.top(),
@@ -2323,7 +2367,23 @@ impl ContentMask<Pixels> {
                     |a, b| a > b,
                 ),
             },
+            corners: rounded.corners.rebased(
+                mask_edges(&rounded.bounds, f32::from),
+                mask_edges(&bounds, f32::from),
+            ),
+            bounds,
         }
+    }
+}
+
+impl ContentMask<ScaledPixels> {
+    /// The mask's rounded corners expressed against `bounds`, a rectangle inside the mask's
+    /// bounds, for a primitive that clips to that narrower rectangle instead.
+    pub fn corners_within(&self, bounds: &Bounds<ScaledPixels>) -> MaskCorners {
+        self.corners.rebased(
+            mask_edges(&self.bounds, |value| value.0),
+            mask_edges(bounds, |value| value.0),
+        )
     }
 }
 
@@ -2338,6 +2398,7 @@ mod content_mask_tests {
                 left: px(fade_left),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -2349,6 +2410,22 @@ mod content_mask_tests {
 
         let child = mask(0., 40., 0.);
         assert_eq!(outer.intersect(&child).fade_out.left, px(20.));
+    }
+
+    #[test]
+    fn intersect_keeps_the_innermost_rounded_rect_in_place() {
+        let card = ContentMask::rounded(
+            Bounds::new(point(px(0.), px(0.)), size(px(100.), px(80.))),
+            Corners::all(px(16.)),
+        );
+        let scroller = mask(4., 96., 0.);
+        let clipped = scroller.intersect(&card);
+        assert_eq!(clipped.bounds, scroller.bounds);
+        assert_eq!(clipped.corners.radii(), Corners::all(16.));
+        assert_eq!(clipped.corners.outsets().left, 4.);
+
+        let inner_card = ContentMask::rounded(scroller.bounds, Corners::all(px(6.)));
+        assert_eq!(inner_card.intersect(&card).corners, inner_card.corners);
     }
 }
 
@@ -3387,10 +3464,34 @@ impl Window {
 
     #[inline]
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
-        let mask = self.content_mask();
+        self.snap_content_mask(&self.content_mask())
+    }
+
+    /// The mask in device pixels: its bounds grow to cover whole pixels, and its rounded
+    /// rectangle snaps like a quad's bounds so its arcs land on the rounded box's own arcs.
+    fn snap_content_mask(&self, mask: &ContentMask<Pixels>) -> ContentMask<ScaledPixels> {
+        let bounds = self.cover_bounds(mask.bounds);
+        let mut corners = mask.corners;
+        if corners.is_rounded() {
+            let outsets = corners.outsets();
+            let rounded = self.snap_bounds(mask.bounds.extend(Edges {
+                top: px(outsets.top),
+                right: px(outsets.right),
+                bottom: px(outsets.bottom),
+                left: px(outsets.left),
+            }));
+            let rounded = mask_edges(&rounded, |value| value.0);
+            let scale_factor = self.scale_factor();
+            corners = MaskCorners::new(
+                corners.radii().map(|radius| radius * scale_factor),
+                Edges::default(),
+            )
+            .rebased(rounded, mask_edges(&bounds, |value| value.0));
+        }
         ContentMask {
-            bounds: self.cover_bounds(mask.bounds),
+            bounds,
             fade_out: mask.fade_out.scale(self.scale_factor()),
+            corners,
         }
     }
 
@@ -4448,6 +4549,7 @@ impl Window {
             content_mask: ContentMask {
                 bounds,
                 fade_out: Edges::default(),
+                ..Default::default()
             },
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,
@@ -4517,10 +4619,7 @@ impl Window {
         let boundary = FilterBoundary {
             order: 0,
             bounds,
-            content_mask: ContentMask {
-                bounds: self.cover_bounds(parent.bounds),
-                fade_out: parent.fade_out.scale(self.scale_factor()),
-            },
+            content_mask: self.snap_content_mask(&parent),
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,
             filters: SmallVec::new(),
@@ -4547,6 +4646,7 @@ impl Window {
             window.content_mask_stack.push(ContentMask {
                 bounds: viewport,
                 fade_out: Edges::default(),
+                ..Default::default()
             });
             let result = paint(window);
             window.content_mask_stack.pop();
@@ -4572,6 +4672,7 @@ impl Window {
             content_mask: ContentMask {
                 bounds,
                 fade_out: Edges::default(),
+                ..Default::default()
             },
             corner_radii: Corners::default(),
             corner_smoothing: 0.0,

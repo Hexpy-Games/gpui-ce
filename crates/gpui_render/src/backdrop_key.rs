@@ -113,6 +113,7 @@ fn filter_key(
         }
         hash_bounds(&mut hasher, &lower.bounds);
         hash_bounds(&mut hasher, &lower.content_mask.bounds);
+        lower.content_mask.corners.hash(&mut hasher);
         hash_corners(&mut hasher, &lower.corner_radii);
         lower.corner_smoothing.to_bits().hash(&mut hasher);
         lower.opacity.to_bits().hash(&mut hasher);
@@ -167,6 +168,7 @@ fn filter_key(
             let mut hasher = DefaultHasher::new();
             hash_bounds(&mut hasher, &boundary.bounds);
             hash_bounds(&mut hasher, &boundary.content_mask.bounds);
+            boundary.content_mask.corners.hash(&mut hasher);
             hash_corners(&mut hasher, &boundary.corner_radii);
             boundary.corner_smoothing.to_bits().hash(&mut hasher);
             boundary.max_blur_radius().to_bits().hash(&mut hasher);

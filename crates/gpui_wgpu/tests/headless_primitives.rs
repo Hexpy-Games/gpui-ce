@@ -571,6 +571,7 @@ fn content_mask_fades_quad_edges() {
                 bottom: ScaledPixels(0.0),
                 left: ScaledPixels(20.0),
             },
+            ..Default::default()
         },
         background: solid_background(red),
         ..Default::default()
@@ -730,4 +731,147 @@ fn appearing_glass_is_the_backdrop_at_presence_zero_and_unchanged_at_one() {
         started.as_raw() == reference.as_raw(),
         "presence 1 is the unfaded glass"
     );
+}
+
+/// A 2x2 opaque texture surface source in the headless renderer's device.
+#[cfg(target_os = "linux")]
+fn texture_surface(renderer: &WgpuHeadlessRenderer, rgba: [u8; 4]) -> gpui::SurfaceSource {
+    use std::sync::Arc;
+    let context = renderer.gpu_context().expect("headless GPU context");
+    let (device, queue) = context
+        .downcast_ref::<(Arc<wgpu::Device>, Arc<wgpu::Queue>)>()
+        .expect("WGPU device and queue");
+    let size = wgpu::Extent3d {
+        width: 2,
+        height: 2,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rounded mask surface"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        &rgba.repeat(4),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(2),
+        },
+        size,
+    );
+    gpui::SurfaceSource::Texture {
+        texture: Arc::new(texture),
+        size: Size {
+            width: DevicePixels(2),
+            height: DevicePixels(2),
+        },
+    }
+}
+
+/// A rounded content mask clips a quad, an image sprite and a surface to its arcs, and a plain
+/// mask nested inside it keeps those arcs.
+#[cfg(target_os = "linux")]
+#[test]
+fn rounded_content_mask_clips_quads_sprites_surfaces_and_nested_masks() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let poly = tile(
+        &renderer,
+        AtlasKey::Image(RenderImageParams {
+            image_id: gpui::ImageId(7),
+            frame_index: 0,
+        }),
+        (0..64).flat_map(|_| [0u8, 0, 255, 255]).collect(),
+    );
+    let surface = texture_surface(&renderer, [0, 255, 0, 255]);
+    let rounded = |x: f32| {
+        gpui::ContentMask::rounded(
+            Bounds::new(
+                gpui::point(gpui::px(x), gpui::px(10.)),
+                gpui::size(gpui::px(70.), gpui::px(80.)),
+            ),
+            Corners::all(gpui::px(20.)),
+        )
+    };
+    // Nested: a plain mask 4 px inside the rounded one's left edge keeps its arcs.
+    let nested = ContentMask {
+        bounds: Bounds::new(
+            gpui::point(gpui::px(234.), gpui::px(10.)),
+            gpui::size(gpui::px(66.), gpui::px(80.)),
+        ),
+        ..Default::default()
+    }
+    .intersect(&rounded(230.));
+    let white: Hsla = gpui::rgb_to_hsla(gpui::rgb(0xffffff));
+
+    let mut scene = Scene::default();
+    scene.insert_primitive(Quad {
+        bounds: bounds(0.0, 0.0, 80.0, 100.0),
+        content_mask: rounded(5.).scale(1.0),
+        background: solid_background(white),
+        ..Default::default()
+    });
+    scene.insert_primitive(PolychromeSprite {
+        order: 0,
+        grayscale: ShaderBool::Disabled,
+        opacity: 1.0,
+        corner_smoothing: 0.0,
+        // Larger than the mask, so its edge texels (filtered against the atlas) stay outside.
+        bounds: bounds(75.0, 0.0, 90.0, 100.0),
+        content_mask: rounded(80.).scale(1.0),
+        corner_radii: Default::default(),
+        tile: poly,
+        frames: FrameLoop::NONE,
+    });
+    scene.insert_primitive(gpui::PaintSurface {
+        order: 0,
+        bounds: bounds(150.0, 0.0, 90.0, 100.0),
+        content_mask: rounded(155.).scale(1.0),
+        source: surface,
+    });
+    scene.insert_primitive(Quad {
+        bounds: bounds(230.0, 0.0, 80.0, 100.0),
+        content_mask: nested.scale(1.0),
+        background: solid_background(white),
+        ..Default::default()
+    });
+    scene.finish();
+    let image = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("render must succeed");
+    // The target clears to opaque black: a pixel's brightest channel is its coverage.
+    let alpha = |x: u32, y: u32| {
+        image.get_pixel(x, y).0[..3]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    };
+
+    for left in [5, 80, 155] {
+        // Outside each corner arc; inside the mask rectangle.
+        for (x, y) in [
+            (left + 1, 11),
+            (left + 68, 11),
+            (left + 68, 88),
+            (left + 1, 88),
+        ] {
+            assert_eq!(alpha(x, y), 0, "corner pixel ({x},{y}) must be clipped");
+        }
+        // The straight edges and the middle stay fully covered (sprite texels sample a little
+        // under full red).
+        for (x, y) in [(left, 50), (left + 35, 10), (left + 35, 50)] {
+            assert!(alpha(x, y) >= 230, "pixel ({x},{y}) must be painted");
+        }
+        // A pixel the arc crosses (its centre 0.09 px inside) is anti-aliased: ~59% coverage.
+        assert!((130..170).contains(&alpha(left + 2, 20)));
+    }
+    assert_eq!(alpha(235, 11), 0, "the nested mask keeps the outer arc");
+    assert!(alpha(234, 50) >= 230 && alpha(270, 50) >= 230);
 }

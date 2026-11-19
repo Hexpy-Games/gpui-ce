@@ -123,14 +123,15 @@ fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
 #[test]
 fn scene_instance_storage_sizes_are_bounded() {
     for (name, actual, maximum) in [
-        ("Quad", std::mem::size_of::<gpui::Quad>(), 248),
+        // Every masked primitive carries the content mask's rounded corners (+16 bytes).
+        ("Quad", std::mem::size_of::<gpui::Quad>(), 264),
         // e7278008d9 added `clip_outside` and `padding` on purpose (+8 bytes).
-        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 192),
+        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 208),
         // The frame loop (`FrameLoop`, 24 bytes) rides on every sprite instance.
         (
             "PolychromeSprite",
             std::mem::size_of::<gpui::PolychromeSprite>(),
-            136,
+            152,
         ),
     ] {
         assert!(

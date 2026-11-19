@@ -320,7 +320,8 @@ pub(super) fn offload(scene: &mut Scene) -> bool {
     groups_moved || scene.compositor_sprites.len() != before
 }
 
-/// Whether the visible part of `painted` lies outside the mask's edge fades.
+/// Whether the visible part of `painted` lies outside the mask's edge fades and rounded corners,
+/// so a plain rectangular clip shows it unchanged.
 pub(super) fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> bool {
     let visible = painted.intersect(&mask.bounds);
     let fade = &mask.fade_out;
@@ -328,6 +329,10 @@ pub(super) fn unfaded(painted: &Bounds<ScaledPixels>, mask: &ContentMask<ScaledP
         && visible.top() >= mask.bounds.top() + fade.top
         && visible.right() <= mask.bounds.right() - fade.right
         && visible.bottom() <= mask.bounds.bottom() - fade.bottom
+        && !mask.corners.clips(
+            crate::window::mask_edges(&mask.bounds, |value| value.0),
+            crate::window::mask_edges(&visible, |value| value.0),
+        )
 }
 
 /// Whether a primitive other than `sprite` at or after `order` paints inside `painted`, or a

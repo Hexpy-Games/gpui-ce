@@ -96,6 +96,7 @@ pub mod blur {
     pub struct BlurUniforms {
         pub bounds: Bounds,
         pub content_mask: Bounds,
+        pub content_mask_corners: MaskCorners,
         pub corner_radii: Corners,
         pub direction: Vec2f,
         pub standard_deviation: f32,
@@ -206,6 +207,18 @@ pub mod blur {
             texture_coordinates: unit_position,
             clip_distances: clip_distances(viewport_position, content_mask),
         }
+    }
+
+    /// Coverage of the content mask's rounded corners at `position`, mapped back through the
+    /// composite scale the way the vertex stage scales the mask's rectangle.
+    pub fn composite_mask_alpha(position: Vec2f) -> f32 {
+        let locals = get!(BLUR_LOCALS);
+        let origin = locals.composite_scale_origin;
+        MaskCorners::alpha(
+            locals.content_mask_corners,
+            locals.content_mask,
+            origin + (position - origin) / locals.composite_scale,
+        )
     }
 
     /// `uv` in the content's 0..1 → the texture's uv, clamped to the content's texel centres.
@@ -796,7 +809,7 @@ pub mod blur {
         blur_composite_color(
             blur_composite_source_position(input.position.xy()),
             coverage,
-        )
+        ) * composite_mask_alpha(input.position.xy())
     }
 
     #[derive(Wgsl)]
@@ -875,7 +888,7 @@ pub mod blur {
         blur_composite_color(
             blur_composite_source_position(input.position.xy()),
             coverage,
-        )
+        ) * composite_mask_alpha(input.position.xy())
     }
 }
 
