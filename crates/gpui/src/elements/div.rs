@@ -1009,6 +1009,23 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Makes this element a tab group at `index` in its parent's tab order without making the
+    /// element focusable or a tab stop: its descendants' tab stops are ordered inside the group,
+    /// and the group is ordered among its siblings by `index`. Use it to give a region the
+    /// document's tab order while it paints in another order.
+    ///
+    /// Paint order breaks ties only between stops whose index paths are equal: a sibling tab stop
+    /// that is not in a group comes before every stop in a group with the same `index`, and the
+    /// children of groups that share an `index` are ordered by their own tab indexes first. So
+    /// put every region at one level in its own `tab_group_at` with a distinct index. A later
+    /// `tab_index` makes the element focusable and a tab stop again; a later `tab_group` keeps
+    /// `index`.
+    fn tab_group_at(mut self, index: isize) -> Self {
+        self.interactivity().tab_group = true;
+        self.interactivity().tab_index = Some(index);
+        self
+    }
+
     /// Set the keymap context for this element. This will be used to determine
     /// which action to dispatch from the keymap.
     fn key_context<C, E>(mut self, key_context: C) -> Self
@@ -7299,6 +7316,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(focused, Some(item_b.id));
+    }
+
+    struct TabGroupAt {
+        item_a: FocusHandle,
+        item_b: FocusHandle,
+    }
+
+    impl Render for TabGroupAt {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(div().tab_group_at(1).child(div().track_focus(&self.item_a)))
+                .child(div().tab_group_at(0).child(div().track_focus(&self.item_b)))
+        }
+    }
+
+    /// `tab_group_at` orders a group by its index, not paint order, and the
+    /// group container itself is never a tab stop.
+    #[test]
+    fn tab_group_at_orders_groups_without_a_tab_stop() {
+        let mut cx = TestAppContext::single();
+        let (item_a, item_b) = cx.update(|cx| {
+            (
+                cx.focus_handle().tab_index(0).tab_stop(true),
+                cx.focus_handle().tab_index(0).tab_stop(true),
+            )
+        });
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (item_a, item_b) = (item_a.clone(), item_b.clone());
+                move |_, _| TabGroupAt { item_a, item_b }
+            })
+            .into();
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        let visited = cx
+            .update_window(window, |_, window, cx| {
+                let mut ids = Vec::new();
+                for _ in 0..3 {
+                    window.focus_next(cx);
+                    ids.push(window.focused(cx).map(|handle| handle.id));
+                }
+                ids
+            })
+            .unwrap();
+
+        assert_eq!(visited, [Some(item_b.id), Some(item_a.id), Some(item_b.id)]);
     }
 
     #[gpui::test]
