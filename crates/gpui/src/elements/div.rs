@@ -5751,6 +5751,28 @@ mod tests {
     }
 
     #[gpui::test]
+    fn inline_flex_text_child_preserves_paragraph_line_height(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let (state, _) = window.draw(
+            Point::default(),
+            size(px(200.), px(80.)),
+            |_, _| {
+                div()
+                    .w(px(200.))
+                    .text_size(px(16.))
+                    .line_height(px(22.))
+                    .child("prefix ")
+                    .child(div().inline_flex().child("box"))
+                    .child(" suffix")
+            },
+        );
+
+        let paragraphs = state.measured_inline_paragraphs();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].1.size.height, px(22.));
+    }
+
+    #[gpui::test]
     fn default_block_preserves_grid_flow_and_hides_none_descendants(cx: &mut TestAppContext) {
         let hidden_prepainted = Rc::new(Cell::new(false));
         let hidden_prepaint = hidden_prepainted.clone();

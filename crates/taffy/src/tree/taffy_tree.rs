@@ -913,7 +913,7 @@ impl<NodeContext> TaffyTree<NodeContext> {
         node_id: NodeId,
         available_space: Size<AvailableSpace>,
         mut measure_function: MeasureFunction,
-    ) -> Result<(), TaffyError>
+    ) -> Result<Option<f32>, TaffyError>
     where
         MeasureFunction:
             FnMut(Size<Option<f32>>, Size<AvailableSpace>, NodeId, Option<&mut NodeContext>, &Style) -> Measured,
@@ -929,16 +929,16 @@ impl<NodeContext> TaffyTree<NodeContext> {
             measure_function(known_dimensions, available_space, node_id, node_context, style).into()
         };
         let mut taffy_view = TaffyView { taffy: self, measure_function };
-        compute_root_layout(&mut taffy_view, node_id, available_space);
+        let first_baseline = compute_root_layout(&mut taffy_view, node_id, available_space);
         if use_rounding {
             round_layout(&mut taffy_view, node_id);
         }
-        Ok(())
+        Ok(first_baseline)
     }
 
     /// Updates the stored layout of the provided `node` and its children
     pub fn compute_layout(&mut self, node: NodeId, available_space: Size<AvailableSpace>) -> Result<(), TaffyError> {
-        self.compute_layout_with_measure(node, available_space, |_, _, _, _, _| Size::ZERO)
+        self.compute_layout_with_measure(node, available_space, |_, _, _, _, _| Size::ZERO).map(|_| ())
     }
 
     /// Prints a debug representation of the tree's layout

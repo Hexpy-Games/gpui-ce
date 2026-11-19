@@ -91,9 +91,14 @@ fn expand_inline_line_for_box(
     height: Pixels,
     metrics: InlineTextMetrics,
     align: VerticalAlign,
+    baseline: Option<Pixels>,
 ) {
+    let ascent = baseline.unwrap_or(height);
     match align {
-        VerticalAlign::Baseline => *top = (*top).min(-height),
+        VerticalAlign::Baseline => {
+            *top = (*top).min(-ascent);
+            *bottom = (*bottom).max(height - ascent);
+        }
         VerticalAlign::Middle => {
             let middle = -metrics.x_height / 2.;
             *top = (*top).min(middle - height / 2.);
@@ -109,9 +114,11 @@ fn aligned_inline_box_y(
     metrics: InlineTextMetrics,
     height: Pixels,
     align: VerticalAlign,
+    baseline: Option<Pixels>,
 ) -> Pixels {
+    let ascent = baseline.unwrap_or(height);
     match align {
-        VerticalAlign::Baseline => line.baseline - height,
+        VerticalAlign::Baseline => line.baseline - ascent,
         VerticalAlign::Middle => line.baseline - metrics.x_height / 2. - height / 2.,
         VerticalAlign::Top => Pixels::ZERO,
         VerticalAlign::Bottom => line.size.height - height,
@@ -131,7 +138,7 @@ pub fn align_inline_boxes(
 ) {
     let request_alignments = requests
         .iter()
-        .map(|request| (request.id, request.vertical_align))
+        .map(|request| (request.id, (request.vertical_align, request.baseline)))
         .collect::<FxHashMap<_, _>>();
     let mut boxes_by_line: FxHashMap<_, Vec<_>> = FxHashMap::default();
 
@@ -139,15 +146,15 @@ pub fn align_inline_boxes(
         .iter_mut()
         .filter(|inline_box| inline_box.line_index < lines.len())
     {
-        let align = request_alignments
+        let (align, baseline) = request_alignments
             .get(&inline_box.id)
             .copied()
-            .unwrap_or(VerticalAlign::Baseline);
+            .unwrap_or((VerticalAlign::Baseline, None));
 
         boxes_by_line
             .entry(inline_box.line_index)
             .or_default()
-            .push((inline_box, align));
+            .push((inline_box, align, baseline));
     }
 
     let mut line_y = Pixels::ZERO;
@@ -165,7 +172,7 @@ pub fn align_inline_boxes(
         let mut top_box_height = Pixels::ZERO;
         let mut bottom_box_height = Pixels::ZERO;
 
-        for (inline_box, align) in &line_boxes {
+        for (inline_box, align, baseline) in &line_boxes {
             expand_inline_line_for_box(
                 &mut top,
                 &mut bottom,
@@ -174,6 +181,7 @@ pub fn align_inline_boxes(
                 inline_box.bounds.size.height,
                 metrics,
                 *align,
+                *baseline,
             );
         }
 
@@ -183,9 +191,9 @@ pub fn align_inline_boxes(
         line.size.height = bottom - top;
         line.baseline = -top;
 
-        for (inline_box, align) in line_boxes {
-            inline_box.bounds.origin.y =
-                line_y + aligned_inline_box_y(*line, metrics, inline_box.bounds.size.height, align);
+        for (inline_box, align, baseline) in line_boxes {
+            inline_box.bounds.origin.y = line_y
+                + aligned_inline_box_y(*line, metrics, inline_box.bounds.size.height, align, baseline);
         }
 
         line_y += line.size.height;
@@ -1486,6 +1494,49 @@ mod tests {
     }
 
     #[test]
+    fn inline_box_first_baseline_preserves_line_height() {
+        let metrics = InlineTextMetrics {
+            ascent: px(14.),
+            descent: px(4.),
+            x_height: px(8.),
+        };
+        for (baseline, expected_height, expected_baseline) in
+            [(Some(px(16.)), px(22.), px(16.)), (None, px(28.), px(22.))]
+        {
+            let mut lines = [InlineVisualLine::default()];
+            let mut boxes = [PositionedInlineBox {
+                id: 1,
+                line_index: 0,
+                bounds: Bounds::new(Point::default(), size(px(18.), px(22.))),
+            }];
+            let requests = [InlineBoxRequest {
+                id: 1,
+                index: 0,
+                size: boxes[0].bounds.size,
+                baseline,
+                vertical_align: VerticalAlign::Baseline,
+            }];
+            let mut layout_size = size(px(100.), px(22.));
+
+            align_inline_boxes(
+                &mut lines,
+                &mut boxes,
+                &mut layout_size,
+                &requests,
+                &[metrics],
+                &[],
+                metrics,
+                px(22.),
+            );
+
+            assert_eq!(lines[0].size.height, expected_height);
+            assert_eq!(layout_size.height, expected_height);
+            assert_eq!(lines[0].baseline, expected_baseline);
+            assert_eq!(boxes[0].bounds.origin.y, px(0.));
+        }
+    }
+
+    #[test]
     fn inline_box_alignment_preserves_unsorted_boxes_and_empty_lines() {
         let mut lines = [InlineVisualLine::default(); 3];
         let mut boxes =
@@ -1504,6 +1555,7 @@ mod tests {
             id: 20,
             index: 0,
             size: boxes[0].bounds.size,
+            baseline: None,
             vertical_align: VerticalAlign::Top,
         }];
         let metrics = InlineTextMetrics {
