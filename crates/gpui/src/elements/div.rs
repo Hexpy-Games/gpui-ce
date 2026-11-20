@@ -1404,6 +1404,7 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Apply the given style when the given data type is dragged over this element
+    /// While a drag is active this is re-evaluated when the pointer enters or leaves the element; call `cx.notify()` if it depends on other state.
     #[deprecated(note = "use [`on_drag_over`]")]
     fn drag_over<S: 'static>(
         mut self,
@@ -1413,6 +1414,7 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Apply the given style when the given data type is dragged over this element
+    /// While a drag is active this is re-evaluated when the pointer enters or leaves the element; call `cx.notify()` if it depends on other state.
     fn on_drag_over<S: 'static>(
         mut self,
         f: impl 'static + Fn(StyleRefinement, &S, &mut Window, &mut App) -> StyleRefinement,
@@ -1504,6 +1506,7 @@ pub trait InteractiveElement: Sized {
     /// Otherwise, callers should use [`DropListener::can_drop`].
     ///
     /// The fluent API equivalent to [`Interactivity::can_drop`].
+    /// While a drag is active this is re-evaluated when the pointer enters or leaves the element; call `cx.notify()` if it depends on other state.
     fn can_drop(
         mut self,
         predicate: impl Fn(&dyn Any, &mut Window, &mut App) -> bool + 'static,
@@ -3784,10 +3787,7 @@ impl Interactivity {
             })
         }
 
-        if self.hover_style.is_some()
-            || self.base_style.mouse_cursor.is_some()
-            || cx.active_drag.is_some() && self.has_drag_over_styles()
-        {
+        if self.hover_style.is_some() || self.base_style.mouse_cursor.is_some() {
             let hitbox = hitbox.clone();
             let hover_state = self.hover_style.as_ref().and_then(|_| {
                 element_state
@@ -3811,9 +3811,8 @@ impl Interactivity {
             });
         }
 
-        // Drag-over styles resolve while the view renders; a drag move no longer refreshes
-        // the window, so the view is notified when the pointer crosses this element (or
-        // its drag-over group).
+        // Drag-over styles are computed when the view paints, and a cached view replays its
+        // last paint, so notify the view when the pointer crosses this element or its group.
         if cx.active_drag.is_some()
             && (self.has_drag_over_styles() || !self.group_drag_over_styles.is_empty())
         {
@@ -3835,14 +3834,12 @@ impl Interactivity {
                 if phase != DispatchPhase::Capture {
                     return;
                 }
-                let now = (
-                    hitbox.is_hovered(window),
-                    groups
+                let crossed = hitbox.is_hovered(window) != painted.0
+                    || groups
                         .iter()
-                        .map(|id| id.is_hovered(window))
-                        .collect::<Vec<_>>(),
-                );
-                if now != painted {
+                        .zip(&painted.1)
+                        .any(|(id, was)| id.is_hovered(window) != *was);
+                if crossed {
                     cx.notify(current_view);
                 }
             });

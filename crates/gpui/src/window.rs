@@ -1411,6 +1411,8 @@ pub struct Window {
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
+    /// Whether the last draw ran with a drag active, so its views registered their drag-over listeners and cursor.
+    drawn_with_drag: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2208,6 +2210,7 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
+            drawn_with_drag: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -3485,6 +3488,7 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        self.drawn_with_drag = cx.active_drag.is_some();
         // Drain every draw in profiler builds so a previous frame's
         // first-invalidation timestamp can't be attributed to this one.
         #[cfg(feature = "profiler")]
@@ -7097,10 +7101,14 @@ impl Window {
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
-                // A drag move redraws without rebuilding cached views: the drag preview is laid
-                // out on every draw, and elements with drag-over styles notify their own view
-                // when the pointer enters or leaves them (div.rs).
-                if self.invalidator.not_drawing() {
+                // Until a frame has been drawn with this drag, refresh so every view paints once
+                // with it (drag-over listeners and the drag cursor register, however the drag
+                // began); after that a move redraws without rebuilding cached views: the drag
+                // preview is laid out on every draw, and elements with drag-over styles notify
+                // their own view when the pointer crosses them (div.rs).
+                if !self.drawn_with_drag {
+                    self.refresh();
+                } else if self.invalidator.not_drawing() {
                     self.invalidator.set_dirty(true);
                 }
             } else if event.is::<MouseUpEvent>() {
@@ -9963,10 +9971,44 @@ mod tests {
         let target_count = target_renders.get();
         event.position.x = px(120.);
         test_window.update(|_, window, cx| {
-            window.dispatch_event(event.to_platform_input(), cx);
+            window.dispatch_event(event.clone().to_platform_input(), cx);
         });
         test_window.draw();
         assert_eq!(target_renders.get(), target_count);
+
+        event.position.x = px(30.);
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(event.to_platform_input(), cx);
+        });
+        test_window.draw();
+        assert!(target_renders.get() > target_count);
+
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(
+                MouseUpEvent {
+                    position: point(px(30.), px(20.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        test_window.draw();
+        let target_count = target_renders.get();
+        test_window.update(|_, window, cx| {
+            window.dispatch_event(
+                FileDropEvent::Entered {
+                    position: point(px(110.), px(20.)),
+                    paths: ExternalPaths([PathBuf::from("/tmp/drag")].into_iter().collect()),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        test_window.draw();
+        assert!(target_renders.get() > target_count);
     }
 
     struct FileDragView {
