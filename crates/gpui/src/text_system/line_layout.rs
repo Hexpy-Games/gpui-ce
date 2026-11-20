@@ -193,7 +193,13 @@ pub fn align_inline_boxes(
 
         for (inline_box, align, baseline) in line_boxes {
             inline_box.bounds.origin.y = line_y
-                + aligned_inline_box_y(*line, metrics, inline_box.bounds.size.height, align, baseline);
+                + aligned_inline_box_y(
+                    *line,
+                    metrics,
+                    inline_box.bounds.size.height,
+                    align,
+                    baseline,
+                );
         }
 
         line_y += line.size.height;

@@ -318,9 +318,7 @@ impl InlineParagraphCollector<'_> {
                     index: text_start,
                     size: bounds.size,
                     baseline: if display == Display::InlineFlex {
-                        self.window
-                            .layout_first_baseline(layout_id)
-                            .map(|baseline| self.window.pixel_snap(baseline))
+                        self.window.layout_first_baseline(layout_id)
                     } else {
                         None
                     },
