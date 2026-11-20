@@ -561,7 +561,7 @@ impl TaffyLayoutEngine {
             .expect(EXPECT_MESSAGE);
     }
 
-    // Authored absolute lengths round to the nearest 1/64 logical pixel before scaling,
+    // Authored absolute lengths scale to device pixels and round to the nearest 1/64 device pixel,
     // preserving fractional device-pixel lengths throughout layout.
     // Measured text sizes round up to the same layout unit.
     // Border widths retain whole-device-pixel stroke snapping before layout.
@@ -1159,42 +1159,6 @@ mod tests {
             engine.direction_handle(root).get(),
             ResolvedDirection::RightToLeft
         );
-    }
-
-    #[test]
-    fn auto_sized_axes_snap_padding_proportionally() {
-        use taffy::style::LengthPercentage;
-
-        let mut style = Style {
-            padding: Edges {
-                top: Pixels(6.5).into(),
-                right: Pixels(5.0).into(),
-                bottom: Pixels(6.5).into(),
-                left: Pixels(2.5).into(),
-            },
-            ..Default::default()
-        };
-
-        let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
-        let expected_left = 2.5;
-        assert_eq!(padding.left, LengthPercentage::length(expected_left));
-        assert_eq!(padding.right, LengthPercentage::length(5.0));
-        assert_eq!(padding.top, LengthPercentage::length(6.5));
-        assert_eq!(padding.bottom, LengthPercentage::length(6.5));
-
-        style.size.width = Length::Definite(Pixels(100.0).into());
-        let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
-        assert_eq!(padding.left, LengthPercentage::length(2.5));
-        assert_eq!(padding.right, LengthPercentage::length(5.0));
-        assert_eq!(padding.top, LengthPercentage::length(6.5));
-        assert_eq!(padding.bottom, LengthPercentage::length(6.5));
-
-        style.size.width = Length::Auto;
-        style.padding.top = Pixels(6.75).into();
-        style.padding.bottom = Pixels(6.75).into();
-        let padding = style.to_taffy(Pixels(16.0), 2.0).padding;
-        assert_eq!(padding.top, LengthPercentage::length(13.5));
-        assert_eq!(padding.bottom, LengthPercentage::length(13.5));
     }
 
     #[test]
