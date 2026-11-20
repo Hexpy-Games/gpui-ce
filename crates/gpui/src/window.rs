@@ -6447,6 +6447,12 @@ impl Window {
         true
     }
 
+    pub(crate) fn layout_first_baseline(&self, id: LayoutId) -> Option<Pixels> {
+        self.layout_engine
+            .as_ref()
+            .and_then(|layout_engine| layout_engine.first_baseline(id))
+    }
+
     pub(crate) fn layout_vertical_align(
         &self,
         layout_id: LayoutId,

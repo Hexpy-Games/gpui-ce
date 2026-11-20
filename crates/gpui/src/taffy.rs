@@ -70,6 +70,7 @@ pub struct TaffyLayoutEngine {
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
     computed_available_spaces: FxHashMap<LayoutId, Size<AvailableSpace>>,
     vertical_alignments: FxHashMap<LayoutId, VerticalAlign>,
+    first_baselines: FxHashMap<LayoutId, Pixels>,
     pub(crate) inline_content: FxHashMap<LayoutId, Arc<InlineContent>>,
     pub(crate) inline_fragments: FxHashMap<LayoutId, Arc<[Bounds<Pixels>]>>,
     display_and_position: FxHashMap<LayoutId, (Display, Position)>,
@@ -89,6 +90,7 @@ impl TaffyLayoutEngine {
             absolute_outer_origins: FxHashMap::default(),
             computed_available_spaces: FxHashMap::default(),
             vertical_alignments: FxHashMap::default(),
+            first_baselines: FxHashMap::default(),
             inline_content: FxHashMap::default(),
             inline_fragments: FxHashMap::default(),
             display_and_position: FxHashMap::default(),
@@ -103,6 +105,7 @@ impl TaffyLayoutEngine {
         self.absolute_outer_origins.clear();
         self.computed_available_spaces.clear();
         self.vertical_alignments.clear();
+        self.first_baselines.clear();
         self.inline_content.clear();
         self.inline_fragments.clear();
         self.display_and_position.clear();
@@ -336,6 +339,10 @@ impl TaffyLayoutEngine {
             .unwrap_or_default()
     }
 
+    pub(crate) fn first_baseline(&self, id: LayoutId) -> Option<Pixels> {
+        self.first_baselines.get(&id).copied()
+    }
+
     pub(crate) fn display_and_position(&self, node_id: LayoutId) -> (Display, Position) {
         self.display_and_position[&node_id]
     }
@@ -510,7 +517,8 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
-        self.taffy
+        let first_baseline = self
+            .taffy
             .compute_layout_with_measure(
                 id.into(),
                 available_space.into(),
@@ -559,6 +567,12 @@ impl TaffyLayoutEngine {
                 },
             )
             .expect(EXPECT_MESSAGE);
+        if let Some(baseline) = first_baseline {
+            self.first_baselines
+                .insert(id, Pixels(baseline / scale_factor));
+        } else {
+            self.first_baselines.remove(&id);
+        }
     }
 
     // Pixel snapping

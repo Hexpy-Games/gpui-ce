@@ -22,6 +22,8 @@ pub struct InlineBoxRequest {
     pub index: usize,
     /// Measured size of the element.
     pub size: Size<Pixels>,
+    /// Distance from the box top to its baseline; `None` uses the bottom margin edge.
+    pub baseline: Option<Pixels>,
     /// Vertical alignment within the line containing this element.
     pub vertical_align: crate::VerticalAlign,
 }

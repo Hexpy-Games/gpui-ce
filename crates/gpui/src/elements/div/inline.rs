@@ -317,6 +317,11 @@ impl InlineParagraphCollector<'_> {
                     id: box_start as u64,
                     index: text_start,
                     size: bounds.size,
+                    baseline: if display == Display::InlineFlex {
+                        self.window.layout_first_baseline(layout_id)
+                    } else {
+                        None
+                    },
                     vertical_align: self
                         .window
                         .layout_vertical_align(layout_id)

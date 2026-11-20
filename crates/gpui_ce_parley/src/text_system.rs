@@ -3369,24 +3369,28 @@ mod tests {
                 id: 7,
                 index: "alpha ".len(),
                 size: size(px(28.0), px(32.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Baseline,
             },
             InlineBoxRequest {
                 id: 9,
                 index: split,
                 size: size(px(18.0), px(14.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Middle,
             },
             InlineBoxRequest {
                 id: 11,
                 index: "alpha beta gamma ".len(),
                 size: size(px(20.0), px(18.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Top,
             },
             InlineBoxRequest {
                 id: 13,
                 index: "alpha beta gamma ".len(),
                 size: size(px(16.0), px(28.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Bottom,
             },
         ];
@@ -3488,12 +3492,14 @@ mod tests {
                 id: 1,
                 index: 0,
                 size: size(px(30.0), px(12.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Baseline,
             },
             InlineBoxRequest {
                 id: 2,
                 index: 0,
                 size: size(px(20.0), px(36.0)),
+                baseline: None,
                 vertical_align: VerticalAlign::Middle,
             },
         ];
@@ -3904,6 +3910,7 @@ mod tests {
                 id: idx as u64,
                 index,
                 size: size(px(10.), px(12.)),
+                baseline: None,
                 vertical_align: VerticalAlign::Baseline,
             })
             .collect::<Vec<_>>();
