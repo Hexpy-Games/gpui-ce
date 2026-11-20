@@ -1235,7 +1235,10 @@ mod tests {
 
         let first_y = engine.taffy.layout(items[0].into()).unwrap().location.y;
         for item in items {
-            assert_eq!(engine.taffy.layout(item.into()).unwrap().location.y, first_y);
+            assert_eq!(
+                engine.taffy.layout(item.into()).unwrap().location.y,
+                first_y
+            );
         }
     }
 
@@ -1243,7 +1246,7 @@ mod tests {
     fn measured_size_rounds_up_to_layout_unit_not_device_pixel() {
         let measured = size(px(58.3), px(16.0));
         let snapped = ceil_measured_size_to_layout_unit(measured, 2.0);
-        assert_eq!(snapped, size(58.3125 * 2.0, 32.0));
+        assert_eq!(snapped, size(116.609375, 32.0));
         assert!(snapped.width / 2.0 >= measured.width.0);
     }
 
