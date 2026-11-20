@@ -83,6 +83,8 @@ fn base_inline_line_bounds(metrics: InlineTextMetrics, line_height: Pixels) -> (
     )
 }
 
+type InlineBoxAlignment = (VerticalAlign, Option<Pixels>);
+
 fn expand_inline_line_for_box(
     top: &mut Pixels,
     bottom: &mut Pixels,
@@ -90,9 +92,9 @@ fn expand_inline_line_for_box(
     bottom_box_height: &mut Pixels,
     height: Pixels,
     metrics: InlineTextMetrics,
-    align: VerticalAlign,
-    baseline: Option<Pixels>,
+    alignment: InlineBoxAlignment,
 ) {
+    let (align, baseline) = alignment;
     let ascent = baseline.unwrap_or(height);
     match align {
         VerticalAlign::Baseline => {
@@ -113,9 +115,9 @@ fn aligned_inline_box_y(
     line: InlineVisualLine,
     metrics: InlineTextMetrics,
     height: Pixels,
-    align: VerticalAlign,
-    baseline: Option<Pixels>,
+    alignment: InlineBoxAlignment,
 ) -> Pixels {
+    let (align, baseline) = alignment;
     let ascent = baseline.unwrap_or(height);
     match align {
         VerticalAlign::Baseline => line.baseline - ascent,
@@ -146,7 +148,7 @@ pub fn align_inline_boxes(
         .iter_mut()
         .filter(|inline_box| inline_box.line_index < lines.len())
     {
-        let (align, baseline) = request_alignments
+        let alignment = request_alignments
             .get(&inline_box.id)
             .copied()
             .unwrap_or((VerticalAlign::Baseline, None));
@@ -154,7 +156,7 @@ pub fn align_inline_boxes(
         boxes_by_line
             .entry(inline_box.line_index)
             .or_default()
-            .push((inline_box, align, baseline));
+            .push((inline_box, alignment));
     }
 
     let mut line_y = Pixels::ZERO;
@@ -172,7 +174,7 @@ pub fn align_inline_boxes(
         let mut top_box_height = Pixels::ZERO;
         let mut bottom_box_height = Pixels::ZERO;
 
-        for (inline_box, align, baseline) in &line_boxes {
+        for (inline_box, alignment) in &line_boxes {
             expand_inline_line_for_box(
                 &mut top,
                 &mut bottom,
@@ -180,8 +182,7 @@ pub fn align_inline_boxes(
                 &mut bottom_box_height,
                 inline_box.bounds.size.height,
                 metrics,
-                *align,
-                *baseline,
+                *alignment,
             );
         }
 
@@ -191,15 +192,10 @@ pub fn align_inline_boxes(
         line.size.height = bottom - top;
         line.baseline = -top;
 
-        for (inline_box, align, baseline) in line_boxes {
-            inline_box.bounds.origin.y = line_y
-                + aligned_inline_box_y(
-                    *line,
-                    metrics,
-                    inline_box.bounds.size.height,
-                    align,
-                    baseline,
-                );
+        for (inline_box, alignment) in line_boxes {
+            let height = inline_box.bounds.size.height;
+            inline_box.bounds.origin.y =
+                line_y + aligned_inline_box_y(*line, metrics, height, alignment);
         }
 
         line_y += line.size.height;
