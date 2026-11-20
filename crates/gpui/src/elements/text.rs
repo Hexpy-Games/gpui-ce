@@ -2,11 +2,11 @@
 use crate::{
     ActiveTooltip, AnyView, App, AppContext, Bounds, DispatchPhase, Element, ElementId,
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, LineLayout, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParagraphDirection, Pixels,
-    Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign, TextLayoutOptions,
-    TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap, TooltipId,
-    UnicodeBidi, WhiteSpace, Window, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
-    taffy::Measured,
+    LayoutId, LineLayout, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OverflowWrap,
+    ParagraphDirection, Pixels, Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign,
+    TextLayoutOptions, TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap,
+    TooltipId, UnicodeBidi, WhiteSpace, Window, WordBreak, px, register_tooltip_mouse_handlers,
+    set_tooltip_on_window, taffy::Measured,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -978,6 +978,8 @@ impl TextLayout {
             truncation.source,
             paragraph_direction,
             unicode_bidi,
+            text_style.word_break,
+            text_style.overflow_wrap,
             window,
         )
     }
@@ -1280,6 +1282,8 @@ fn truncate_to_shaped_layout<'a>(
     direction: TruncateFrom,
     paragraph_direction: ParagraphDirection,
     unicode_bidi: UnicodeBidi,
+    word_break: WordBreak,
+    overflow_wrap: OverflowWrap,
     window: &mut Window,
 ) -> (SharedString, Cow<'a, [TextRun]>) {
     let options = TextLayoutOptions {
@@ -1287,6 +1291,8 @@ fn truncate_to_shaped_layout<'a>(
         direction: paragraph_direction,
         unicode_bidi,
         text_align: TextAlign::Left,
+        word_break,
+        overflow_wrap,
         ..Default::default()
     };
     let Ok(document) =
@@ -2100,6 +2106,26 @@ mod tests {
 
     const CONTAINER_COLOR: Hsla = hsla(0.72, 0.45, 0.32, 1.0);
     const TEXT_BACKGROUND_COLOR: Hsla = hsla(0.37, 0.65, 0.42, 1.0);
+
+    #[gpui::test]
+    fn line_clamp_ellipsis_wraps_like_the_painted_text(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let text = StyledText::new("x".repeat(60));
+        let layout = text.layout().clone();
+
+        cx.draw(Point::default(), size(px(80.), px(100.)), |_, _| {
+            div()
+                .w(px(80.))
+                .overflow_wrap(OverflowWrap::Anywhere)
+                .line_clamp(2)
+                .text_ellipsis()
+                .child(text)
+        });
+
+        let wrapped_text = layout.wrapped_text();
+        assert_eq!(wrapped_text.lines().count(), 2);
+        assert!(wrapped_text.ends_with('…'));
+    }
 
     #[gpui::test]
     fn text_measurement_replaces_state_when_wrap_width_changes(cx: &mut TestAppContext) {
