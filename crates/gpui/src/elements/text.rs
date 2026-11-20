@@ -2108,26 +2108,6 @@ mod tests {
     const TEXT_BACKGROUND_COLOR: Hsla = hsla(0.37, 0.65, 0.42, 1.0);
 
     #[gpui::test]
-    fn line_clamp_ellipsis_wraps_like_the_painted_text(cx: &mut TestAppContext) {
-        let cx = cx.add_empty_window();
-        let text = StyledText::new("x".repeat(60));
-        let layout = text.layout().clone();
-
-        cx.draw(Point::default(), size(px(80.), px(100.)), |_, _| {
-            div()
-                .w(px(80.))
-                .overflow_wrap(OverflowWrap::Anywhere)
-                .line_clamp(2)
-                .text_ellipsis()
-                .child(text)
-        });
-
-        let wrapped_text = layout.wrapped_text();
-        assert_eq!(wrapped_text.lines().count(), 2);
-        assert!(wrapped_text.ends_with('…'));
-    }
-
-    #[gpui::test]
     fn text_measurement_replaces_state_when_wrap_width_changes(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
 

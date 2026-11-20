@@ -1613,3 +1613,42 @@ fn mixed_font_sizes_colors_and_underlines_paint_in_their_wrapped_rows() {
         "glyph painting must use each shaped run's font size"
     );
 }
+
+struct ClampedUrl {
+    layout: Rc<RefCell<Option<gpui::TextLayout>>>,
+}
+
+impl Render for ClampedUrl {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let text = StyledText::new("x".repeat(60));
+        *self.layout.borrow_mut() = Some(text.layout().clone());
+        div().child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(80.))
+                .font(font(IBM_PLEX.family))
+                .text_size(px(14.))
+                .overflow_wrap(gpui::OverflowWrap::Anywhere)
+                .line_clamp(2)
+                .text_ellipsis()
+                .child(text),
+        )
+    }
+}
+
+#[test]
+fn line_clamp_ellipsis_wraps_like_the_painted_text() {
+    let mut cx = headless();
+    let layout = Rc::new(RefCell::new(None));
+    let view = ClampedUrl {
+        layout: layout.clone(),
+    };
+    cx.open_window(size(px(200.), px(200.)), |_, cx| cx.new(|_| view))
+        .unwrap();
+    cx.run_until_parked();
+
+    let wrapped = layout.borrow().as_ref().unwrap().wrapped_text();
+    assert_eq!(wrapped.lines().count(), 2, "{wrapped:?}");
+    assert!(wrapped.ends_with('\u{2026}'), "{wrapped:?}");
+}
