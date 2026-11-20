@@ -662,21 +662,21 @@ impl From<LayoutId> for NodeId {
     }
 }
 
-/// Layout units per logical pixel (Blink's `LayoutUnit` is 1/64 CSS px).
+/// Layout units are 1/64 device px, applied after scaling as in Blink.
 const LAYOUT_UNITS_PER_PIXEL: f32 = 64.0;
 
 fn round_to_layout_unit(logical: f32, scale_factor: f32) -> f32 {
-    (logical * LAYOUT_UNITS_PER_PIXEL).round() / LAYOUT_UNITS_PER_PIXEL * scale_factor
+    (logical * scale_factor * LAYOUT_UNITS_PER_PIXEL).round() / LAYOUT_UNITS_PER_PIXEL
 }
 
-/// Rounds a measured size up to the next layout unit and converts it to device space.
+/// Converts a measured size to device space and rounds up to the next 1/64 device px.
 ///
 /// Rounding up keeps a box at least as wide as its glyph run, so measuring again at that
 /// width cannot wrap or truncate the text (Blink's `LayoutUnit::FromFloatCeil` of shaped
 /// text widths). Device-pixel snapping is left to the final edges in [`TaffyLayoutEngine::layout_bounds`].
 fn ceil_measured_size_to_layout_unit(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
     size.map(|d| {
-        (d.0.max(0.0) * LAYOUT_UNITS_PER_PIXEL).ceil() / LAYOUT_UNITS_PER_PIXEL * scale_factor
+        (d.0.max(0.0) * scale_factor * LAYOUT_UNITS_PER_PIXEL).ceil() / LAYOUT_UNITS_PER_PIXEL
     })
 }
 
@@ -1195,6 +1195,48 @@ mod tests {
         let padding = style.to_taffy(Pixels(16.0), 2.0).padding;
         assert_eq!(padding.top, LengthPercentage::length(13.5));
         assert_eq!(padding.bottom, LengthPercentage::length(13.5));
+    }
+
+    #[test]
+    fn flex_wrap_exact_sum_stays_on_first_line_at_fractional_scale() {
+        let mut engine = TaffyLayoutEngine::new();
+        let scale_factor = 2.3;
+        let items: Vec<_> = (0..3)
+            .map(|_| {
+                engine.request_layout(
+                    Style {
+                        size: size(px(7.0).into(), px(10.0).into()),
+                        flex_shrink: 0.0,
+                        ..Default::default()
+                    },
+                    px(16.0),
+                    scale_factor,
+                    &[],
+                )
+            })
+            .collect();
+        let row = engine.request_layout(
+            Style {
+                display: Display::Flex,
+                flex_wrap: crate::FlexWrap::Wrap,
+                size: size(px(3.0 * 7.0 + 2.0 * 1.0).into(), Length::Auto),
+                gap: size(px(1.0).into(), px(0.0).into()),
+                ..Default::default()
+            },
+            px(16.0),
+            scale_factor,
+            &items,
+        );
+
+        engine
+            .taffy
+            .compute_layout(row.into(), max_content())
+            .unwrap();
+
+        let first_y = engine.taffy.layout(items[0].into()).unwrap().location.y;
+        for item in items {
+            assert_eq!(engine.taffy.layout(item.into()).unwrap().location.y, first_y);
+        }
     }
 
     #[test]
