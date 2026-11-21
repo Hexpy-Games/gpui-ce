@@ -343,6 +343,17 @@ impl TaffyLayoutEngine {
         self.first_baselines.get(&id).copied()
     }
 
+    /// Whether the node clips or scrolls its overflow (CSS: a scroll container).
+    pub(crate) fn is_scroll_container(&self, id: LayoutId) -> bool {
+        let overflow = self.taffy.style(id.0).expect(EXPECT_MESSAGE).overflow;
+        [overflow.x, overflow.y].into_iter().any(|axis| {
+            matches!(
+                axis,
+                taffy::style::Overflow::Hidden | taffy::style::Overflow::Scroll
+            )
+        })
+    }
+
     pub(crate) fn display_and_position(&self, node_id: LayoutId) -> (Display, Position) {
         self.display_and_position[&node_id]
     }

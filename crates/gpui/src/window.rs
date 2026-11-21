@@ -6453,6 +6453,12 @@ impl Window {
             .and_then(|layout_engine| layout_engine.first_baseline(id))
     }
 
+    pub(crate) fn layout_is_scroll_container(&self, id: LayoutId) -> bool {
+        self.layout_engine
+            .as_ref()
+            .is_some_and(|layout_engine| layout_engine.is_scroll_container(id))
+    }
+
     pub(crate) fn layout_vertical_align(
         &self,
         layout_id: LayoutId,

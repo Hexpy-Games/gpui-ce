@@ -317,7 +317,10 @@ impl InlineParagraphCollector<'_> {
                     id: box_start as u64,
                     index: text_start,
                     size: bounds.size,
-                    baseline: if display == Display::InlineFlex {
+                    // CSS: an inline scroll container sits on its bottom margin edge.
+                    baseline: if display == Display::InlineFlex
+                        && !self.window.layout_is_scroll_container(layout_id)
+                    {
                         self.window.layout_first_baseline(layout_id)
                     } else {
                         None
