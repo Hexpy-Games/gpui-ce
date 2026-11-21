@@ -2,11 +2,11 @@
 use crate::{
     ActiveTooltip, AnyView, App, AppContext, Bounds, DispatchPhase, Element, ElementId,
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, LineLayout, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParagraphDirection, Pixels,
-    Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign, TextLayoutOptions,
-    TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap, TooltipId,
-    UnicodeBidi, WhiteSpace, Window, px, register_tooltip_mouse_handlers, set_tooltip_on_window,
-    taffy::Measured,
+    LayoutId, LineLayout, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OverflowWrap,
+    ParagraphDirection, Pixels, Point, ShapedText, ShapedTextLayout, SharedString, Size, TextAlign,
+    TextLayoutOptions, TextOverflow, TextRangeExt, TextRun, TextStyle, TextTransform, TextWrap,
+    TooltipId, UnicodeBidi, WhiteSpace, Window, WordBreak, px, register_tooltip_mouse_handlers,
+    set_tooltip_on_window, taffy::Measured,
 };
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -978,6 +978,8 @@ impl TextLayout {
             truncation.source,
             paragraph_direction,
             unicode_bidi,
+            text_style.word_break,
+            text_style.overflow_wrap,
             window,
         )
     }
@@ -1280,6 +1282,8 @@ fn truncate_to_shaped_layout<'a>(
     direction: TruncateFrom,
     paragraph_direction: ParagraphDirection,
     unicode_bidi: UnicodeBidi,
+    word_break: WordBreak,
+    overflow_wrap: OverflowWrap,
     window: &mut Window,
 ) -> (SharedString, Cow<'a, [TextRun]>) {
     let options = TextLayoutOptions {
@@ -1287,6 +1291,8 @@ fn truncate_to_shaped_layout<'a>(
         direction: paragraph_direction,
         unicode_bidi,
         text_align: TextAlign::Left,
+        word_break,
+        overflow_wrap,
         ..Default::default()
     };
     let Ok(document) =
