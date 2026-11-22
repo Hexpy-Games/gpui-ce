@@ -134,6 +134,7 @@ impl KineticScrollController {
             } else {
                 TouchPhase::Moved
             },
+            momentum: false,
         });
 
         let window = kinetic_scroll.window.clone();
@@ -164,6 +165,7 @@ impl KineticScrollController {
                 delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
                 modifiers: kinetic_scroll.modifiers,
                 touch_phase: TouchPhase::Ended,
+                momentum: false,
             }),
         ))
     }
@@ -184,6 +186,7 @@ impl KineticScrollController {
                     delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
                     modifiers,
                     touch_phase: TouchPhase::Ended,
+                    momentum: false,
                 }),
             ));
         }
