@@ -5181,7 +5181,8 @@ impl Window {
 
             let shadow = Shadow {
                 order: 0,
-                blur_radius: shadow.blur_radius.scale(scale_factor),
+                // CSS blur radius is 2σ; the scene Shadow's blur_radius is σ, as the renderer and every 3σ reach read it.
+                blur_radius: (shadow.blur_radius * 0.5).scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
                 content_mask,
                 corner_radii: shadow_radii.scale(scale_factor),
@@ -9545,6 +9546,29 @@ mod tests {
         assert!(inset_gradient.bounds.size.width < inset_gradient.element_bounds.size.width);
         assert!(inset_gradient.bounds.size.height < inset_gradient.element_bounds.size.height);
         assert!(drop_gradient.order < inset_gradient.order);
+    }
+
+    struct CssShadowBlurView;
+
+    impl Render for CssShadowBlurView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(20.)).shadow(vec![
+                BoxShadow::new(px(0.), px(0.), crate::black()).blur_radius(px(28.)),
+            ])
+        }
+    }
+
+    #[gpui::test]
+    fn css_shadow_blur_paints_half_as_sigma(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| CssShadowBlurView);
+        window
+            .update(cx, |_, window, _| {
+                let shadows = &window.rendered_frame.scene.shadows;
+                let scale_factor = window.scale_factor();
+                assert_eq!(shadows.len(), 1);
+                assert_eq!(shadows[0].blur_radius, ScaledPixels(14. * scale_factor));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
