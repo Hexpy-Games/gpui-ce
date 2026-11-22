@@ -115,6 +115,21 @@ impl HeadlessAppContext {
         self.platform.window_scale_factor.set(scale_factor);
     }
 
+    /// Whether a prompt_for_new_path is waiting for an answer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn did_prompt_for_new_path(&self) -> bool {
+        self.platform.did_prompt_for_new_path()
+    }
+
+    /// Answers the oldest pending prompt_for_new_path with select's choice.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_new_path_selection(
+        &self,
+        select: impl FnOnce(&std::path::Path) -> Option<std::path::PathBuf>,
+    ) {
+        self.platform.simulate_new_path_selection(select);
+    }
+
     /// Opens a window for headless rendering.
     pub fn open_window<V: Render + 'static>(
         &mut self,
