@@ -8,6 +8,7 @@
 //! If all of your elements are the same height, see [`crate::UniformList`] for a simpler API
 
 use super::wheel_glide::{self, WheelGlide};
+use crate::scroll_latch::{ScrollLatchKey, has_room};
 use crate::{
     AnyElement, App, AppContext, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges,
     Element, EntityId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
@@ -916,6 +917,12 @@ impl StateInner {
         scroll_top.item_ix..cursor.start().count + 1
     }
 
+    /// How far a user scroll can move the list (`scroll` clamps to it).
+    fn user_scroll_max(&self, height: Pixels) -> Pixels {
+        let padding = self.last_padding.unwrap_or_default();
+        (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.))
+    }
+
     fn scroll(
         &mut self,
         scroll_top: &ListOffset,
@@ -930,9 +937,7 @@ impl StateInner {
             return None;
         }
 
-        let padding = self.last_padding.unwrap_or_default();
-        let scroll_max =
-            (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
+        let scroll_max = self.user_scroll_max(height);
         let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
             .max(px(0.))
             .min(scroll_max);
@@ -1662,32 +1667,53 @@ impl Element for List {
         let hitbox_id = prepaint.hitbox.id;
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
-                let scrolled = {
-                    let mut state = list_state.0.borrow_mut();
-                    if !event.delta.precise() && wheel_glide::enabled(cx) {
-                        let top = state.scroll_top(&scroll_top);
-                        let max = state.max_scroll_offset();
-                        let room = (point(px(0.), max - top), point(px(0.), top));
-                        if state.glide.add(
-                            event.delta.pixel_delta(px(20.)),
-                            room,
-                            cx.background_executor().now(),
-                        ) {
-                            cx.notify(current_view);
-                        }
-                        return;
-                    }
-                    if event.delta.precise() {
-                        state.glide.cancel();
-                    }
-                    accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                    let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                    state.scroll(&scroll_top, height, pixel_delta, current_view, cx)
-                };
-                if let Some(event) = scrolled {
-                    list_state.emit_scroll(&event, window, cx);
+            let key = ScrollLatchKey::of(&list_state.0);
+            if phase == DispatchPhase::Capture {
+                // (rev) As div: the hover check gates only the offer.
+                if !hitbox_id.should_handle_scroll(window) {
+                    return;
                 }
+                let state = list_state.0.borrow();
+                // After a reset `scroll` drops events, so the list cannot move.
+                let room = !state.reset && {
+                    let top = state.scroll_top(&scroll_top)
+                        - accumulated_scroll_delta.pixel_delta(px(20.)).y;
+                    has_room(
+                        point(px(0.), -top),
+                        point(px(0.), state.user_scroll_max(height)),
+                        point(px(0.), event.delta.pixel_delta(px(20.)).y),
+                    )
+                };
+                window.offer_scroll_latch(key, room, room);
+                return;
+            }
+            if !window.is_scroll_latched(key) {
+                return;
+            }
+            let scrolled = {
+                let mut state = list_state.0.borrow_mut();
+                if !event.delta.precise() && wheel_glide::enabled(cx) {
+                    let top = state.scroll_top(&scroll_top);
+                    let max = state.max_scroll_offset();
+                    let room = (point(px(0.), max - top), point(px(0.), top));
+                    if state.glide.add(
+                        event.delta.pixel_delta(px(20.)),
+                        room,
+                        cx.background_executor().now(),
+                    ) {
+                        cx.notify(current_view);
+                    }
+                    return;
+                }
+                if event.delta.precise() {
+                    state.glide.cancel();
+                }
+                accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
+                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                state.scroll(&scroll_top, height, pixel_delta, current_view, cx)
+            };
+            if let Some(event) = scrolled {
+                list_state.emit_scroll(&event, window, cx);
             }
         });
 

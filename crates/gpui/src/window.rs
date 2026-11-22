@@ -1,4 +1,5 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
+use crate::scroll_latch::ScrollLatchKey;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropAppear, BackdropFilter, BackdropLens,
@@ -1391,6 +1392,7 @@ pub struct Window {
     mouse_position: Point<Pixels>,
     pointer_inside_window: bool,
     mouse_hit_test: HitTest,
+    scroll_latch: crate::scroll_latch::ScrollLatch,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -2189,6 +2191,7 @@ impl Window {
             mouse_position,
             pointer_inside_window: true,
             mouse_hit_test: HitTest::default(),
+            scroll_latch: Default::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -7163,6 +7166,16 @@ impl Window {
         &self.mouse_hit_test
     }
 
+    /// Capture phase of a wheel event: a hovered scroller offers to take the gesture.
+    pub(crate) fn offer_scroll_latch(&mut self, key: ScrollLatchKey, direct: bool, remapped: bool) {
+        self.scroll_latch.offer(key, direct, remapped);
+    }
+
+    /// Bubble phase of a wheel event: whether this scroller owns the current gesture.
+    pub(crate) fn is_scroll_latched(&self, key: ScrollLatchKey) -> bool {
+        self.scroll_latch.is_latched(key)
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         if event.is::<crate::MouseExitEvent>() {
             self.pointer_inside_window = false;
@@ -7187,6 +7200,12 @@ impl Window {
             return;
         }
 
+        let wheel = event.downcast_ref::<crate::ScrollWheelEvent>();
+        if let Some(wheel) = wheel {
+            self.scroll_latch
+                .begin(wheel, cx.background_executor().now());
+        }
+
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
 
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
@@ -7197,6 +7216,10 @@ impl Window {
             if !cx.propagate_event {
                 break;
             }
+        }
+
+        if wheel.is_some() {
+            self.scroll_latch.resolve();
         }
 
         // Bubble phase, where most normal handlers do their work.
