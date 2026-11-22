@@ -4345,32 +4345,39 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let mut filtered_scroll = (Point::default(), None);
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 let key = ScrollLatchKey::of(&scroll_offset);
                 if phase == DispatchPhase::Capture {
+                    let delta = event.delta.pixel_delta(line_height);
+                    let mut filtered_delta = delta;
+                    let mut filtered_state = None;
+                    if restrict_scroll_to_axis
+                        && event.delta.precise()
+                        && let Some(ongoing_scroll) = &ongoing_scroll
+                    {
+                        let mut state = *ongoing_scroll.borrow();
+                        state.filter(&mut filtered_delta, event.touch_phase);
+                        filtered_state = Some(state);
+                    }
+                    let direct = axis_deltas(
+                        filtered_delta,
+                        overflow,
+                        restrict_scroll_to_axis,
+                        allow_concurrent_scroll,
+                    );
+                    filtered_scroll = (direct, filtered_state);
+
                     // (rev) Only a hovered, non-occluded scroller offers; once latched it moves in
                     // the bubble phase wherever the pointer is (contact and momentum keep the latch).
                     if !hitbox.should_handle_scroll(window) {
                         return;
                     }
-                    let delta = event.delta.pixel_delta(line_height);
                     let offset = *scroll_offset.borrow();
                     // Always set together with `scroll_offset`; its `max` is this frame's scroll max.
                     let max = wheel_glide
                         .as_ref()
                         .map_or_else(Point::default, |glide| glide.borrow().max);
-                    let direct = point(
-                        if overflow.x == Overflow::Scroll {
-                            delta.x
-                        } else {
-                            Pixels::ZERO
-                        },
-                        if overflow.y == Overflow::Scroll {
-                            delta.y
-                        } else {
-                            Pixels::ZERO
-                        },
-                    );
                     let remapped = axis_deltas(
                         delta,
                         overflow,
@@ -4389,26 +4396,15 @@ impl Interactivity {
                 }
                 let mut scroll_offset = scroll_offset.borrow_mut();
                 let old_scroll_offset = *scroll_offset;
-                let mut delta = event.delta.pixel_delta(line_height);
-
-                if restrict_scroll_to_axis
-                    && event.delta.precise()
-                    && let Some(ongoing_scroll) = &ongoing_scroll
-                {
-                    ongoing_scroll
-                        .borrow_mut()
-                        .filter(&mut delta, event.touch_phase);
+                let (delta, filtered_state) = filtered_scroll;
+                if let (Some(ongoing_scroll), Some(state)) = (&ongoing_scroll, filtered_state) {
+                    *ongoing_scroll.borrow_mut() = state;
                 }
 
                 let Point {
                     x: delta_x,
                     y: delta_y,
-                } = axis_deltas(
-                    delta,
-                    overflow,
-                    restrict_scroll_to_axis,
-                    allow_concurrent_scroll,
-                );
+                } = delta;
                 if let Some(wheel_glide) = &wheel_glide {
                     let mut glide = wheel_glide.borrow_mut();
                     if !event.delta.precise() && wheel_glide::enabled(cx) {
