@@ -1053,6 +1053,7 @@ impl WindowsWindowInner {
                 WindowControlArea::Min if self.is_minimizable => Some(HTMINBUTTON as _),
                 WindowControlArea::Min if self.is_movable => Some(HTCAPTION as _),
                 WindowControlArea::Min => Some(HTNOWHERE as _),
+                WindowControlArea::NoDrag => None,
             })
         } else {
             None

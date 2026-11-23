@@ -903,6 +903,9 @@ pub enum WindowControlArea {
     Max,
     /// An area that allows minimizing of the platform window.
     Min,
+    /// A rect inside a drag area that does not drag (Electron's `app-region: no-drag`). It cuts
+    /// its rect out of every `Drag` area by geometry, whatever covers it.
+    NoDrag,
 }
 
 /// An identifier for a [Hitbox] which also includes [HitboxBehavior].
@@ -2065,14 +2068,8 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move || {
                 handle
-                    .update(&mut cx, |_, window, _cx| {
-                        for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            let mut scrollable_ids = window.mouse_hit_test().iter_scrollable();
-                            if scrollable_ids.contains(&hitbox.id) {
-                                return Some(*area);
-                            }
-                        }
-                        None
+                    .update(&mut cx, |_, window, _| {
+                        window.window_control_area_at_mouse()
                     })
                     .log_err()
                     .unwrap_or(None)
@@ -3196,6 +3193,23 @@ impl Window {
     /// Events may not be received during a move operation.
     pub fn start_window_move(&self) {
         self.platform_window.start_window_move()
+    }
+
+    /// The window control area under the mouse: Electron's `app-region` map. The first control
+    /// area in paint order whose hitbox is hovered wins, except that `Drag` yields `None` where
+    /// any `NoDrag` hitbox contains the mouse, occluded or not.
+    pub fn window_control_area_at_mouse(&self) -> Option<WindowControlArea> {
+        let hovered = |id: &HitboxId| self.mouse_hit_test.iter_hovered().any(|h| h == id);
+        let controls = &self.rendered_frame.window_control_hitboxes;
+        let area = controls
+            .iter()
+            .find(|(area, hitbox)| *area != WindowControlArea::NoDrag && hovered(&hitbox.id))
+            .map(|(area, _)| *area)?;
+        let position = self.mouse_position;
+        let cut = controls
+            .iter()
+            .any(|(area, hitbox)| *area == WindowControlArea::NoDrag && hitbox.contains(&position));
+        (area != WindowControlArea::Drag || !cut).then_some(area)
     }
 
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
