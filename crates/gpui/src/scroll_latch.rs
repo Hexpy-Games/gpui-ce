@@ -45,7 +45,7 @@ pub(crate) struct ScrollLatch {
     last_event: Option<Instant>,
     momentum: bool,
     has_delta: bool,
-    /// (scroller, can move directly, can move through the vertical-to-horizontal remap),
+    /// (scroller, can move directly, can move through its opted-in axis remap),
     /// outermost first.
     offers: SmallVec<[(ScrollLatchKey, bool, bool); 4]>,
 }

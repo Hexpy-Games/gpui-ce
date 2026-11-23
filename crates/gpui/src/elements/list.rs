@@ -1677,11 +1677,11 @@ impl Element for List {
                 // After a reset `scroll` drops events, so the list cannot move.
                 let room = !state.reset && {
                     let top = state.scroll_top(&scroll_top)
-                        - accumulated_scroll_delta.pixel_delta(px(20.)).y;
+                        - accumulated_scroll_delta.wheel_pixel_delta().y;
                     has_room(
                         point(px(0.), -top),
                         point(px(0.), state.user_scroll_max(height)),
-                        point(px(0.), event.delta.pixel_delta(px(20.)).y),
+                        point(px(0.), event.delta.wheel_pixel_delta().y),
                     )
                 };
                 window.offer_scroll_latch(key, room, room);
@@ -1697,7 +1697,7 @@ impl Element for List {
                     let max = state.max_scroll_offset();
                     let room = (point(px(0.), max - top), point(px(0.), top));
                     if state.glide.add(
-                        event.delta.pixel_delta(px(20.)),
+                        event.delta.wheel_pixel_delta(),
                         room,
                         cx.background_executor().now(),
                     ) {
@@ -1709,7 +1709,7 @@ impl Element for List {
                     state.glide.cancel();
                 }
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
-                let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                let pixel_delta = accumulated_scroll_delta.wheel_pixel_delta();
                 state.scroll(&scroll_top, height, pixel_delta, current_view, cx)
             };
             if let Some(event) = scrolled {

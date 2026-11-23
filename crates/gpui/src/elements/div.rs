@@ -1909,6 +1909,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Let a wheel along the axis this element does not scroll move the axis it does.
+    ///
+    /// See [`Style::remap_wheel_axis`](crate::Style::remap_wheel_axis) for details.
+    fn remap_wheel_axis(mut self) -> Self {
+        self.interactivity().base_style.remap_wheel_axis = Some(true);
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
         self.interactivity().tracked_scroll_handle = Some(scroll_handle.clone());
@@ -4342,14 +4350,14 @@ impl Interactivity {
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
-            let line_height = window.line_height();
+            let remap_wheel_axis = style.remap_wheel_axis;
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             let mut filtered_scroll = (Point::default(), None);
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 let key = ScrollLatchKey::of(&scroll_offset);
                 if phase == DispatchPhase::Capture {
-                    let delta = event.delta.pixel_delta(line_height);
+                    let delta = event.delta.wheel_pixel_delta();
                     let mut filtered_delta = delta;
                     let mut filtered_state = None;
                     if restrict_scroll_to_axis
@@ -4361,11 +4369,11 @@ impl Interactivity {
                         filtered_state = Some(state);
                     }
                     let direct =
-                        axis_deltas(filtered_delta, overflow, true, allow_concurrent_scroll);
+                        axis_deltas(filtered_delta, overflow, false, allow_concurrent_scroll);
                     let remapped = axis_deltas(
                         filtered_delta,
                         overflow,
-                        restrict_scroll_to_axis,
+                        remap_wheel_axis,
                         allow_concurrent_scroll,
                     );
                     filtered_scroll = (remapped, filtered_state);
@@ -4737,22 +4745,22 @@ impl Interactivity {
     }
 }
 
-/// The delta a scroller applies: its own axes, a lone axis taking the other axis' delta unless
-/// `restrict_scroll_to_axis`, and only the dominant axis unless `allow_concurrent_scroll`.
+/// The delta a scroller applies: its own axes, a lone axis taking the other axis' delta only
+/// when `remap`, and only the dominant axis unless `allow_concurrent_scroll`.
 fn axis_deltas(
     delta: Point<Pixels>,
     overflow: Point<Overflow>,
-    restrict_scroll_to_axis: bool,
+    remap: bool,
     allow_concurrent_scroll: bool,
 ) -> Point<Pixels> {
     let mut delta_x = match overflow.x {
         Overflow::Scroll if !delta.x.is_zero() => delta.x,
-        Overflow::Scroll if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll => delta.y,
+        Overflow::Scroll if remap && overflow.y != Overflow::Scroll => delta.y,
         _ => Pixels::ZERO,
     };
     let mut delta_y = match overflow.y {
         Overflow::Scroll if !delta.y.is_zero() => delta.y,
-        Overflow::Scroll if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll => delta.x,
+        Overflow::Scroll if remap && overflow.x != Overflow::Scroll => delta.x,
         _ => Pixels::ZERO,
     };
     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
@@ -5614,7 +5622,9 @@ mod tests {
         let target = cx
             .update_window(window, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                let target = window.line_height() * -3.;
+                let target = crate::ScrollDelta::Lines(point(0., -3.))
+                    .wheel_pixel_delta()
+                    .y;
                 window.dispatch_event(
                     ScrollWheelEvent {
                         position: point(px(50.), px(50.)),
@@ -5661,6 +5671,74 @@ mod tests {
             assert_eq!(window.simulate_next_frame(cx), 0);
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_vertical_wheel_moves_a_horizontal_scroller_only_when_it_opts_in(cx: &mut TestAppContext) {
+        struct TestView {
+            plain: ScrollHandle,
+            opted: ScrollHandle,
+        }
+
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .id("plain")
+                            .size(px(100.))
+                            .overflow_x_scroll()
+                            .track_scroll(&self.plain)
+                            .child(div().w(px(1000.)).h_full()),
+                    )
+                    .child(
+                        div()
+                            .id("opted")
+                            .size(px(100.))
+                            .overflow_x_scroll()
+                            .remap_wheel_axis()
+                            .track_scroll(&self.opted)
+                            .child(div().w(px(1000.)).h_full()),
+                    )
+            }
+        }
+
+        let plain = ScrollHandle::new();
+        let opted = ScrollHandle::new();
+        let window = cx.add_window({
+            let plain = plain.clone();
+            let opted = opted.clone();
+            move |_, _| TestView { plain, opted }
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(50.), px(50.)),
+                    delta: crate::ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(150.), px(50.)),
+                    delta: crate::ScrollDelta::Pixels(point(px(0.), px(-30.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+
+        assert_eq!(plain.offset(), point(px(0.), px(0.)));
+        assert_eq!(opted.offset(), point(px(-30.), px(0.)));
     }
 
     #[gpui::test]

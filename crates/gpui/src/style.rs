@@ -263,27 +263,11 @@ pub struct Style {
     /// Pixel-based scroll gestures are locked to their initially dominant axis. The lock may be
     /// released when the gesture changes direction strongly. Touch phases delimit gestures when
     /// available, with a timeout fallback for platforms that only emit moved events.
-    ///
-    /// This also prevents input from being remapped to another axis. For example, horizontal input
-    /// will not scroll a container that only has vertical overflow enabled. Mouse wheel platforms
-    /// typically report ordinary wheel input on the Y axis and Shift-modified input on the X axis.
-    ///
-    /// ## Motivation
-    ///
-    /// On the web when scrolling with the mouse wheel, scrolling up and down will always scroll the Y axis, even when
-    /// the mouse is over a horizontally-scrollable element.
-    ///
-    /// The only way to scroll horizontally is to hold down `Shift` while scrolling, which then changes the scroll axis
-    /// to the X axis.
-    ///
-    /// Currently, GPUI operates differently from the web in that it will scroll an element in either the X or Y axis
-    /// when scrolling with just the mouse wheel. This causes problems when scrolling in a vertical list that contains
-    /// horizontally-scrollable elements, as when you get to the horizontally-scrollable elements the scroll will be
-    /// hijacked.
-    ///
-    /// Ideally we would match the web's behavior and not have a need for this, but right now we're adding this opt-in
-    /// style property to limit the potential blast radius.
     pub restrict_scroll_to_axis: bool,
+    /// Whether a wheel along the axis this element does not scroll moves the axis it does, as a
+    /// horizontal tab strip takes a vertical wheel. Off by default: on the web only an app's own
+    /// wheel handler does this.
+    pub remap_wheel_axis: bool,
 
     // Position properties
     /// What should the `position` value of this struct use as a base offset?
@@ -1187,6 +1171,7 @@ impl Default for Style {
             overflow_fade: Edges::<AbsoluteLength>::zero(),
             allow_concurrent_scroll: false,
             restrict_scroll_to_axis: false,
+            remap_wheel_axis: false,
             scrollbar_width: AbsoluteLength::default(),
             position: Position::Relative,
             inset: Edges::auto(),
