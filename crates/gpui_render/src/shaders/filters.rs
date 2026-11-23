@@ -347,10 +347,10 @@ pub mod blur {
     /// pull along the edge toward the centre (`LENS_BEND`) curves lines crossing the bevel. With the cap the mapping folds only within about a pixel
     /// of the rim. Red shifts a little more and blue a little less (dispersion). The steep edge
     /// is whitened by Fresnel and lit by a directional specular core (no uniform stroke); the
-    /// middle can be lifted toward white or black under content.
-    pub fn lens_tap(position: Vec2f) -> Vec4f {
+    /// middle can be lifted toward white or black under content. `distance` is the shape's
+    /// signed distance at `position`.
+    pub fn lens_tap(position: Vec2f, distance: f32) -> Vec4f {
         let locals = get!(BLUR_LOCALS);
-        let distance = lens_signed_distance(position);
         let step_x = vec2f(1.0, 0.0);
         let step_y = vec2f(0.0, 1.0);
         let east = lens_signed_distance(position + step_x);
@@ -383,7 +383,6 @@ pub mod blur {
         let bezel = max(min(locals.lens_bezel, min(half.x, half.y)), 1.0);
         let t = saturate(fold_depth_at / bezel);
         let slope = lens_slope(fold_depth_at, bezel);
-        let edge_slope = lens_slope(depth, bezel);
         let cap = max(locals.lens_depth, 0.0);
         let pull = max(locals.lens_refraction, 0.0) * slope;
         let bevel_shift = pull / (1.0 + pull / max(cap, 0.0001));
@@ -418,9 +417,14 @@ pub mod blur {
             / max(1.0 - curvature * (fold_depth_at + shift_length), 0.05);
         let footprint = max(across, along_ratio);
         let frost = max(locals.lens_frost, 0.35 * max(footprint - 1.0, 0.0));
-        let red = lens_source(position + shift * (1.0 + spread), frost);
+        // Without dispersion the three channels read the same point.
         let green = lens_source(position + shift, frost);
-        let blue = lens_source(position + shift * (1.0 - spread), frost);
+        let mut red = green;
+        let mut blue = green;
+        if spread != 0.0 {
+            red = lens_source(position + shift * (1.0 + spread), frost);
+            blue = lens_source(position + shift * (1.0 - spread), frost);
+        }
 
         // A uniform lift toward white (or black): iOS maps the backdrop to about 0.87 bg + 0.13
         // white everywhere inside, from the rim band to the centre.
@@ -468,21 +472,24 @@ pub mod blur {
         // sub-pixel rim line dims smoothly instead of point-sampling into a staircase.
         let core = lens_core(depth, width);
         let glow = exp(-depth / (LENS_GLOW_LENGTH * width)) * max(locals.lens_halo, 0.0) * thin;
-        let grazing = 1.0 - 1.0 / sqrt(1.0 + edge_slope * edge_slope);
-        let fresnel = select(
-            grazing * grazing * grazing * grazing * max(locals.lens_fresnel, 0.0),
-            0.0,
-            toned,
-        );
+        let mut fresnel = 0.0;
+        if !toned {
+            let edge_slope = lens_slope(depth, bezel);
+            let grazing = 1.0 - 1.0 / sqrt(1.0 + edge_slope * edge_slope);
+            fresnel = grazing * grazing * grazing * grazing * max(locals.lens_fresnel, 0.0);
+        }
         // A positive ambient lights the rim all round; a negative one leaves a thin dark line
         // where the light lobe is weak (iOS's vertical ends), without dimming the lit rim.
         let lit = max(locals.lens_specular, 0.0) * (lobe + max(ambient, 0.0)) * (core + glow);
         let highlight = saturate(lit + fresnel);
         let rim_dark = saturate(max(-ambient, 0.0) * (1.0 - saturate(lobe)) * core);
-        let shade_in = 1.0 - exp(-depth / max(width * 1.5, 0.5));
-        let shade_out = exp(-depth / max(bezel * 0.3, 1.0));
         let shade_amount = select(max(locals.lens_shade, 0.0), 0.0, toned);
-        let shade = saturate(shade_amount * max(-facing, 0.0) * shade_in * shade_out * 2.0);
+        let mut shade = 0.0;
+        if shade_amount > 0.0 {
+            let shade_in = 1.0 - exp(-depth / max(width * 1.5, 0.5));
+            let shade_out = exp(-depth / max(bezel * 0.3, 1.0));
+            shade = saturate(shade_amount * max(-facing, 0.0) * shade_in * shade_out * 2.0);
+        }
         let dim = (1.0 - shade) * (1.0 - rim_dark);
         // With the tone curve on (native glass) the rim light adds to the toned sample (it is
         // measured as a near-constant step over black, grey and white), otherwise it mixes
@@ -570,9 +577,9 @@ pub mod blur {
 
     /// One lens tap, weighted 1 inside the shape and 0 outside (the composite's coverage
     /// already covers the edge pixel's outside part).
-    pub fn lens_weighted_tap(position: Vec2f) -> Vec4f {
-        let inside = select(0.0, 1.0, lens_signed_distance(position) < 0.0);
-        lens_tap(position) * inside
+    pub fn lens_weighted_tap(position: Vec2f, distance: f32) -> Vec4f {
+        let inside = select(0.0, 1.0, distance < 0.0);
+        lens_tap(position, distance) * inside
     }
 
     /// The lens, box-filtered over the pixel: four rotated-grid taps (RGSS) each run the whole
@@ -621,29 +628,27 @@ pub mod blur {
             }
             return vec4f(r, g, b, c.w);
         }
-        let a = lens_weighted_tap(position + vec2f(0.125, 0.375));
-        let b = lens_weighted_tap(position + vec2f(-0.375, 0.125));
-        let c = lens_weighted_tap(position + vec2f(-0.125, -0.375));
-        let d = lens_weighted_tap(position + vec2f(0.375, -0.125));
-        let inside = select(
-            0.0,
-            1.0,
-            lens_signed_distance(position + vec2f(0.125, 0.375)) < 0.0,
-        ) + select(
-            0.0,
-            1.0,
-            lens_signed_distance(position + vec2f(-0.375, 0.125)) < 0.0,
-        ) + select(
-            0.0,
-            1.0,
-            lens_signed_distance(position + vec2f(-0.125, -0.375)) < 0.0,
-        ) + select(
-            0.0,
-            1.0,
-            lens_signed_distance(position + vec2f(0.375, -0.125)) < 0.0,
-        );
+        let pa = position + vec2f(0.125, 0.375);
+        let pb = position + vec2f(-0.375, 0.125);
+        let pc = position + vec2f(-0.125, -0.375);
+        let pd = position + vec2f(0.375, -0.125);
+        let da = lens_signed_distance(pa);
+        let db = lens_signed_distance(pb);
+        let dc = lens_signed_distance(pc);
+        let dd = lens_signed_distance(pd);
+        let a = lens_weighted_tap(pa, da);
+        let b = lens_weighted_tap(pb, db);
+        let c = lens_weighted_tap(pc, dc);
+        let d = lens_weighted_tap(pd, dd);
+        let inside = select(0.0, 1.0, da < 0.0)
+            + select(0.0, 1.0, db < 0.0)
+            + select(0.0, 1.0, dc < 0.0)
+            + select(0.0, 1.0, dd < 0.0);
         let sum = a + b + c + d;
-        select(lens_tap(position), sum / max(inside, 1.0), inside > 0.0)
+        if inside > 0.0 {
+            return sum / max(inside, 1.0);
+        }
+        lens_tap(position, lens_signed_distance(position))
     }
 
     /// A wallpaper texture (wp_mode.x = 2) composited into the bounds: bilinear, clamped to its
