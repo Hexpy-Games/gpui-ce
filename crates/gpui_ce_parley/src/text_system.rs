@@ -2104,6 +2104,11 @@ impl ParleyTextSystem {
                 };
 
                 let run = glyph_run.run();
+                // A run of only synthetic bidi controls maps to no source text. It draws
+                // nothing and is usually shaped in a fallback font, so it must not size the line.
+                if prepared.map.source_range(run.text_range()).is_empty() {
+                    continue;
+                }
                 let normalized_coords = run
                     .normalized_coords()
                     .iter()
@@ -2147,11 +2152,6 @@ impl ParleyTextSystem {
                 text_metrics.descent = text_metrics.descent.max(px(run_metrics.descent));
                 text_top = text_top.min(px(-run_metrics.ascent - half_leading));
                 text_bottom = text_bottom.max(px(run_metrics.descent + half_leading));
-
-                // Bidi preparation can add direction markers to an empty source string.
-                if source_text_len == 0 {
-                    continue;
-                }
 
                 let glyphs = {
                     let font_instances = self.font_instances.read();
@@ -2775,6 +2775,48 @@ mod tests {
                 assert!(layout.paint_fragments.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn inline_line_with_only_a_box_keeps_the_strut_height() {
+        let system = test_system();
+        {
+            // Give Parley a default font for synthetic bidi markers without
+            // depending on installed system fonts or an explicit text run.
+            let mut state = system.parley.lock();
+            let collection = &mut state.font_context.collection;
+            let family = collection.family_id(IBM_PLEX.family).unwrap();
+            collection.set_generic_families(GenericFamily::SansSerif, std::iter::once(family));
+        }
+
+        let layout = system.layout_inline(InlineLayoutRequest {
+            text_styles: &[],
+            text: "",
+            runs: &[],
+            boxes: &[InlineBoxRequest {
+                id: 1,
+                index: 0,
+                size: size(px(40.0), px(22.0)),
+                baseline: Some(px(16.0)),
+                vertical_align: VerticalAlign::Baseline,
+            }],
+            font_size: px(14.0),
+            line_height: px(22.0),
+            text_metrics: InlineTextMetrics {
+                ascent: px(13.0),
+                descent: px(3.0),
+                x_height: px(7.0),
+            },
+            options: TextLayoutOptions {
+                direction: ParagraphDirection::LeftToRight,
+                ..Default::default()
+            },
+            bidi_scopes: &[],
+        });
+
+        assert_eq!(layout.lines.len(), 1);
+        assert_eq!(layout.lines[0].size.height, px(22.0));
+        assert_eq!(layout.size.height, px(22.0));
     }
 
     #[test]
