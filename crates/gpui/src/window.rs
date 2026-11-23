@@ -5194,7 +5194,8 @@ impl Window {
 
             let shadow = Shadow {
                 order: 0,
-                blur_radius: shadow.blur_radius.scale(scale_factor),
+                // CSS blur radius is 2σ; the scene Shadow's blur_radius is σ, as the renderer and every 3σ reach read it.
+                blur_radius: (shadow.blur_radius * 0.5).scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
                 content_mask,
                 corner_radii: shadow_radii.scale(scale_factor),
@@ -5562,15 +5563,15 @@ impl Window {
         }
     }
 
-    /// Registers a procedural canvas during painting. Returns false when the previous scene
-    /// covered this key; paint the content into the window and request an animation frame then.
+    /// Registers a procedural canvas during painting. If [`Self::live_covered`] is true for `key`, paint the
+    /// fallback first and request an animation frame: drawn below the layer, it never covers the layer itself.
     pub fn paint_live(
         &mut self,
         key: u64,
         bounds: Bounds<Pixels>,
         start_ms: u32,
         paint: LivePaint,
-    ) -> bool {
+    ) {
         self.invalidator.debug_assert_paint();
         self.next_frame.scene.insert_live_layer(LiveLayer {
             key,
@@ -5580,7 +5581,11 @@ impl Window {
             start_ms,
             paint,
         });
-        !self.covered_live_keys.contains(&key)
+    }
+
+    /// Whether the last drawn scene covered live layer `key` (a primitive or backdrop above it overlaps it).
+    pub fn live_covered(&self, key: u64) -> bool {
+        self.covered_live_keys.contains(&key)
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
@@ -9558,6 +9563,29 @@ mod tests {
         assert!(inset_gradient.bounds.size.width < inset_gradient.element_bounds.size.width);
         assert!(inset_gradient.bounds.size.height < inset_gradient.element_bounds.size.height);
         assert!(drop_gradient.order < inset_gradient.order);
+    }
+
+    struct CssShadowBlurView;
+
+    impl Render for CssShadowBlurView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(20.)).shadow(vec![
+                BoxShadow::new(px(0.), px(0.), crate::black()).blur_radius(px(28.)),
+            ])
+        }
+    }
+
+    #[gpui::test]
+    fn css_shadow_blur_paints_half_as_sigma(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| CssShadowBlurView);
+        window
+            .update(cx, |_, window, _| {
+                let shadows = &window.rendered_frame.scene.shadows;
+                let scale_factor = window.scale_factor();
+                assert_eq!(shadows.len(), 1);
+                assert_eq!(shadows[0].blur_radius, ScaledPixels(14. * scale_factor));
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -520,7 +520,7 @@ pub struct BoxShadow {
     pub color: Background,
     /// How should it be offset from its element?
     pub offset: Point<Pixels>,
-    /// How much should the shadow be blurred?
+    /// The CSS blur radius: twice the standard deviation of the shadow's Gaussian.
     #[setters(generate)]
     pub blur_radius: Pixels,
     /// How much should the shadow spread?

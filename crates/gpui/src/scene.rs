@@ -1583,6 +1583,7 @@ impl From<Underline> for Primitive {
 #[expect(missing_docs)]
 pub struct Shadow {
     pub order: DrawOrder,
+    /// The standard deviation of the shadow's Gaussian (half the CSS blur radius).
     pub blur_radius: ScaledPixels,
     pub bounds: Bounds<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
