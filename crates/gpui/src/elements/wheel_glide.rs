@@ -33,6 +33,12 @@ struct Segment {
 }
 
 impl WheelGlide {
+    pub(crate) fn remaining(&self) -> Point<Pixels> {
+        self.seg
+            .as_ref()
+            .map_or(Point::default(), |seg| seg.distance - self.applied)
+    }
+
     /// Adds a wheel notch. A running glide continues from the instant it last played
     /// (the last frame), not from the event time, so the motion it owed between that
     /// frame and the event is not postponed into a short next frame.
@@ -42,10 +48,7 @@ impl WheelGlide {
         room: (Point<Pixels>, Point<Pixels>),
         now: Instant,
     ) -> bool {
-        let remaining = self
-            .seg
-            .as_ref()
-            .map_or(Point::default(), |seg| seg.distance - self.applied);
+        let remaining = self.remaining();
         let target = remaining + delta;
         let new = point(
             target.x.clamp(-room.0.x, room.1.x),

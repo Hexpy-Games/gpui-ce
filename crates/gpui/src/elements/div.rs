@@ -28,6 +28,7 @@ use crate::{
 #[cfg(test)]
 use std::{cell::Cell, rc::Weak};
 
+use crate::scroll_latch::{ScrollLatchKey, has_room};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, AppContext, Bounds, ClickEvent,
     CursorStyle, DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
@@ -4344,71 +4345,86 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let mut filtered_scroll = (Point::default(), None);
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                    let mut scroll_offset = scroll_offset.borrow_mut();
-                    let old_scroll_offset = *scroll_offset;
-                    let mut delta = event.delta.pixel_delta(line_height);
-
+                let key = ScrollLatchKey::of(&scroll_offset);
+                if phase == DispatchPhase::Capture {
+                    let delta = event.delta.pixel_delta(line_height);
+                    let mut filtered_delta = delta;
+                    let mut filtered_state = None;
                     if restrict_scroll_to_axis
                         && event.delta.precise()
                         && let Some(ongoing_scroll) = &ongoing_scroll
                     {
-                        ongoing_scroll
-                            .borrow_mut()
-                            .filter(&mut delta, event.touch_phase);
+                        let mut state = *ongoing_scroll.borrow();
+                        state.filter(&mut filtered_delta, event.touch_phase);
+                        filtered_state = Some(state);
                     }
+                    let direct =
+                        axis_deltas(filtered_delta, overflow, true, allow_concurrent_scroll);
+                    let remapped = axis_deltas(
+                        filtered_delta,
+                        overflow,
+                        restrict_scroll_to_axis,
+                        allow_concurrent_scroll,
+                    );
+                    filtered_scroll = (remapped, filtered_state);
 
-                    let mut delta_x = match overflow.x {
-                        Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
-                        {
-                            delta.y
-                        }
-                        _ => Pixels::ZERO,
-                    };
-                    let mut delta_y = match overflow.y {
-                        Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
-                        {
-                            delta.x
-                        }
-                        _ => Pixels::ZERO,
-                    };
-                    if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
-                        if delta_x.abs() > delta_y.abs() {
-                            delta_y = Pixels::ZERO;
-                        } else {
-                            delta_x = Pixels::ZERO;
-                        }
+                    // (rev) Only a hovered, non-occluded scroller offers; once latched it moves in
+                    // the bubble phase wherever the pointer is (contact and momentum keep the latch).
+                    if !hitbox.should_handle_scroll(window) {
+                        return;
                     }
-                    if let Some(wheel_glide) = &wheel_glide {
-                        let mut glide = wheel_glide.borrow_mut();
-                        if !event.delta.precise() && wheel_glide::enabled(cx) {
-                            let room = (
-                                glide.max + *scroll_offset,
-                                point(-scroll_offset.x, -scroll_offset.y),
-                            );
-                            if glide.add(
-                                point(delta_x, delta_y),
-                                room,
-                                cx.background_executor().now(),
-                            ) {
-                                cx.notify(current_view);
-                            }
-                            return;
+                    let offset = *scroll_offset.borrow();
+                    // Always set together with `scroll_offset`; its `max` is this frame's scroll max.
+                    let max = wheel_glide
+                        .as_ref()
+                        .map_or_else(Point::default, |glide| glide.borrow().max);
+                    window.offer_scroll_latch(
+                        key,
+                        has_room(offset, max, direct),
+                        has_room(offset, max, remapped),
+                    );
+                    return;
+                }
+                if !window.is_scroll_latched(key) {
+                    return;
+                }
+                let mut scroll_offset = scroll_offset.borrow_mut();
+                let old_scroll_offset = *scroll_offset;
+                let (delta, filtered_state) = filtered_scroll;
+                if let (Some(ongoing_scroll), Some(state)) = (&ongoing_scroll, filtered_state) {
+                    *ongoing_scroll.borrow_mut() = state;
+                }
+
+                let Point {
+                    x: delta_x,
+                    y: delta_y,
+                } = delta;
+                if let Some(wheel_glide) = &wheel_glide {
+                    let mut glide = wheel_glide.borrow_mut();
+                    if !event.delta.precise() && wheel_glide::enabled(cx) {
+                        let room = (
+                            glide.max + *scroll_offset,
+                            point(-scroll_offset.x, -scroll_offset.y),
+                        );
+                        if glide.add(
+                            point(delta_x, delta_y),
+                            room,
+                            cx.background_executor().now(),
+                        ) {
+                            cx.notify(current_view);
                         }
-                        if event.delta.precise() {
-                            glide.cancel();
-                        }
+                        return;
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
-                    if *scroll_offset != old_scroll_offset {
-                        cx.notify(current_view);
+                    if event.delta.precise() {
+                        glide.cancel();
                     }
+                }
+                scroll_offset.y += delta_y;
+                scroll_offset.x += delta_x;
+                if *scroll_offset != old_scroll_offset {
+                    cx.notify(current_view);
                 }
             });
         }
@@ -4719,6 +4735,34 @@ impl Interactivity {
             node.add_action(*action);
         }
     }
+}
+
+/// The delta a scroller applies: its own axes, a lone axis taking the other axis' delta unless
+/// `restrict_scroll_to_axis`, and only the dominant axis unless `allow_concurrent_scroll`.
+fn axis_deltas(
+    delta: Point<Pixels>,
+    overflow: Point<Overflow>,
+    restrict_scroll_to_axis: bool,
+    allow_concurrent_scroll: bool,
+) -> Point<Pixels> {
+    let mut delta_x = match overflow.x {
+        Overflow::Scroll if !delta.x.is_zero() => delta.x,
+        Overflow::Scroll if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll => delta.y,
+        _ => Pixels::ZERO,
+    };
+    let mut delta_y = match overflow.y {
+        Overflow::Scroll if !delta.y.is_zero() => delta.y,
+        Overflow::Scroll if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll => delta.x,
+        _ => Pixels::ZERO,
+    };
+    if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
+        if delta_x.abs() > delta_y.abs() {
+            delta_y = Pixels::ZERO;
+        } else {
+            delta_x = Pixels::ZERO;
+        }
+    }
+    point(delta_x, delta_y)
 }
 
 /// The per-frame state of an interactive element. Used for tracking stateful interactions like clicks
@@ -5332,6 +5376,11 @@ impl ScrollHandle {
     /// Get the current scroll offset.
     pub fn offset(&self) -> Point<Pixels> {
         *self.0.borrow().offset.borrow()
+    }
+
+    /// Get the scroll offset after any queued wheel glide completes.
+    pub fn target_offset(&self) -> Point<Pixels> {
+        self.offset() + self.0.borrow().wheel_glide.borrow().remaining()
     }
 
     /// Get the maximum scroll offset.

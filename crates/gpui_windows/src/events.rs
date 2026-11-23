@@ -609,6 +609,7 @@ impl WindowsWindowInner {
             }),
             modifiers,
             touch_phase: TouchPhase::Moved,
+            momentum: false,
         });
         let handled = !func(input).propagate;
         self.state.callbacks.input.set(Some(func));
@@ -647,6 +648,7 @@ impl WindowsWindowInner {
             }),
             modifiers: current_modifiers(),
             touch_phase: TouchPhase::Moved,
+            momentum: false,
         });
         let handled = !func(event).propagate;
         self.state.callbacks.input.set(Some(func));
@@ -1051,6 +1053,7 @@ impl WindowsWindowInner {
                 WindowControlArea::Min if self.is_minimizable => Some(HTMINBUTTON as _),
                 WindowControlArea::Min if self.is_movable => Some(HTCAPTION as _),
                 WindowControlArea::Min => Some(HTNOWHERE as _),
+                WindowControlArea::NoDrag => None,
             })
         } else {
             None

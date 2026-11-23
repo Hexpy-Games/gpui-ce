@@ -592,6 +592,12 @@ pub struct ScrollWheelEvent {
 
     /// The phase of the touch event.
     pub touch_phase: TouchPhase,
+
+    /// A momentum (inertia) event the platform sends after the fingers lift (macOS
+    /// `momentumPhase`). It continues the gesture that came before it. Platforms whose inertia
+    /// arrives inside the touch phases (Windows Direct Manipulation, Wayland kinetic scroll) leave
+    /// it false.
+    pub momentum: bool,
 }
 
 impl Sealed for ScrollWheelEvent {}

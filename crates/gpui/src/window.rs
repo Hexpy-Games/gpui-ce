@@ -1,4 +1,5 @@
 // Modified by HexpyGames for Butler (2026); see NOTICE for the changes.
+use crate::scroll_latch::ScrollLatchKey;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropAppear, BackdropFilter, BackdropLens,
@@ -902,6 +903,9 @@ pub enum WindowControlArea {
     Max,
     /// An area that allows minimizing of the platform window.
     Min,
+    /// A rect inside a drag area that does not drag (Electron's `app-region: no-drag`). It cuts
+    /// its rect out of every `Drag` area by geometry, whatever covers it.
+    NoDrag,
 }
 
 /// An identifier for a [Hitbox] which also includes [HitboxBehavior].
@@ -1392,6 +1396,7 @@ pub struct Window {
     mouse_position: Point<Pixels>,
     pointer_inside_window: bool,
     mouse_hit_test: HitTest,
+    scroll_latch: crate::scroll_latch::ScrollLatch,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -2069,14 +2074,8 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move || {
                 handle
-                    .update(&mut cx, |_, window, _cx| {
-                        for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            let mut scrollable_ids = window.mouse_hit_test().iter_scrollable();
-                            if scrollable_ids.contains(&hitbox.id) {
-                                return Some(*area);
-                            }
-                        }
-                        None
+                    .update(&mut cx, |_, window, _| {
+                        window.window_control_area_at_mouse()
                     })
                     .log_err()
                     .unwrap_or(None)
@@ -2196,6 +2195,7 @@ impl Window {
             mouse_position,
             pointer_inside_window: true,
             mouse_hit_test: HitTest::default(),
+            scroll_latch: Default::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -3206,6 +3206,23 @@ impl Window {
     /// Events may not be received during a move operation.
     pub fn start_window_move(&self) {
         self.platform_window.start_window_move()
+    }
+
+    /// The window control area under the mouse: Electron's `app-region` map. The first control
+    /// area in paint order whose hitbox is hovered wins, except that `Drag` yields `None` where
+    /// any `NoDrag` hitbox contains the mouse, occluded or not.
+    pub fn window_control_area_at_mouse(&self) -> Option<WindowControlArea> {
+        let hovered = |id: &HitboxId| self.mouse_hit_test.iter_hovered().any(|h| h == id);
+        let controls = &self.rendered_frame.window_control_hitboxes;
+        let area = controls
+            .iter()
+            .find(|(area, hitbox)| *area != WindowControlArea::NoDrag && hovered(&hitbox.id))
+            .map(|(area, _)| *area)?;
+        let position = self.mouse_position;
+        let cut = controls
+            .iter()
+            .any(|(area, hitbox)| *area == WindowControlArea::NoDrag && hitbox.contains(&position));
+        (area != WindowControlArea::Drag || !cut).then_some(area)
     }
 
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
@@ -7181,6 +7198,16 @@ impl Window {
         &self.mouse_hit_test
     }
 
+    /// Capture phase of a wheel event: a hovered scroller offers to take the gesture.
+    pub(crate) fn offer_scroll_latch(&mut self, key: ScrollLatchKey, direct: bool, remapped: bool) {
+        self.scroll_latch.offer(key, direct, remapped);
+    }
+
+    /// Bubble phase of a wheel event: whether this scroller owns the current gesture.
+    pub(crate) fn is_scroll_latched(&self, key: ScrollLatchKey) -> bool {
+        self.scroll_latch.is_latched(key)
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         if event.is::<crate::MouseExitEvent>() {
             self.pointer_inside_window = false;
@@ -7205,6 +7232,12 @@ impl Window {
             return;
         }
 
+        let wheel = event.downcast_ref::<crate::ScrollWheelEvent>();
+        if let Some(wheel) = wheel {
+            self.scroll_latch
+                .begin(wheel, cx.background_executor().now());
+        }
+
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
 
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
@@ -7215,6 +7248,10 @@ impl Window {
             if !cx.propagate_event {
                 break;
             }
+        }
+
+        if wheel.is_some() {
+            self.scroll_latch.resolve();
         }
 
         // Bubble phase, where most normal handlers do their work.
@@ -10963,6 +11000,84 @@ mod tests {
             assert_eq!(controls.len(), 1);
             assert_eq!(controls[0].0, WindowControlArea::Drag);
             assert_eq!(controls[0].1.id, hitbox_id);
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn window_control_area_at_mouse_cuts_drag_by_geometry(cx: &mut TestAppContext) {
+        struct ControlRoot;
+
+        impl Render for ControlRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size(px(200.))
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(px(200.))
+                            .h(px(40.))
+                            .window_control_area(WindowControlArea::Drag)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(10.))
+                                    .top(px(10.))
+                                    .size(px(20.))
+                                    .window_control_area(WindowControlArea::NoDrag),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(150.))
+                                    .top(px(10.))
+                                    .size(px(20.))
+                                    .window_control_area(WindowControlArea::NoDrag),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("o")
+                            .absolute()
+                            .left(px(100.))
+                            .top_0()
+                            .w(px(100.))
+                            .h(px(100.))
+                            .occlude()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(40.))
+                                    .window_control_area(WindowControlArea::Drag),
+                            ),
+                    )
+            }
+        }
+
+        let window = cx.add_window(|_, _| ControlRoot);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+
+            window.simulate_mouse_move(point(px(50.), px(20.)), cx);
+            assert_eq!(
+                window.window_control_area_at_mouse(),
+                Some(WindowControlArea::Drag)
+            );
+
+            window.simulate_mouse_move(point(px(20.), px(20.)), cx);
+            assert_eq!(window.window_control_area_at_mouse(), None);
+
+            window.simulate_mouse_move(point(px(160.), px(20.)), cx);
+            assert_eq!(window.window_control_area_at_mouse(), None);
+
+            window.simulate_mouse_move(point(px(120.), px(20.)), cx);
+            assert_eq!(
+                window.window_control_area_at_mouse(),
+                Some(WindowControlArea::Drag)
+            );
         })
         .unwrap();
     }

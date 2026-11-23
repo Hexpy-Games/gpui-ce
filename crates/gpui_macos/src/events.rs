@@ -256,8 +256,12 @@ pub(crate) unsafe fn platform_input_from_native(
                 let phase = match native_event.phase() {
                     NSEventPhase::MayBegin | NSEventPhase::Began => TouchPhase::Started,
                     NSEventPhase::Ended => TouchPhase::Ended,
+                    NSEventPhase::Cancelled => TouchPhase::Cancelled,
                     _ => TouchPhase::Moved,
                 };
+                // Momentum events have `phase() == None` and a non-None `momentumPhase()`
+                // (Began/Changed/Ended); they continue the gesture that just ended.
+                let momentum = native_event.momentumPhase() != NSEventPhase::None;
 
                 let raw_data = point(
                     native_event.scrollingDeltaX() as f32,
@@ -277,6 +281,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     ),
                     delta,
                     touch_phase: phase,
+                    momentum,
                     modifiers: read_modifiers(native_event),
                 })
             }),
