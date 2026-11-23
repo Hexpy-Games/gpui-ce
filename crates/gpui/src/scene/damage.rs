@@ -1010,6 +1010,31 @@ mod tests {
     }
 
     #[test]
+    fn a_live_layer_is_not_covered_by_what_paints_below_it() {
+        let mut scene = Scene {
+            offload_animations: true,
+            ..Scene::default()
+        };
+        scene.insert_primitive(Quad {
+            bounds: rect(0.0, 0.0, 20.0, 20.0),
+            content_mask: mask(),
+            background: crate::red().into(),
+            ..Default::default()
+        });
+        scene.insert_live_layer(crate::LiveLayer {
+            key: 1,
+            bounds: rect(0.0, 0.0, 20.0, 20.0),
+            content_mask: mask(),
+            order: 0,
+            start_ms: 0,
+            paint: std::sync::Arc::new(|_, _| {}),
+        });
+        scene.finish();
+        assert_eq!(scene.live_layers().len(), 1);
+        assert!(scene.covered_live_keys().is_empty());
+    }
+
+    #[test]
     fn frame_loop_sprites_mark_the_scene_animated() {
         let clipped = rect(90.0, 90.0, 20.0, 20.0);
         let mut small_mask = mask();

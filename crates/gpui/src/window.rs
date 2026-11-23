@@ -5550,15 +5550,15 @@ impl Window {
         }
     }
 
-    /// Registers a procedural canvas during painting. Returns false when the previous scene
-    /// covered this key; paint the content into the window and request an animation frame then.
+    /// Registers a procedural canvas during painting. If [`Self::live_covered`] is true for `key`, paint the
+    /// fallback first and request an animation frame: drawn below the layer, it never covers the layer itself.
     pub fn paint_live(
         &mut self,
         key: u64,
         bounds: Bounds<Pixels>,
         start_ms: u32,
         paint: LivePaint,
-    ) -> bool {
+    ) {
         self.invalidator.debug_assert_paint();
         self.next_frame.scene.insert_live_layer(LiveLayer {
             key,
@@ -5568,7 +5568,11 @@ impl Window {
             start_ms,
             paint,
         });
-        !self.covered_live_keys.contains(&key)
+    }
+
+    /// Whether the last drawn scene covered live layer `key` (a primitive or backdrop above it overlaps it).
+    pub fn live_covered(&self, key: u64) -> bool {
+        self.covered_live_keys.contains(&key)
     }
 
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
