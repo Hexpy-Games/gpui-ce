@@ -1382,6 +1382,7 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+    frame_vsync: Rc<Cell<Option<crate::FrameVsync>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
@@ -1659,6 +1660,7 @@ impl Window {
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
         let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
+        let frame_vsync: Rc<Cell<Option<crate::FrameVsync>>> = Rc::default();
         let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
         let last_frame_time = Rc::new(Cell::new(None));
         let surface_resized = Rc::new(Cell::new(false));
@@ -1819,6 +1821,7 @@ impl Window {
             let active = active.clone();
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
+            let frame_vsync = frame_vsync.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             let surface_resized = surface_resized.clone();
             let mut deferred_force_render = false;
@@ -1900,6 +1903,9 @@ impl Window {
                 last_frame_time.set(Some(now));
                 // One animation time for everything this frame reads (callbacks, layout,
                 // encode), from the display's vsync when the platform reports it.
+                if request_frame_options.vsync.is_some() {
+                    frame_vsync.set(request_frame_options.vsync);
+                }
                 let _animation_frame = crate::AnimationFrame::begin(request_frame_options.vsync);
 
                 let pending_next_frame_callbacks = next_frame_callbacks.take();
@@ -2177,6 +2183,7 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
+            frame_vsync,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
@@ -2867,6 +2874,12 @@ impl Window {
         // Next-frame callbacks create frame demand without dirtying the
         // window, so the platform's frame source must be woken explicitly.
         self.invalidator.wake_platform();
+    }
+
+    /// The display vsync of the frame being drawn, else the last one reported; `None` where
+    /// the platform reports none (Linux).
+    pub fn frame_vsync(&self) -> Option<crate::FrameVsync> {
+        self.frame_vsync.get()
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
