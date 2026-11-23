@@ -10964,6 +10964,84 @@ mod tests {
     }
 
     #[gpui::test]
+    fn window_control_area_at_mouse_cuts_drag_by_geometry(cx: &mut TestAppContext) {
+        struct ControlRoot;
+
+        impl Render for ControlRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size(px(200.))
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(px(200.))
+                            .h(px(40.))
+                            .window_control_area(WindowControlArea::Drag)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(10.))
+                                    .top(px(10.))
+                                    .size(px(20.))
+                                    .window_control_area(WindowControlArea::NoDrag),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(150.))
+                                    .top(px(10.))
+                                    .size(px(20.))
+                                    .window_control_area(WindowControlArea::NoDrag),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("o")
+                            .absolute()
+                            .left(px(100.))
+                            .top_0()
+                            .w(px(100.))
+                            .h(px(100.))
+                            .occlude()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(40.))
+                                    .window_control_area(WindowControlArea::Drag),
+                            ),
+                    )
+            }
+        }
+
+        let window = cx.add_window(|_, _| ControlRoot);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+
+            window.simulate_mouse_move(point(px(50.), px(20.)), cx);
+            assert_eq!(
+                window.window_control_area_at_mouse(),
+                Some(WindowControlArea::Drag)
+            );
+
+            window.simulate_mouse_move(point(px(20.), px(20.)), cx);
+            assert_eq!(window.window_control_area_at_mouse(), None);
+
+            window.simulate_mouse_move(point(px(160.), px(20.)), cx);
+            assert_eq!(window.window_control_area_at_mouse(), None);
+
+            window.simulate_mouse_move(point(px(120.), px(20.)), cx);
+            assert_eq!(
+                window.window_control_area_at_mouse(),
+                Some(WindowControlArea::Drag)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
     fn cached_replay_preserves_a11y_nodes(cx: &mut TestAppContext) {
         struct AccessibleChild {
             focus: FocusHandle,
