@@ -4360,13 +4360,15 @@ impl Interactivity {
                         state.filter(&mut filtered_delta, event.touch_phase);
                         filtered_state = Some(state);
                     }
-                    let direct = axis_deltas(
+                    let direct =
+                        axis_deltas(filtered_delta, overflow, true, allow_concurrent_scroll);
+                    let remapped = axis_deltas(
                         filtered_delta,
                         overflow,
                         restrict_scroll_to_axis,
                         allow_concurrent_scroll,
                     );
-                    filtered_scroll = (direct, filtered_state);
+                    filtered_scroll = (remapped, filtered_state);
 
                     // (rev) Only a hovered, non-occluded scroller offers; once latched it moves in
                     // the bubble phase wherever the pointer is (contact and momentum keep the latch).
@@ -4378,12 +4380,6 @@ impl Interactivity {
                     let max = wheel_glide
                         .as_ref()
                         .map_or_else(Point::default, |glide| glide.borrow().max);
-                    let remapped = axis_deltas(
-                        delta,
-                        overflow,
-                        restrict_scroll_to_axis,
-                        allow_concurrent_scroll,
-                    );
                     window.offer_scroll_latch(
                         key,
                         has_room(offset, max, direct),
@@ -5380,6 +5376,11 @@ impl ScrollHandle {
     /// Get the current scroll offset.
     pub fn offset(&self) -> Point<Pixels> {
         *self.0.borrow().offset.borrow()
+    }
+
+    /// Get the scroll offset after any queued wheel glide completes.
+    pub fn target_offset(&self) -> Point<Pixels> {
+        self.offset() + self.0.borrow().wheel_glide.borrow().remaining()
     }
 
     /// Get the maximum scroll offset.
