@@ -1,6 +1,6 @@
 use crate::{
     Bounds, Capslock, Context, Empty, IntoElement, Keystroke, LongPressEvent, Modifiers, Pixels,
-    Point, Render, TouchDragEvent, Window, point, seal::Sealed,
+    Point, Render, TouchDragEvent, Window, point, px, seal::Sealed,
 };
 use smallvec::SmallVec;
 use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
@@ -668,6 +668,15 @@ impl Deref for PinchEvent {
     }
 }
 
+/// Pixels per wheel line, as Chromium scrolls them: 40 on macOS (`kScrollbarPixelsPerCocoaTick`)
+/// and Linux (120 per notch, which gpui reports as 3 lines), 100/3 on Windows (100 per notch at
+/// the default 3 lines).
+const WHEEL_LINE: Pixels = if cfg!(target_os = "windows") {
+    px(100. / 3.)
+} else {
+    px(40.)
+};
+
 impl ScrollDelta {
     /// Returns true if this is a precise scroll delta in pixels.
     pub fn precise(&self) -> bool {
@@ -683,6 +692,11 @@ impl ScrollDelta {
             ScrollDelta::Pixels(delta) => *delta,
             ScrollDelta::Lines(delta) => point(line_height * delta.x, line_height * delta.y),
         }
+    }
+
+    /// This delta in pixels for a wheel: a line moves Chromium's distance on this OS (`WHEEL_LINE`).
+    pub fn wheel_pixel_delta(&self) -> Point<Pixels> {
+        self.pixel_delta(WHEEL_LINE)
     }
 
     /// Combines two scroll deltas into one.

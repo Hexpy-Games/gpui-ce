@@ -4342,14 +4342,13 @@ impl Interactivity {
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
-            let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             let mut filtered_scroll = (Point::default(), None);
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 let key = ScrollLatchKey::of(&scroll_offset);
                 if phase == DispatchPhase::Capture {
-                    let delta = event.delta.pixel_delta(line_height);
+                    let delta = event.delta.wheel_pixel_delta();
                     let mut filtered_delta = delta;
                     let mut filtered_state = None;
                     if restrict_scroll_to_axis
@@ -5614,7 +5613,9 @@ mod tests {
         let target = cx
             .update_window(window, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                let target = window.line_height() * -3.;
+                let target = crate::ScrollDelta::Lines(point(0., -3.))
+                    .wheel_pixel_delta()
+                    .y;
                 window.dispatch_event(
                     ScrollWheelEvent {
                         position: point(px(50.), px(50.)),
