@@ -168,6 +168,15 @@ pub mod blur {
     pub const LENS_GLOW_LENGTH: f32 = 2.25;
     /// Half width of the curvature stencil, in device px.
     pub const LENS_CURVATURE_STENCIL: f32 = 4.0;
+    /// How far a pixel's sub-samples lie from its centre at most, in device px (0.395, rounded up).
+    pub const LENS_TAP_REACH: f32 = 0.4;
+    /// Half width of the stencil that finds a pixel on a flat edge (see lens_color): the curvature
+    /// stencil plus the sub-samples' reach (0.5 along an axis) and 1.5px to spare.
+    pub const LENS_FLAT_STENCIL: f32 = 6.0;
+    /// Rounding noise allowed in that stencil's sum, in device px.
+    pub const LENS_FLAT_NOISE: f32 = 0.002;
+    /// The rim light counts as out of reach below this: a quarter of an 8-bit level.
+    pub const LENS_LIGHT_FLOOR: f32 = 0.001;
     texture!(group(1), binding(1), BLUR_TEXTURE: Texture2D<f32>);
     sampler!(group(1), binding(2), BLUR_SAMPLER: Sampler);
 
@@ -296,7 +305,8 @@ pub mod blur {
         rounded_rectangle_signed_distance(position, locals.bounds, locals.corner_radii)
     }
 
-    /// The refraction's depth field and its outward direction, (depth, direction.x, direction.y).
+    /// The refraction's depth field and its outward direction, (depth, direction.x, direction.y),
+    /// and in w whether the field is the plain distance and edge normal here (1) or not (0).
     /// The distance field's inner contours lose their rounding deeper than the corner radius r
     /// and meet the straight edges' contours on 45-degree medial-axis creases, where the inward
     /// direction turns by 90 degrees at once: the seam inside a tall composer's corners. Here
@@ -307,8 +317,11 @@ pub mod blur {
     /// on the stadium's centre line, where the fold has run out (depth = half the short side).
     /// Equal to the distance on straight edges, pills and circles; in a corner the depth runs
     /// slower than the distance (by 1/sqrt(2) on the diagonal near the rim), which widens the
-    /// fold band round the corner a little instead of creasing it.
-    pub fn lens_field(position: Vec2f) -> Vec3f {
+    /// fold band round the corner a little instead of creasing it. w is 1 only where that
+    /// holds half a pixel around (for every sub-sample of the pixel): clear of the turning
+    /// corner zone, of the stadium's round ends and of the centre lines (the stadium direction
+    /// shortens within 2px of them).
+    pub fn lens_field(position: Vec2f) -> Vec4f {
         let locals = get!(BLUR_LOCALS);
         let half = Bounds::half_size(locals.bounds);
         let local = position - Bounds::center(locals.bounds);
@@ -338,26 +351,31 @@ pub mod blur {
         let deep = shrink_depth > short - r;
         let depth = select(shrink_depth, stadium_depth, deep);
         let dir = select(shrink_dir, stadium_dir, deep);
-        vec3f(depth, dir.x * side.x, dir.y * side.y)
+        let beside = p - segment;
+        let plain = (abs(gap) > r + 0.5 || shrink_depth > short - r + 0.5)
+            && (min(beside.x, beside.y) < -0.5 || shrink_depth < short - r - 0.5)
+            && min(p.x, p.y) > 2.5;
+        vec4f(
+            depth,
+            dir.x * side.x,
+            dir.y * side.y,
+            select(0.0, 1.0, plain),
+        )
     }
 
-    /// The backdrop seen through the lens. Each sample moves inward along the edge normal by
-    /// `lens_refraction` times the bevel slope, softly capped at `lens_depth` (s / (1 + s / cap)),
-    /// so the backdrop near the rim is squashed toward it, while the middle maps 1:1. A smaller
-    /// pull along the edge toward the centre (`LENS_BEND`) curves lines crossing the bevel. With the cap the mapping folds only within about a pixel
-    /// of the rim. Red shifts a little more and blue a little less (dispersion). The steep edge
-    /// is whitened by Fresnel and lit by a directional specular core (no uniform stroke); the
-    /// middle can be lifted toward white or black under content. `distance` is the shape's
-    /// signed distance at `position`.
-    pub fn lens_tap(position: Vec2f, distance: f32) -> Vec4f {
-        let locals = get!(BLUR_LOCALS);
-        let step_x = vec2f(1.0, 0.0);
-        let step_y = vec2f(0.0, 1.0);
-        let east = lens_signed_distance(position + step_x);
-        let west = lens_signed_distance(position - step_x);
-        let south = lens_signed_distance(position + step_y);
-        let north = lens_signed_distance(position - step_y);
-        let gradient = vec2f(east - west, south - north);
+    /// The edge at a sample, (normal.x, normal.y, curvature), from stencils of the signed
+    /// distance. Only the rim light reads the normal, so it is taken only when `lit`.
+    pub fn lens_edge(position: Vec2f, distance: f32, lit: bool) -> Vec3f {
+        let mut gradient = vec2f(0.0, 0.0);
+        if lit {
+            let step_x = vec2f(1.0, 0.0);
+            let step_y = vec2f(0.0, 1.0);
+            let east = lens_signed_distance(position + step_x);
+            let west = lens_signed_distance(position - step_x);
+            let south = lens_signed_distance(position + step_y);
+            let north = lens_signed_distance(position - step_y);
+            gradient = vec2f(east - west, south - north);
+        }
         // Curvature of the edge here (the Laplacian of a distance field): 0 on straight edges,
         // 1 / radius on the rounded corners and ends. A circular corner's curvature jumps where
         // it meets the straight edge, so it is taken over a wider (4px) stencil, which ramps it
@@ -373,19 +391,59 @@ pub mod blur {
             0.0,
         );
         let normal = gradient / max(length(gradient), 0.0001);
+        vec3f(normal.x, normal.y, curvature)
+    }
+
+    /// Whether the rim light can still change the composited colour by LENS_LIGHT_FLOOR at
+    /// `depth` px inside the edge or deeper: the sum of lens_tap's highlight, rim-dark and shade
+    /// terms at their largest (the brighter lobe full on, no thinning, the shade fully faced).
+    /// Each only falls with depth, and what the highlight adds and what the three dim pull
+    /// opposite ways, so the sum bounds the change.
+    pub fn lens_lit(depth: f32) -> bool {
+        let locals = get!(BLUR_LOCALS);
+        if depth <= 0.0 {
+            return true;
+        }
+        let width = max(locals.lens_rim, 0.25);
+        let core = lens_core(depth, width);
+        let glow = exp(-depth / (LENS_GLOW_LENGTH * width)) * max(locals.lens_halo, 0.0);
+        let ambient = clamp(locals.lens_ambient, -1.0, 1.0);
+        let opposite = max(locals.lens_opposite, 0.0);
+        let faint = pow(0.00001, max(locals.lens_focus, 0.05));
+        let lobe = max(1.0 + faint * opposite, faint + opposite) + max(ambient, 0.0);
+        let mut light = max(locals.lens_specular, 0.0) * lobe * (core + glow);
+        if !lens_tone_on() {
+            let half = Bounds::half_size(locals.bounds);
+            let bezel = max(min(locals.lens_bezel, min(half.x, half.y)), 1.0);
+            let edge_slope = lens_slope(depth, bezel);
+            let grazing = 1.0 - 1.0 / sqrt(1.0 + edge_slope * edge_slope);
+            light += grazing * grazing * grazing * grazing * max(locals.lens_fresnel, 0.0)
+                + 2.0 * max(locals.lens_shade, 0.0) * exp(-depth / max(bezel * 0.3, 1.0));
+        }
+        light + max(-ambient, 0.0) * core > LENS_LIGHT_FLOOR
+    }
+
+    /// The backdrop seen through the lens. Each sample moves inward along the edge normal by
+    /// `lens_refraction` times the bevel slope, softly capped at `lens_depth` (s / (1 + s / cap)),
+    /// so the backdrop near the rim is squashed toward it, while the middle maps 1:1. A smaller
+    /// pull along the edge toward the centre (`LENS_BEND`) curves lines crossing the bevel. With the cap the mapping folds only within about a pixel
+    /// of the rim. Red shifts a little more and blue a little less (dispersion). The steep edge
+    /// is whitened by Fresnel and lit by a directional specular core (no uniform stroke); the
+    /// middle can be lifted toward white or black under content. `distance` is the shape's
+    /// signed distance at `position`, `edge` its lens_edge and `field` its lens_field there;
+    /// the rim light is left out unless `lit` (see lens_lit).
+    pub fn lens_tap(position: Vec2f, distance: f32, edge: Vec3f, field: Vec4f, lit: bool) -> Vec4f {
+        let locals = get!(BLUR_LOCALS);
+        let normal = vec2f(edge.x, edge.y);
+        let curvature = edge.z;
         let depth = max(-distance, 0.0);
         // The refraction follows the continuous field (lens_field); the rim light keeps the exact
         // distance and normal.
-        let field = lens_field(position);
         let fold_depth_at = max(field.x, 0.0);
         let fold_normal = vec2f(field.y, field.z);
         let half = Bounds::half_size(locals.bounds);
         let bezel = max(min(locals.lens_bezel, min(half.x, half.y)), 1.0);
         let t = saturate(fold_depth_at / bezel);
-        let slope = lens_slope(fold_depth_at, bezel);
-        let cap = max(locals.lens_depth, 0.0);
-        let pull = max(locals.lens_refraction, 0.0) * slope;
-        let bevel_shift = pull / (1.0 + pull / max(cap, 0.0001));
         // Fold (fitted to iOS Liquid Glass against its clean wallpaper): the inward shift is
         // S (1 - d / B)^p with B and S relative to the shape's half size. The rim samples S deep,
         // and the shift falls faster than the depth grows, so the band next to the rim shows a
@@ -396,23 +454,34 @@ pub mod blur {
         let fold = max(locals.lens_fold, 0.0);
         let fold_band = max(locals.lens_fold_band * size, 1.0);
         let fold_rest = max(1.0 - fold_depth_at / fold_band, 0.00001);
-        let fold_shift = max(locals.lens_fold_depth, 0.0) * size * pow(fold_rest, max(fold, 0.01));
         let folding = fold > 0.0;
-        let shift_length = select(bevel_shift, fold_shift, folding);
+        // Only the mapping in use is worked out: the fold, or the bevel with its bend.
+        let mut shift_length = 0.0;
+        let mut fold_slope = 0.0;
+        let mut bend = vec2f(0.0, 0.0);
+        if folding {
+            shift_length =
+                max(locals.lens_fold_depth, 0.0) * size * pow(fold_rest, max(fold, 0.01));
+            // The fold's squeeze |dD/dd| across the edge, for the minification filter below.
+            fold_slope = max(locals.lens_fold_depth, 0.0) * size * fold / fold_band
+                * pow(fold_rest, max(fold - 1.0, 0.0));
+        } else {
+            let slope = lens_slope(fold_depth_at, bezel);
+            let cap = max(locals.lens_depth, 0.0);
+            let pull = max(locals.lens_refraction, 0.0) * slope;
+            shift_length = pull / (1.0 + pull / max(cap, 0.0001));
+            let toward = (Bounds::center(locals.bounds) - position) / max(half, vec2f(1.0, 1.0));
+            let along = toward - fold_normal * dot(toward, fold_normal);
+            bend = along * (max(locals.lens_refraction, 0.0) * LENS_BEND * (1.0 - t) * (1.0 - t));
+        }
         let spread = abs(locals.lens_dispersion);
-        let toward = (Bounds::center(locals.bounds) - position) / max(half, vec2f(1.0, 1.0));
-        let along = toward - fold_normal * dot(toward, fold_normal);
-        let bend_amount = select(LENS_BEND, 0.0, folding);
-        let bend = along * (max(locals.lens_refraction, 0.0) * bend_amount * (1.0 - t) * (1.0 - t));
         let shift = fold_normal * (-shift_length) + bend;
 
         // Minification filter: the fold squeezes the backdrop by |dD/dd| across the edge (up to
         // about 3x next to the rim) and, on curved edges, by the radius ratio along it, so each
         // tap gathers a disc as wide as its share of that footprint instead of one bilinear
         // sample (which would skip texels and alias the squeezed band).
-        let fold_slope = max(locals.lens_fold_depth, 0.0) * size * fold / fold_band
-            * pow(fold_rest, max(fold - 1.0, 0.0));
-        let across = abs(1.0 - select(0.0, fold_slope, folding));
+        let across = abs(1.0 - fold_slope);
         let along_ratio = max(1.0 - curvature * fold_depth_at, 0.05)
             / max(1.0 - curvature * (fold_depth_at + shift_length), 0.05);
         let footprint = max(across, along_ratio);
@@ -437,14 +506,23 @@ pub mod blur {
         // Native fill (padding2 tone flag, see BlurUniforms::with_lens): a tone curve on the
         // sample instead of the lift.
         let toned = lens_tone_on();
-        let mut r = select(r0, lens_tone(red.x, red.w), toned);
-        let mut g = select(g0, lens_tone(green.y, green.w), toned);
-        let mut b = select(b0, lens_tone(blue.z, blue.w), toned);
+        let mut r = r0;
+        let mut g = g0;
+        let mut b = b0;
+        if toned {
+            r = lens_tone(red.x, red.w);
+            g = lens_tone(green.y, green.w);
+            b = lens_tone(blue.z, blue.w);
+        }
         if locals.lens_saturation != 1.0 {
             let saturated = lens_saturate(r, g, b, locals.lens_saturation);
             r = saturated.x;
             g = saturated.y;
             b = saturated.z;
+        }
+        if !lit {
+            // The alpha the light would add is under the same floor.
+            return vec4f(r, g, b, green.w);
         }
 
         // Edge light (Liquid Glass Studio's two-sided glare, MIT, iyinchao; ybouane's Fresnel):
@@ -576,10 +654,27 @@ pub mod blur {
     }
 
     /// One lens tap, weighted 1 inside the shape and 0 outside (the composite's coverage
-    /// already covers the edge pixel's outside part).
-    pub fn lens_weighted_tap(position: Vec2f, distance: f32) -> Vec4f {
+    /// already covers the edge pixel's outside part). On a flat edge (`flat`, see lens_color)
+    /// the tap takes the pixel's `normal` with no curvature, and where the field is `plain` too
+    /// (lens_field's w) its distance and that normal are the field.
+    pub fn lens_weighted_tap(
+        position: Vec2f,
+        distance: f32,
+        normal: Vec2f,
+        flat: bool,
+        plain: bool,
+        lit: bool,
+    ) -> Vec4f {
         let inside = select(0.0, 1.0, distance < 0.0);
-        lens_tap(position, distance) * inside
+        let mut edge = vec3f(normal.x, normal.y, 0.0);
+        if !flat {
+            edge = lens_edge(position, distance, lit);
+        }
+        let mut field = vec4f(-distance, normal.x, normal.y, 1.0);
+        if !plain {
+            field = lens_field(position);
+        }
+        lens_tap(position, distance, edge, field, lit) * inside
     }
 
     /// The lens, box-filtered over the pixel: four rotated-grid taps (RGSS) each run the whole
@@ -587,6 +682,20 @@ pub mod blur {
     /// sub-pixel-wide rim line are averaged over the pixel instead of point-sampled at its centre
     /// (which stair-steps along curves, worst at a scale factor of 1). Taps outside the shape are
     /// left out; the composite multiplies by the edge coverage.
+    ///
+    /// What the four taps of a pixel provably share is worked out once for the pixel:
+    /// - The rim light, where it cannot reach any of them (lens_lit at the shallowest), is left
+    ///   out of all four.
+    /// - On a flat edge the taps need no stencils. The signed distance of a convex shape is a
+    ///   convex function, so where its second differences over a stencil vanish (to within
+    ///   LENS_FLAT_NOISE) it is affine on
+    ///   the stencil's whole diamond. LENS_FLAT_STENCIL's diamond holds every tap's own
+    ///   stencils, so the taps (all inside the shape) have the pixel's edge normal, no
+    ///   curvature, and distances that follow from the centre's; where lens_field is plain as
+    ///   well, those are its field.
+    /// Each tap still runs its own mapping and reads the backdrop at its own point. The
+    /// sharp-rim pass keeps every tap whole: it blends over the first pass's 8-bit result, where
+    /// a rounding step of its own would add to the first pass's.
     pub fn lens_color(position: Vec2f) -> Vec4f {
         // Deep in a flat sheet's middle the lens is the identity mapping with only the uniform
         // lift (no fold shift, bevel slope, rim core, glow, shade or minification filter reach
@@ -603,7 +712,8 @@ pub mod blur {
             + LENS_GLOW_LENGTH * 6.0 * max(locals.lens_rim, 0.25)
             + max(locals.lens_bezel * 0.3, 1.0) * 6.0
             + 4.0;
-        if locals.lens_frost <= 0.0 && lens_field(position).x > reach {
+        let field = lens_field(position);
+        if locals.lens_frost <= 0.0 && field.x > reach {
             let c = sample_composite_source(position);
             let mut r = 0.0;
             let mut g = 0.0;
@@ -628,18 +738,48 @@ pub mod blur {
             }
             return vec4f(r, g, b, c.w);
         }
-        let pa = position + vec2f(0.125, 0.375);
-        let pb = position + vec2f(-0.375, 0.125);
-        let pc = position + vec2f(-0.125, -0.375);
-        let pd = position + vec2f(0.375, -0.125);
-        let da = lens_signed_distance(pa);
-        let db = lens_signed_distance(pb);
-        let dc = lens_signed_distance(pc);
-        let dd = lens_signed_distance(pd);
-        let a = lens_weighted_tap(pa, da);
-        let b = lens_weighted_tap(pb, db);
-        let c = lens_weighted_tap(pc, dc);
-        let d = lens_weighted_tap(pd, dd);
+        let whole = locals.padding1 > 0u32;
+        let distance = lens_signed_distance(position);
+        let mut flat = false;
+        let mut normal = vec2f(0.0, 0.0);
+        if !whole && distance < -LENS_TAP_REACH {
+            let wide = LENS_FLAT_STENCIL;
+            let east = lens_signed_distance(position + vec2f(wide, 0.0));
+            let west = lens_signed_distance(position - vec2f(wide, 0.0));
+            let south = lens_signed_distance(position + vec2f(0.0, wide));
+            let north = lens_signed_distance(position - vec2f(0.0, wide));
+            flat = east + west + south + north - 4.0 * distance < LENS_FLAT_NOISE;
+            // An affine piece of the distance is a straight edge's: its gradient is an axis.
+            normal = select(
+                vec2f(0.0, sign(south - north)),
+                vec2f(sign(east - west), 0.0),
+                abs(east - west) > abs(south - north),
+            );
+        }
+        let plain = flat && field.w > 0.0;
+        let lit = whole || lens_lit(-distance - LENS_TAP_REACH);
+        let oa = vec2f(0.125, 0.375);
+        let ob = vec2f(-0.375, 0.125);
+        let oc = vec2f(-0.125, -0.375);
+        let od = vec2f(0.375, -0.125);
+        let pa = position + oa;
+        let pb = position + ob;
+        let pc = position + oc;
+        let pd = position + od;
+        let mut da = distance + dot(normal, oa);
+        let mut db = distance + dot(normal, ob);
+        let mut dc = distance + dot(normal, oc);
+        let mut dd = distance + dot(normal, od);
+        if !flat {
+            da = lens_signed_distance(pa);
+            db = lens_signed_distance(pb);
+            dc = lens_signed_distance(pc);
+            dd = lens_signed_distance(pd);
+        }
+        let a = lens_weighted_tap(pa, da, normal, flat, plain, lit);
+        let b = lens_weighted_tap(pb, db, normal, flat, plain, lit);
+        let c = lens_weighted_tap(pc, dc, normal, flat, plain, lit);
+        let d = lens_weighted_tap(pd, dd, normal, flat, plain, lit);
         let inside = select(0.0, 1.0, da < 0.0)
             + select(0.0, 1.0, db < 0.0)
             + select(0.0, 1.0, dc < 0.0)
@@ -648,7 +788,13 @@ pub mod blur {
         if inside > 0.0 {
             return sum / max(inside, 1.0);
         }
-        lens_tap(position, lens_signed_distance(position))
+        lens_tap(
+            position,
+            distance,
+            lens_edge(position, distance, lit),
+            field,
+            lit,
+        )
     }
 
     /// A wallpaper texture (wp_mode.x = 2) composited into the bounds: bilinear, clamped to its
