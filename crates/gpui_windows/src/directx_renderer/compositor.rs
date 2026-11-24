@@ -34,10 +34,10 @@ impl CompositorVisuals {
         sprites: &[CompositorSprite],
         keys: &[Option<u64>],
         atlas: &DirectXAtlas,
-    ) -> Result<bool> {
+    ) -> bool {
         let matched = self.matches(sprites);
         if matched.len() == self.entries.len() && matched.iter().all(Option::is_some) {
-            return Ok(false);
+            return false;
         }
 
         let now_ms = gpui::animation_time_ms();
@@ -49,20 +49,41 @@ impl CompositorVisuals {
         for ((sprite, found), &key) in sprites.iter().zip(matched).zip(keys) {
             if let Some(entry) = found.and_then(|index| old[index].take()) {
                 entries.push(entry);
-            } else if let Some((surface, grid)) =
-                self.surface_for(composition, device_context, sprite, key, atlas)?
-            {
-                let clip = make_visuals(&composition.comp_device, sprite, &surface, grid, now_ms)?;
-                unsafe { composition.comp_visual.AddVisual(&clip, true, None)? };
-                entries.push(Entry {
+                continue;
+            }
+            // Nothing to draw this frame, the same as `Ok(None)` below; DComp rejects such geometry.
+            if !drawable(sprite.bounds) || !drawable(sprite.clip) {
+                continue;
+            }
+            match self.attach(composition, device_context, sprite, key, atlas, now_ms) {
+                Ok(Some(clip)) => entries.push(Entry {
                     sprite: sprite.clone(),
                     clip,
                     key,
-                });
+                }),
+                Ok(None) => {}
+                Err(error) => log::warn!(
+                    "dcomp: sprite skipped, {:?} tile {:?} key {key:?} bounds {:?} clip {:?}: {error:#}",
+                    hresult(&error),
+                    tile_of(sprite),
+                    sprite.bounds,
+                    sprite.clip
+                ),
             }
         }
         for entry in old.into_iter().flatten() {
-            unsafe { composition.comp_visual.RemoveVisual(&entry.clip)? };
+            if let Err(error) = unsafe { composition.comp_visual.RemoveVisual(&entry.clip) } {
+                // E_INVALIDARG: not a child of the root, so nothing is attached to leak (PENDING-LOG).
+                if error.code() != windows::Win32::Foundation::E_INVALIDARG {
+                    log::warn!(
+                        "dcomp: RemoveVisual {:?} tile {:?} bounds {:?}, kept for retry: {error}",
+                        error.code(),
+                        tile_of(&entry.sprite),
+                        entry.sprite.bounds
+                    );
+                    entries.push(entry);
+                }
+            }
         }
 
         self.entries = entries;
@@ -79,7 +100,26 @@ impl CompositorVisuals {
                 )
             })
         });
-        Ok(true)
+        true
+    }
+
+    fn attach(
+        &mut self,
+        composition: &DirectComposition,
+        device_context: &ID3D11DeviceContext,
+        sprite: &CompositorSprite,
+        key: Option<u64>,
+        atlas: &DirectXAtlas,
+        now_ms: u32,
+    ) -> Result<Option<IDCompositionVisual>> {
+        let Some((surface, grid)) =
+            self.surface_for(composition, device_context, sprite, key, atlas)?
+        else {
+            return Ok(None);
+        };
+        let clip = make_visuals(&composition.comp_device, sprite, &surface, grid, now_ms)?;
+        unsafe { composition.comp_visual.AddVisual(&clip, true, None)? };
+        Ok(Some(clip))
     }
 
     /// Drops everything without calling DirectComposition: the visuals belong to the device that
@@ -139,6 +179,9 @@ impl CompositorVisuals {
             SpriteContents::Pixels { size, bytes } => (*size, bytes.clone()),
         };
         let (width, height) = (size.width.0 as u32, size.height.0 as u32);
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
         let pixel_count = width as usize * height as usize;
         let mut pixels = Vec::with_capacity(pixel_count * 4);
         if matches!(&sprite.contents, SpriteContents::Pixels { .. }) {
@@ -517,4 +560,29 @@ fn motion_animation(
         animation.AddRepeat(2.0 * period - phase, period)?;
         Ok(animation)
     }
+}
+
+/// Whether DirectComposition can draw geometry with these bounds.
+fn drawable(b: gpui::Bounds<gpui::ScaledPixels>) -> bool {
+    b.origin.x.0.is_finite()
+        && b.origin.y.0.is_finite()
+        && b.size.width.0.is_finite()
+        && b.size.height.0.is_finite()
+        && b.size.width.0 > 0.0
+        && b.size.height.0 > 0.0
+}
+
+/// The atlas texture and tile IDs for a sprite backed by an atlas tile.
+fn tile_of(sprite: &CompositorSprite) -> Option<(AtlasTextureId, u32)> {
+    match &sprite.contents {
+        SpriteContents::Atlas(tile) => Some((tile.texture_id, tile.tile_id.0)),
+        SpriteContents::Pixels { .. } => None,
+    }
+}
+
+/// The HRESULT carried by a Windows error, if present.
+pub(super) fn hresult(error: &anyhow::Error) -> Option<windows::core::HRESULT> {
+    error
+        .downcast_ref::<windows::core::Error>()
+        .map(windows::core::Error::code)
 }
