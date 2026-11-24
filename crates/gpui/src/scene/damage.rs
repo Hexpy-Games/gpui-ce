@@ -378,6 +378,7 @@ fn changed_area(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
     wallpaper_changed: impl Fn(&super::WallpaperPaint) -> bool,
+    group_changed: impl Fn(&super::LayerMotion) -> bool,
     appear_changed: impl Fn(&super::LayerMotion) -> bool,
 ) -> Option<(Bounds<ScaledPixels>, SmallVec<[usize; 4]>)> {
     let mut changed: Vec<(Bounds<ScaledPixels>, DrawOrder)> = Vec::new();
@@ -412,7 +413,7 @@ fn changed_area(
         changed.push((scene.shadow_reach(index), shadow.order));
     }
     for boundary in &scene.filter_boundaries {
-        if boundary.is_start && boundary.motion.is_animated() {
+        if boundary.is_start && group_changed(&boundary.motion) {
             changed.push((
                 boundary
                     .motion
@@ -488,9 +489,13 @@ fn changed_area(
 }
 
 pub(super) fn plan(scene: &Scene) -> DamagePlan {
-    let Some((rect, reblur)) =
-        changed_area(scene, None, |_| false, super::LayerMotion::is_animated)
-    else {
+    let Some((rect, reblur)) = changed_area(
+        scene,
+        None,
+        |_| false,
+        super::LayerMotion::is_animated,
+        super::LayerMotion::is_animated,
+    ) else {
         return DamagePlan::Full;
     };
     if rect.is_empty() {
@@ -511,6 +516,7 @@ pub(super) fn plan_over(scene: &Scene, rect: Option<Bounds<ScaledPixels>>) -> Da
             Some(rect),
             |_| false,
             super::LayerMotion::is_animated,
+            super::LayerMotion::is_animated,
         )
     }) else {
         return DamagePlan::Full;
@@ -522,9 +528,11 @@ pub(super) fn plan_with_wallpapers(
     scene: &Scene,
     seed: Option<Bounds<ScaledPixels>>,
     changed: impl Fn(&super::WallpaperPaint) -> bool,
+    group_changed: impl Fn(&super::LayerMotion) -> bool,
     appear_changed: impl Fn(&super::LayerMotion) -> bool,
 ) -> DamagePlan {
-    let Some((rect, reblur)) = changed_area(scene, seed, changed, appear_changed) else {
+    let Some((rect, reblur)) = changed_area(scene, seed, changed, group_changed, appear_changed)
+    else {
         return DamagePlan::Full;
     };
     select_commands(scene, rect, reblur)
@@ -940,6 +948,86 @@ mod tests {
             Some(DamagePlan::Partial(plan))
                 if plan.rect.intersect(&changed) == changed && plan.rect.intersect(&far) == far
         ));
+    }
+
+    #[test]
+    fn stepped_group_damages_only_when_its_step_changes() {
+        let window = mask().bounds;
+        let boundary = FilterBoundary {
+            order: 0,
+            bounds: window,
+            content_mask: mask(),
+            corner_radii: Default::default(),
+            corner_smoothing: 0.0,
+            filters: SmallVec::new(),
+            opacity: 1.0,
+            scale: 1.0,
+            scale_origin: Default::default(),
+            motion_bounds: window,
+            motion: LayerMotion {
+                duration_ms: 400,
+                easing: MotionEasing::Steps(4),
+                opacity: (0.0, 1.0),
+                ..LayerMotion::NONE
+            },
+            is_start: true,
+            inline: false,
+        };
+        let mut a = Scene::default();
+        a.insert_primitive(boundary.clone());
+        a.insert_primitive(Quad {
+            bounds: window,
+            content_mask: mask(),
+            background: crate::white().into(),
+            ..Default::default()
+        });
+        a.insert_primitive(FilterBoundary {
+            is_start: false,
+            ..boundary
+        });
+        let mut b = Scene::default();
+        b.replay(0..a.len(), &a);
+        let quad = Quad {
+            bounds: rect(20.0, 20.0, 10.0, 10.0),
+            content_mask: mask(),
+            background: crate::red().into(),
+            ..Default::default()
+        };
+        let quad_reach = quad.painted_bounds();
+        a.insert_primitive(quad);
+        b.insert_primitive(Quad {
+            background: crate::blue().into(),
+            ..quad
+        });
+        a.finish();
+        b.finish_over(&a);
+
+        let same_step = b
+            .damage_plan_with_wallpapers(Some(a.generation()), 150, 125, |_| false)
+            .unwrap();
+        let DamagePlan::Partial(plan) = same_step.as_ref() else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect, round_out(quad_reach));
+
+        let next_step = b
+            .damage_plan_with_wallpapers(Some(a.generation()), 250, 150, |_| false)
+            .unwrap();
+        let DamagePlan::Partial(plan) = next_step.as_ref() else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&window), window);
+
+        for boundary in &mut b.filter_boundaries {
+            boundary.motion.offset = (point(px(0.0), px(0.0)), point(px(100.0), px(0.0)));
+        }
+        let moving_same_step = b
+            .damage_plan_with_wallpapers(Some(b.generation()), 150, 125, |_| false)
+            .unwrap();
+        let DamagePlan::Partial(plan) = moving_same_step.as_ref() else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&window), window);
     }
 
     #[test]
@@ -1623,6 +1711,14 @@ mod tests {
         });
         assert!(!scene.changes_between(100, 400));
         assert!(scene.changes_between(400, 600));
+        assert!(
+            LayerMotion {
+                easing: MotionEasing::Steps(3),
+                visible: (0.0, 0.5),
+                ..scene.filter_boundaries[0].motion
+            }
+            .changes_between(400, 600)
+        );
         scene.filter_boundaries[0].motion = LayerMotion {
             duration_ms: 200,
             ..LayerMotion::NONE

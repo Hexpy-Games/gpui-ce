@@ -132,6 +132,16 @@ impl LayerMotion {
         self.duration_ms > 0
     }
 
+    /// Whether the motion offsets, scales, rotates, or clips its content.
+    pub fn moves_content(&self) -> bool {
+        self.offset != Self::NONE.offset
+            || self.relative_offset != Self::NONE.relative_offset
+            || self.scale != Self::NONE.scale
+            || self.rotation != Self::NONE.rotation
+            || self.clip.is_some()
+            || self.clip_radii.is_some()
+    }
+
     /// Whether the motion ends with identity composite parameters and remains visible.
     pub fn rests_at_end(&self) -> bool {
         self.opacity.1 == 1.0
@@ -265,6 +275,7 @@ impl LayerMotion {
         match self.easing {
             MotionEasing::Steps(n) => {
                 (self.progress(a_ms) * n as f32).round() != (self.progress(b_ms) * n as f32).round()
+                    || self.visible_at(a_ms) != self.visible_at(b_ms)
             }
             MotionEasing::CubicBezier(_) | MotionEasing::Linear { .. } => {
                 self.is_active(a_ms) || self.is_active(b_ms)

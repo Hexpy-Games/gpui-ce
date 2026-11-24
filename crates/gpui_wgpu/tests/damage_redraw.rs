@@ -3,10 +3,11 @@
 #![cfg(feature = "test-support")]
 
 use gpui::{
-    AtlasKey, AtlasTile, BackdropFilter, Bounds, ContentMask, DevicePixels, FrameLoop, Hsla,
-    ImageId, MonochromeSprite, PlatformHeadlessRenderer, Point, PolychromeSprite, Quad,
-    RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene, Size, checkerboard,
-    linear_color_stop, linear_gradient, solid_background,
+    AtlasKey, AtlasTile, BackdropFilter, Bounds, ContentMask, DevicePixels, FilterBoundary,
+    FrameLoop, Hsla, ImageId, LayerMotion, MonochromeSprite, MotionEasing,
+    PlatformHeadlessRenderer, Point, PolychromeSprite, Quad, RenderImageParams, RenderSvgParams,
+    ScaledFilter, ScaledPixels, Scene, Size, checkerboard, linear_color_stop, linear_gradient,
+    solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;
@@ -257,6 +258,89 @@ fn damage_redraw_matches_full_redraw() {
         differs,
         "the first sprite must change between frames 0 and 1"
     );
+}
+
+// test-category: pure-logic
+#[test]
+fn stepped_group_between_steps_matches_full_redraw() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let target = gpui::size(DevicePixels(320), TARGET.height);
+    let content_mask = ContentMask {
+        bounds: bounds(0.0, 0.0, 320.0, 48.0),
+        ..Default::default()
+    };
+    let group_bounds = bounds(136.0, 8.0, 8.0, 8.0);
+    let boundary = FilterBoundary {
+        order: 0,
+        bounds: group_bounds,
+        content_mask,
+        corner_radii: Default::default(),
+        corner_smoothing: 0.0,
+        filters: Default::default(),
+        opacity: 1.0,
+        scale: 1.0,
+        scale_origin: Default::default(),
+        motion_bounds: group_bounds,
+        motion: LayerMotion {
+            duration_ms: 400,
+            easing: MotionEasing::Steps(4),
+            opacity: (0.0, 1.0),
+            ..LayerMotion::NONE
+        },
+        is_start: true,
+        inline: false,
+    };
+    let mut a = animated_scene(&renderer, color(0xffffff));
+    a.insert_primitive(boundary.clone());
+    a.insert_primitive(Quad {
+        bounds: group_bounds,
+        content_mask,
+        background: solid_background(color(0xd0402a)),
+        ..Default::default()
+    });
+    a.insert_primitive(FilterBoundary {
+        is_start: false,
+        ..boundary
+    });
+    a.insert_primitive(BackdropFilter {
+        content_mask,
+        ..glass(group_bounds)
+    });
+    let sprite = a.monochrome_sprites[0];
+    a.insert_primitive(MonochromeSprite {
+        bounds: group_bounds,
+        content_mask,
+        frames: FrameLoop {
+            period_ms: 200,
+            ..sprite.frames
+        },
+        ..sprite
+    });
+    a.finish();
+
+    let mut b = Scene::default();
+    b.replay(0..a.len(), &a);
+    b.finish_over(&a);
+
+    // The reference renderer has its own empty backdrop cache; the same tiles land in its atlas.
+    let mut reference = WgpuHeadlessRenderer::new().expect("reference renderer");
+    animated_scene(&reference, color(0xffffff));
+
+    renderer.set_animation_time_ms(125);
+    renderer
+        .render_scene_to_image(&a, target)
+        .expect("full scene A");
+    for now in [150, 250] {
+        renderer.set_animation_time_ms(now);
+        let damage = renderer
+            .render_animation_frame_to_image(&b, target)
+            .expect("scene B must use the damage path");
+        reference.set_animation_time_ms(now);
+        let full = reference
+            .render_scene_to_image(&b, target)
+            .expect("full scene B");
+        assert_eq!(damage.as_raw(), full.as_raw());
+    }
 }
 
 // test-category: pure-logic
