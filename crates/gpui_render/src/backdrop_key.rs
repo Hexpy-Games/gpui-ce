@@ -3,8 +3,8 @@
 
 use crate::{path_types::rasterization_vertices, shaders::interface::bytes_of};
 use gpui::{
-    BackdropFilter, Bounds, Corners, DevicePixels, DrawOrder, PaintedBounds, ScaledPixels, Scene,
-    Size, backdrop_presence,
+    BackdropFilter, Bounds, Corners, DevicePixels, DrawOrder, MotionEasing, PaintedBounds,
+    ScaledPixels, Scene, Size, backdrop_presence,
 };
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -18,15 +18,25 @@ const TAG_POLYCHROME: u8 = 6;
 const TAG_FILTER: u8 = 7;
 const TAG_BOUNDARY: u8 = 8;
 
-/// Identity of a scene's keys at `now_ms`: its generation, changed by an appear motion ending,
-/// so keys kept for a generation are recomputed once a motion that blocked them has ended.
+/// Identity of a scene's keys at `now_ms`, including its generation, running appear motions,
+/// and the sampled steps or active state of motion groups.
 pub fn keys_epoch(scene: &Scene, now_ms: u32) -> u64 {
     let running = scene
         .backdrop_filters
         .iter()
         .filter(|filter| filter.appear.is_some_and(|a| a.motion.is_active(now_ms)))
         .count() as u64;
-    scene.generation() ^ (running << 48)
+    let mut epoch = scene.generation() ^ (running << 48);
+    for boundary in &scene.filter_boundaries {
+        if boundary.is_start && boundary.motion.is_animated() {
+            let sample = match boundary.motion.easing {
+                MotionEasing::Steps(_) => u64::from(boundary.motion.progress(now_ms).to_bits()),
+                _ => u64::from(boundary.motion.is_active(now_ms)),
+            };
+            epoch = epoch.rotate_left(1) ^ sample;
+        }
+    }
+    epoch
 }
 
 /// Cache identity of each `scene.backdrop_filters[i]`'s blurred backdrop for a `target`-sized
@@ -161,8 +171,10 @@ fn filter_key(
     let boundaries_end = scene.filter_boundaries.partition_point(|p| p.order < order);
     for boundary in &scene.filter_boundaries[..boundaries_end] {
         if touches(boundary.bounds.intersect(&boundary.content_mask.bounds)) {
-            // An animating group changes with time, so what is behind this filter is never the same.
-            if boundary.motion.is_animated() {
+            // Only continuously changing groups block reuse. Other groups key by their sample.
+            if !matches!(boundary.motion.easing, MotionEasing::Steps(_))
+                && boundary.motion.is_active(now_ms)
+            {
                 return None;
             }
             let mut hasher = DefaultHasher::new();
@@ -176,6 +188,8 @@ fn filter_key(
             boundary.scale.to_bits().hash(&mut hasher);
             boundary.scale_origin.x.0.to_bits().hash(&mut hasher);
             boundary.scale_origin.y.0.to_bits().hash(&mut hasher);
+            boundary.motion.progress(now_ms).to_bits().hash(&mut hasher);
+            boundary.motion.visible_at(now_ms).hash(&mut hasher);
             boundary.is_start.hash(&mut hasher);
             boundary.inline.hash(&mut hasher);
             entries.push((boundary.order, TAG_BOUNDARY, hasher.finish()));
@@ -336,6 +350,69 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn stepped_group_key_follows_its_step() {
+        let mask = ContentMask {
+            bounds: scaled_bounds(0.0, 0.0, 1000.0),
+            ..Default::default()
+        };
+        let group_bounds = scaled_bounds(110.0, 110.0, 50.0);
+        let [stepped, continuous] =
+            [MotionEasing::Steps(4), LayerMotion::NONE.easing].map(|easing| {
+                let mut scene = Scene::default();
+                let boundary = FilterBoundary {
+                    order: 0,
+                    bounds: group_bounds,
+                    content_mask: mask,
+                    corner_radii: Default::default(),
+                    corner_smoothing: 0.0,
+                    filters: Default::default(),
+                    opacity: 1.0,
+                    scale: 1.0,
+                    scale_origin: Default::default(),
+                    motion_bounds: group_bounds,
+                    motion: LayerMotion {
+                        duration_ms: 400,
+                        easing,
+                        opacity: (0.0, 1.0),
+                        ..LayerMotion::NONE
+                    },
+                    is_start: true,
+                    inline: false,
+                };
+                scene.insert_primitive(boundary.clone());
+                scene.insert_primitive(Quad {
+                    bounds: group_bounds,
+                    content_mask: mask,
+                    background: solid_background(red()),
+                    ..Default::default()
+                });
+                scene.insert_primitive(FilterBoundary {
+                    is_start: false,
+                    ..boundary
+                });
+                scene.insert_primitive(BackdropFilter {
+                    bounds: scaled_bounds(100.0, 100.0, 100.0),
+                    content_mask: mask,
+                    filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
+                        .into_iter()
+                        .collect(),
+                    opacity: 1.0,
+                    ..Default::default()
+                });
+                scene.finish();
+                scene
+            });
+        let target = size(DevicePixels(1000), DevicePixels(1000));
+        let first = backdrop_keys(&stepped, target, 125)[0];
+        let same_step = backdrop_keys(&stepped, target, 150)[0];
+        let next_step = backdrop_keys(&stepped, target, 250)[0];
+        assert!(first.is_some() && next_step.is_some());
+        assert_eq!(first, same_step);
+        assert_ne!(first, next_step);
+        assert!(backdrop_keys(&continuous, target, 125)[0].is_none());
     }
 
     #[test]
