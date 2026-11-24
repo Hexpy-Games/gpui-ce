@@ -1951,6 +1951,10 @@ pub enum AtlasKey {
     },
     Svg(RenderSvgParams),
     Image(RenderImageParams),
+    ImageLevel {
+        params: RenderImageParams,
+        level: u8,
+    },
     Frames(RenderFramesParams),
 }
 
@@ -1984,7 +1988,7 @@ impl AtlasKey {
                 RasterizedGlyphFormat::BgraColor => AtlasTextureKind::Polychrome,
             },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
-            AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
+            AtlasKey::Image(_) | AtlasKey::ImageLevel { .. } => AtlasTextureKind::Polychrome,
             AtlasKey::Frames(params) if params.polychrome => AtlasTextureKind::Polychrome,
             AtlasKey::Frames(_) => AtlasTextureKind::Monochrome,
         }

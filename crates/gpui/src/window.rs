@@ -34,6 +34,7 @@ use crate::{
     },
     white,
 };
+use crate::{AtlasKey, BackgroundExecutor, ForegroundExecutor};
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 use derive_more::{Deref, DerefMut};
@@ -79,11 +80,14 @@ use crate::Inspector;
 use crate::profiler;
 
 pub(crate) mod a11y;
+#[path = "image_pyramid.rs"]
+pub(crate) mod image_pyramid;
 mod mask_corners;
 mod prompts;
 
 use a11y::A11y;
 pub use a11y::A11ySubtreeBuilder;
+use image_pyramid::{PyramidJobs, build_levels, level_sizes, select_level};
 pub use mask_corners::MaskCorners;
 pub use prompts::*;
 
@@ -1338,6 +1342,9 @@ pub struct Window {
     is_resizable: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    pyramid_jobs: PyramidJobs,
+    background_executor: BackgroundExecutor,
+    foreground_executor: ForegroundExecutor,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -2148,6 +2155,9 @@ impl Window {
             is_resizable,
             is_minimizable,
             sprite_atlas,
+            pyramid_jobs: PyramidJobs::default(),
+            background_executor: cx.background_executor().clone(),
+            foreground_executor: cx.foreground_executor().clone(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -3635,6 +3645,34 @@ impl Window {
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
+        for (image_id, frame_index, levels) in self.pyramid_jobs.take_ready() {
+            let params = RenderImageParams {
+                image_id,
+                frame_index,
+            };
+            for (index, (size, bytes)) in levels.into_iter().enumerate() {
+                let key = AtlasKey::ImageLevel {
+                    params: params.clone(),
+                    level: (index + 1) as u8,
+                };
+                let mut inserted = false;
+                let tile = self
+                    .sprite_atlas
+                    .get_or_insert_with(&key, &mut || {
+                        inserted = true;
+                        Ok(Some((size, Cow::Borrowed(&bytes))))
+                    })
+                    .log_err()
+                    .flatten();
+                if inserted && tile.is_some() {
+                    self.refreshing = true;
+                }
+            }
+            if self.pyramid_jobs.take_standin((image_id, frame_index)) {
+                self.sprite_atlas.remove(&AtlasKey::Image(params));
+                self.refreshing = true;
+            }
+        }
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
 
@@ -6071,18 +6109,103 @@ impl Window {
             frame_index,
         };
 
-        let tile = self
-            .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
-                Ok(Some((
-                    data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
-                )))
-            })?
-            .expect("Callback above only returns Some");
+        let src = data.size(frame_index);
+        let dst = image_bounds
+            .size
+            .scale(self.scale_factor())
+            .map(|axis| axis.0);
+        let sizes = level_sizes(src);
+        let level = select_level(src, dst, sizes.len());
+        let mut tile = None;
+        let mut background_fallback = false;
+        if level > 0 {
+            let key = AtlasKey::ImageLevel {
+                params: params.clone(),
+                level: level as u8,
+            };
+            tile = self
+                .sprite_atlas
+                .get_or_insert_with(&key, &mut || Ok(None))?;
+            if tile.is_none() {
+                if i64::from(src.width.0) * i64::from(src.height.0) <= 512 * 512 {
+                    for (index, (size, bytes)) in
+                        build_levels(&data, frame_index).into_iter().enumerate()
+                    {
+                        let key = AtlasKey::ImageLevel {
+                            params: params.clone(),
+                            level: (index + 1) as u8,
+                        };
+                        let inserted = self.sprite_atlas.get_or_insert_with(&key, &mut || {
+                            Ok(Some((size, Cow::Borrowed(&bytes))))
+                        })?;
+                        if index + 1 == level {
+                            tile = inserted;
+                        }
+                    }
+                } else {
+                    if self.pyramid_jobs.begin((data.id, frame_index)) {
+                        let image_id = data.id;
+                        let data = data.clone();
+                        let job = self
+                            .background_executor
+                            .spawn(async move { build_levels(&data, frame_index) });
+                        let ready = self.pyramid_jobs.ready.clone();
+                        let invalidator = self.invalidator.clone();
+                        self.foreground_executor
+                            .spawn(async move {
+                                let levels = job.await;
+                                ready.borrow_mut().push((image_id, frame_index, levels));
+                                invalidator.set_dirty(true);
+                            })
+                            .detach();
+                    }
+
+                    for (index, size) in sizes.iter().enumerate().rev() {
+                        if index + 1 == level
+                            || (size.width.0 as f32) < dst.width
+                            || (size.height.0 as f32) < dst.height
+                        {
+                            continue;
+                        }
+                        let key = AtlasKey::ImageLevel {
+                            params: params.clone(),
+                            level: (index + 1) as u8,
+                        };
+                        tile = self
+                            .sprite_atlas
+                            .get_or_insert_with(&key, &mut || Ok(None))?;
+                        if tile.is_some() {
+                            break;
+                        }
+                    }
+                    background_fallback = true;
+                }
+            }
+        }
+
+        let tile = match tile {
+            Some(tile) => tile,
+            None => {
+                let mut uploaded = false;
+                let tile = self
+                    .sprite_atlas
+                    .get_or_insert_with(&AtlasKey::Image(params), &mut || {
+                        uploaded = true;
+                        Ok(Some((
+                            data.size(frame_index),
+                            Cow::Borrowed(
+                                data.as_bytes(frame_index)
+                                    .expect("It's the caller's job to pass a valid frame index"),
+                            ),
+                        )))
+                    })?
+                    .expect("Callback above only returns Some");
+                if background_fallback && uploaded {
+                    self.pyramid_jobs.standins.insert((data.id, frame_index));
+                }
+                tile
+            }
+        };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
 
@@ -6167,12 +6290,19 @@ impl Window {
 
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
+        self.pyramid_jobs.cancel(data.id);
         for frame_index in 0..data.frame_count() {
             let params = RenderImageParams {
                 image_id: data.id,
                 frame_index,
             };
 
+            for level in 1..=level_sizes(data.size(frame_index)).len() {
+                self.sprite_atlas.remove(&AtlasKey::ImageLevel {
+                    params: params.clone(),
+                    level: level as u8,
+                });
+            }
             self.sprite_atlas.remove(&params.into());
         }
 
