@@ -2308,24 +2308,32 @@ pub mod wallpaper {
     pub fn wp_riso_print(fc: Vec2f) -> Vec4f {
         let u = get!(BLUR_LOCALS);
         let res = u.wp_frame.xy();
-        let pr = u.wp_frame.z;
-        let mis = u.wp_css.w;
-        let gain = u.wp_print.x;
-        let night = u.wp_p0.y > 0.5;
-        let bleed = 0.16;
-        let col = u.wp_col;
-        let paper0 = select(vec3f(250.0, 250.0, 248.0), vec3f(22.0, 23.0, 25.0), night) / 255.0;
-        let ua = select(vec3f(0.0, 120.0, 191.0), vec3f(96.0, 140.0, 255.0), night) / 255.0;
-        let ub = select(vec3f(255.0, 72.0, 176.0), vec3f(255.0, 112.0, 190.0), night) / 255.0;
-        let uc = select(vec3f(96.0, 56.0, 156.0), vec3f(150.0, 96.0, 236.0), night) / 255.0;
+        let p = vec2f(fc.x, res.y - fc.y) / u.wp_frame.z;
+        let d = wp_riso_field(p);
+        let wash = wp_riso_wash(p, d);
+        let outc = wp_riso_paint(
+            p,
+            d,
+            wash,
+            u.wp_css.w,
+            u.wp_print.x,
+            u.wp_p0.y > 0.5,
+            u.wp_col,
+        );
+        vec4f(outc.x, outc.y, outc.z, 1.0)
+    }
 
-        let p = vec2f(fc.x, res.y - fc.y) / pr;
-        let d = wp_den(p) * 0.36
+    pub fn wp_riso_field(p: Vec2f) -> Vec3f {
+        wp_den(p) * 0.36
             + (wp_den(p + vec2f(6.0, 2.5))
                 + wp_den(p + vec2f(-2.5, 6.0))
                 + wp_den(p + vec2f(-6.0, -2.5))
                 + wp_den(p + vec2f(2.5, -6.0)))
-                * 0.16;
+                * 0.16
+    }
+
+    pub fn wp_riso_wash(p: Vec2f, d: Vec3f) -> Vec3f {
+        let bleed = 0.16;
         let h = (wp_den(p + vec2f(22.0, 9.0))
             + wp_den(p + vec2f(-9.0, 22.0))
             + wp_den(p + vec2f(-22.0, -9.0))
@@ -2333,8 +2341,24 @@ pub mod wallpaper {
             * 0.25;
         let fib = 0.55 * wp_hash(floor(p * 0.5) + 3.0)
             + 0.45 * wp_hash(floor(p * vec2f(0.22, 0.9)) + 11.0);
-        let wash = smoothstep(vec3f(0.02, 0.02, 0.02), vec3f(0.6, 0.6, 0.6), max(h, d))
-            * (bleed * (0.45 + 0.55 * fib));
+        smoothstep(vec3f(0.02, 0.02, 0.02), vec3f(0.6, 0.6, 0.6), max(h, d))
+            * (bleed * (0.45 + 0.55 * fib))
+    }
+
+    pub fn wp_riso_paint(
+        p: Vec2f,
+        d: Vec3f,
+        wash: Vec3f,
+        mis: f32,
+        gain: f32,
+        night: bool,
+        col: Vec4f,
+    ) -> Vec3f {
+        let pr = get!(BLUR_LOCALS).wp_frame.z;
+        let paper0 = select(vec3f(250.0, 250.0, 248.0), vec3f(22.0, 23.0, 25.0), night) / 255.0;
+        let ua = select(vec3f(0.0, 120.0, 191.0), vec3f(96.0, 140.0, 255.0), night) / 255.0;
+        let ub = select(vec3f(255.0, 72.0, 176.0), vec3f(255.0, 112.0, 190.0), night) / 255.0;
+        let uc = select(vec3f(96.0, 56.0, 156.0), vec3f(150.0, 96.0, 236.0), night) / 255.0;
         let mo = 0.6 + 3.0 * mis;
         let m_a = vec2f(1.6, -1.0) * mo;
         let m_b = vec2f(-1.3, 1.2) * mo;
@@ -2357,7 +2381,7 @@ pub mod wallpaper {
             let un = 1.0 - (1.0 - cov.x) * (1.0 - cov.y) * (1.0 - cov.z);
             outc = wp_mix3(paper, m * 0.86, un * 0.9);
         }
-        vec4f(outc.x, outc.y, outc.z, 1.0)
+        outc
     }
 
     // --------------------------------- butler.riso-intro ------------------------------------
@@ -2390,6 +2414,7 @@ pub mod wallpaper {
         s
     }
 
+    // INTRO_DENSITY's angF and mark-sdf.ts's markAngle.
     pub fn wp_intro_ang(d: Vec2f) -> f32 {
         fract(atan2(d.x, -d.y) / WP_TAU + 1.0)
     }
@@ -2409,22 +2434,44 @@ pub mod wallpaper {
     // ---------------------------------------------------------------------------------------
     pub fn wp_intro_density(fc: Vec2f) -> Vec4f {
         let u = get!(BLUR_LOCALS);
-        let res = u.wp_frame.xy();
-        let card = u.wp_p0;
-        let ring = u.wp_p1.xyz();
-        let scale = u.wp_p1.w;
-        let flow = u.wp_p2.x;
-        let bloom = u.wp_p2.y;
-        let residue = u.wp_p2.z;
-        let card_on = u.wp_p2.w;
-        let draw = u.wp_p3.x;
-        let dry = u.wp_p3.y;
-        let sweep = u.wp_p3.z;
-        let clear = u.wp_p3.w;
-        let mark_a = u.wp_p4.x;
-        let mark = vec3f(u.wp_p4.y, u.wp_p4.z, u.wp_p4.w);
-        let pointer = u.wp_p5;
+        wp_intro_density_field(
+            fc,
+            u.wp_p0,
+            u.wp_p1.xyz(),
+            u.wp_p1.w,
+            u.wp_p2.x,
+            u.wp_p2.y,
+            u.wp_p2.z,
+            u.wp_p2.w,
+            u.wp_p3.x,
+            u.wp_p3.y,
+            u.wp_p3.z,
+            u.wp_p3.w,
+            u.wp_p4.x,
+            vec3f(u.wp_p4.y, u.wp_p4.z, u.wp_p4.w),
+            u.wp_p5,
+        )
+    }
 
+    pub fn wp_intro_density_field(
+        fc: Vec2f,
+        card: Vec4f,
+        ring: Vec3f,
+        scale: f32,
+        flow: f32,
+        bloom: f32,
+        residue: f32,
+        card_on: f32,
+        draw: f32,
+        dry: f32,
+        sweep: f32,
+        clear: f32,
+        mark_a: f32,
+        mark: Vec3f,
+        pointer: Vec4f,
+    ) -> Vec4f {
+        let u = get!(BLUR_LOCALS);
+        let res = u.wp_frame.xy();
         let p = vec2f(fc.x, res.y - fc.y) / res * u.wp_css.xy();
         let pd = p - pointer.xy();
         let fall = exp(-dot(pd, pd) / 12100.0);
@@ -2488,6 +2535,278 @@ pub mod wallpaper {
         d = d * (1.0 - 0.95 * max(used * halo, inner) * mark_a);
         let dc = clamp(d, vec3f(0.0, 0.0, 0.0), vec3f(1.0, 1.0, 1.0));
         vec4f(dc.x, dc.y, dc.z, 1.0)
+    }
+
+    // Wallpaper/intro/introTimeline.ts:7-10 and Wallpaper/intro/introWake.ts:5, in seconds.
+    pub const WP_INTRO_BLOOM: Vec2f = vec2f(0.05, 1.5);
+    pub const WP_INTRO_FLOW: Vec2f = vec2f(0.0, 2.85);
+    pub const WP_INTRO_DRAW: Vec2f = vec2f(0.35, 1.2);
+    pub const WP_INTRO_DRY: Vec2f = vec2f(0.53, 1.38);
+    pub const WP_INTRO_CLEAR: Vec2f = vec2f(0.6, 1.3);
+    pub const WP_INTRO_BOW: Vec2f = vec2f(1.05, 1.75);
+    pub const WP_INTRO_BOW_IN: f32 = 0.1;
+    pub const WP_INTRO_KEY: Vec2f = vec2f(1.17, 1.57);
+    pub const WP_INTRO_GLIDE: Vec2f = vec2f(1.7, 2.25);
+    pub const WP_INTRO_RESIDUE: Vec2f = vec2f(1.3, 2.6);
+    pub const WP_INTRO_CARD_ON: Vec2f = vec2f(1.9, 2.45);
+    pub const WP_INTRO_MARK_OUT: Vec2f = vec2f(2.3, 2.42);
+    pub const WP_INTRO_END: f32 = 2.9;
+    pub const WP_INTRO_BEAT: f32 = 0.6;
+
+    pub fn wp_intro_seg(t: f32, a: f32, b: f32) -> f32 {
+        clamp((t - a) / (b - a), 0.0, 1.0)
+    }
+
+    pub fn wp_intro_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+        let cx = 3.0 * x1;
+        let bx = 3.0 * (x2 - x1) - cx;
+        let ax = 1.0 - cx - bx;
+        let cy = 3.0 * y1;
+        let by = 3.0 * (y2 - y1) - cy;
+        let ay = 1.0 - cy - by;
+        let mut t = x;
+        for _i in 0..6 {
+            let d = (3.0 * ax * t + 2.0 * bx) * t + cx;
+            if abs(d) >= 1e-6 {
+                let sx = ((ax * t + bx) * t + cx) * t;
+                t = t - (sx - x) / d;
+            }
+        }
+        let tc = clamp(t, 0.0, 1.0);
+        ((ay * tc + by) * tc + cy) * tc
+    }
+
+    pub fn wp_intro_standard(x: f32) -> f32 {
+        wp_intro_bezier(0.2, 0.0, 0.0, 1.0, x)
+    }
+
+    pub fn wp_intro_draw(x: f32) -> f32 {
+        wp_intro_bezier(0.65, 0.0, 0.35, 1.0, x)
+    }
+
+    pub fn wp_intro_out_cubic(x: f32) -> f32 {
+        1.0 - pow(1.0 - clamp(x, 0.0, 1.0), 3.0)
+    }
+
+    pub fn wp_intro_settle(x: f32) -> f32 {
+        let a = 8.6 * clamp(x, 0.0, 1.0);
+        select(1.0 - (1.0 + a) * exp(-a), 1.0, x >= 1.0)
+    }
+
+    // Timed intro density (19) and print (20), from Wallpaper/intro/introParams.ts.
+    //   wp_frame = (res.x, res.y, pixel ratio, time in seconds)
+    //   wp_css.xy = canvas CSS size (W, H)
+    //   wp_p1 = (slot.x, slot.y, mode, 0), the 64 px mark slot centre in top-left CSS px
+    //   mode < 0.5 plays the reveal at time t, with zero beat pulse
+    //   mode >= 0.5 holds scene time at 2.9 s and moves the card with a 0.6 s plate pulse
+    //   density: wp_p0 is the CSS card rect (x, y, w, h), wp_p2 is its starting rect for beats
+    //   print: wp_p0.y selects night (> 0.5), wp_print.yz is the previous density texture size
+    pub fn wp_intro_density_timed(fc: Vec2f) -> Vec4f {
+        let u = get!(BLUR_LOCALS);
+        let beat_mode = u.wp_p1.z >= 0.5;
+        let t = u.wp_frame.w;
+        let ts = select(t, WP_INTRO_END, beat_mode);
+        let mut card = u.wp_p0;
+        if beat_mode {
+            let k = clamp(t / WP_INTRO_BEAT, 0.0, 1.0);
+            card = u.wp_p2 + (u.wp_p0 - u.wp_p2) * wp_intro_standard(k);
+        }
+
+        let w = u.wp_css.x;
+        let h = u.wp_css.y;
+        let ox = w * 0.5;
+        let oy = h * 0.46;
+        let size = clamp(0.4 * min(w, h), 140.0, 240.0);
+        let scale = 0.55 * max(w, h);
+        let glide = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_GLIDE.x, WP_INTRO_GLIDE.y));
+        let ring = vec3f(ox, oy, size);
+        let mark = wp_mix3(ring, vec3f(u.wp_p1.x, u.wp_p1.y, 64.0), glide);
+        let flow = 1.9 * wp_intro_out_cubic(wp_intro_seg(ts, WP_INTRO_FLOW.x, WP_INTRO_FLOW.y));
+        let bloom = wp_intro_out_cubic(wp_intro_seg(ts, WP_INTRO_BLOOM.x, WP_INTRO_BLOOM.y));
+        let residue = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_RESIDUE.x, WP_INTRO_RESIDUE.y));
+        let card_on = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_CARD_ON.x, WP_INTRO_CARD_ON.y));
+        let draw = wp_intro_draw(wp_intro_seg(ts, WP_INTRO_DRAW.x, WP_INTRO_DRAW.y));
+        let dry = wp_intro_draw(wp_intro_seg(ts, WP_INTRO_DRY.x, WP_INTRO_DRY.y));
+        let sweep = draw + 0.2 * dry;
+        let clear = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_CLEAR.x, WP_INTRO_CLEAR.y));
+        let mark_a = 1.0 - wp_intro_seg(ts, WP_INTRO_MARK_OUT.x, WP_INTRO_MARK_OUT.y);
+        wp_intro_density_field(
+            fc,
+            card,
+            ring,
+            scale,
+            flow,
+            bloom,
+            residue,
+            card_on,
+            draw,
+            dry,
+            sweep,
+            clear,
+            mark_a,
+            mark,
+            vec4f(0.0, 0.0, 0.0, 0.0),
+        )
+    }
+
+    // ButlerThinkingMark/thinking-mark/mark-sdf.ts and constants.ts.
+    pub const WP_INTRO_RR: f32 = 329.43;
+    pub const WP_INTRO_RHO: f32 = 34.0;
+    pub const WP_INTRO_RING_R: f32 = 435.0;
+    pub const WP_INTRO_RING_W: f32 = 74.0;
+    // sin(AL) and cos(AL), where AL = atan2(136, 300).
+    pub const WP_INTRO_SAL: f32 = 0.412888;
+    pub const WP_INTRO_CAL: f32 = 0.910782;
+
+    pub fn wp_intro_mark_pie(p0: Vec2f, r: f32) -> f32 {
+        let p = vec2f(abs(p0.x), p0.y);
+        let l = length(p) - r;
+        let d = clamp(p.x * WP_INTRO_SAL + p.y * WP_INTRO_CAL, 0.0, r);
+        let q = p - vec2f(WP_INTRO_SAL, WP_INTRO_CAL) * d;
+        max(l, length(q) * sign(WP_INTRO_CAL * p.x - WP_INTRO_SAL * p.y))
+    }
+
+    pub fn wp_intro_mark_ribbon(d: Vec2f) -> f32 {
+        min(
+            wp_intro_mark_pie(vec2f(d.y, -d.x), WP_INTRO_RR),
+            wp_intro_mark_pie(vec2f(d.y, d.x), WP_INTRO_RR),
+        ) - WP_INTRO_RHO
+    }
+
+    pub fn wp_intro_mark_arc(d: Vec2f, progress: f32) -> f32 {
+        let band = abs(length(d) - WP_INTRO_RING_R) - WP_INTRO_RING_W * 0.5;
+        if progress >= 1.0 {
+            return band;
+        }
+        if progress <= 0.0 {
+            return 1e5;
+        }
+        let th = progress * WP_TAU;
+        let cap = min(
+            length(d - vec2f(0.0, -WP_INTRO_RING_R)),
+            length(d - vec2f(sin(th), -cos(th)) * WP_INTRO_RING_R),
+        ) - WP_INTRO_RING_W * 0.5;
+        select(cap, band, wp_intro_ang(d) <= progress)
+    }
+
+    pub fn wp_intro_mark_cover(sd: f32, aa: f32) -> f32 {
+        1.0 - smoothstep(-aa, aa, sd)
+    }
+
+    // Wallpaper/intro/introShaders.ts INTRO_MARK.
+    pub fn wp_intro_ink(
+        p: Vec2f,
+        d: Vec3f,
+        mark: Vec3f,
+        ring: Vec3f,
+        mark_a: f32,
+        draw: f32,
+        dry: f32,
+        plate: f32,
+        plate_a: f32,
+        bow_s: f32,
+    ) -> Vec3f {
+        let rp = ring.z * (WP_INTRO_RING_R / 1200.0);
+        let th = draw * WP_TAU;
+        let tip = ring.xy() + vec2f(sin(th), -cos(th)) * rp;
+        let pen = smoothstep(0.0, 0.04, draw) * (1.0 - smoothstep(0.94, 1.0, draw));
+        let wm = mark.z * (WP_INTRO_RING_W / 1200.0);
+        let bv = p - tip;
+        let bead = max(
+            d,
+            vec3f(0.85, 0.7, 1.0) * pen * exp(-dot(bv, bv) / (wm * wm * 0.9)),
+        );
+        let md = p - mark.xy();
+        let ma = wp_intro_ang(md);
+        let k = 1200.0 / mark.z;
+        let aa = 0.8 * k / get!(BLUR_LOCALS).wp_frame.z;
+        let m = md * k;
+        let wo = smoothstep(dry - 0.02, dry + 0.07, ma) * (1.0 - smoothstep(0.97, 1.0, dry)) * 14.0;
+        let mis_a = vec2f(2.6, -1.6);
+        let mis_b = vec2f(-2.1, 1.9);
+        let wet = vec3f(
+            wp_intro_mark_cover(wp_intro_mark_arc(m + mis_a * wo, draw), aa),
+            wp_intro_mark_cover(wp_intro_mark_arc(m + mis_b * wo, draw), aa),
+            wp_intro_mark_cover(wp_intro_mark_arc(m, draw), aa),
+        );
+        let off = (1.0 - plate) * vec2f(3.0, -3.0) * (1200.0 / 64.0);
+        let bow_b =
+            wp_intro_mark_cover(wp_intro_mark_ribbon((m + off) / bow_s) * bow_s, aa) * plate_a;
+        let bow_p =
+            wp_intro_mark_cover(wp_intro_mark_ribbon((m - off) / bow_s) * bow_s, aa) * plate_a;
+        max(
+            bead,
+            vec3f(max(wet.x, bow_b), max(wet.y, bow_p), wet.z) * mark_a,
+        )
+    }
+
+    pub fn wp_intro_key(
+        p: Vec2f,
+        col: Vec3f,
+        mark: Vec3f,
+        mark_a: f32,
+        dry: f32,
+        bow_s: f32,
+        key_a: f32,
+        key: Vec3f,
+    ) -> Vec3f {
+        let md = p - mark.xy();
+        let k = 1200.0 / mark.z;
+        let aa = 0.8 * k / get!(BLUR_LOCALS).wp_frame.z;
+        let m = md * k;
+        let key_ring =
+            wp_intro_mark_cover(wp_intro_mark_arc(m, dry), aa) * smoothstep(0.0, 0.025, dry);
+        let key_bow = wp_intro_mark_cover(wp_intro_mark_ribbon(m / bow_s) * bow_s, aa) * key_a;
+        wp_mix3(col, key, max(key_ring, key_bow) * mark_a)
+    }
+
+    pub fn wp_intro_print_timed(fc: Vec2f) -> Vec4f {
+        let u = get!(BLUR_LOCALS);
+        let beat_mode = u.wp_p1.z >= 0.5;
+        let t = u.wp_frame.w;
+        let ts = select(t, WP_INTRO_END, beat_mode);
+        let k = clamp(t / WP_INTRO_BEAT, 0.0, 1.0);
+        let beat = select(0.0, sin(WP_TAU * 0.5 * k), beat_mode);
+
+        let w = u.wp_css.x;
+        let h = u.wp_css.y;
+        let ox = w * 0.5;
+        let oy = h * 0.46;
+        let size = clamp(0.4 * min(w, h), 140.0, 240.0);
+        let glide = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_GLIDE.x, WP_INTRO_GLIDE.y));
+        let ring = vec3f(ox, oy, size);
+        let mark = wp_mix3(ring, vec3f(u.wp_p1.x, u.wp_p1.y, 64.0), glide);
+        let mark_a = 1.0 - wp_intro_seg(ts, WP_INTRO_MARK_OUT.x, WP_INTRO_MARK_OUT.y);
+        let draw = wp_intro_draw(wp_intro_seg(ts, WP_INTRO_DRAW.x, WP_INTRO_DRAW.y));
+        let dry = wp_intro_draw(wp_intro_seg(ts, WP_INTRO_DRY.x, WP_INTRO_DRY.y));
+        let plate = wp_intro_settle(wp_intro_seg(ts, WP_INTRO_BOW.x, WP_INTRO_BOW.y));
+        let plate_a = wp_intro_seg(ts, WP_INTRO_BOW.x, WP_INTRO_BOW.x + WP_INTRO_BOW_IN);
+        let bow_s = 0.92 + 0.08 * plate;
+        let key_a = wp_intro_standard(wp_intro_seg(ts, WP_INTRO_KEY.x, WP_INTRO_KEY.y));
+
+        let night = u.wp_p0.y > 0.5;
+        let key = select(vec3f(10.0, 10.0, 11.0) / 255.0, vec3f(1.0, 1.0, 1.0), night);
+        let p = vec2f(fc.x, u.wp_frame.y - fc.y) / u.wp_frame.z;
+        let d = wp_riso_field(p);
+        let wash = wp_riso_wash(p, d);
+        let ink = wp_intro_ink(p, d, mark, ring, mark_a, draw, dry, plate, plate_a, bow_s);
+        let col = wp_riso_paint(
+            p,
+            ink,
+            wash,
+            0.6 * beat,
+            0.0,
+            night,
+            vec4f(0.0, 0.0, 0.0, 0.0),
+        );
+        let outc = wp_intro_key(p, col, mark, mark_a, dry, bow_s, key_a, key);
+        vec4f(outc.x, outc.y, outc.z, 1.0)
     }
 
     // butler.silk/shader.frag
@@ -6363,6 +6682,8 @@ pub mod wallpaper {
         result = col;
         result
     }
+
+    // Wallpaper module IDs 1–20, including timed intro density (19) and print (20).
     #[fragment]
     pub fn fragment_wallpaper(input: BlurVarying) -> Vec4f {
         let fc = wp_frag_coord(input.position.xy());
@@ -6420,6 +6741,12 @@ pub mod wallpaper {
             }
             18 => {
                 return wp_cherry_blossom(fc);
+            }
+            19 => {
+                return wp_intro_density_timed(fc);
+            }
+            20 => {
+                return wp_intro_print_timed(fc);
             }
             _ => {
                 return vec4f(0.0, 0.0, 0.0, 0.0);

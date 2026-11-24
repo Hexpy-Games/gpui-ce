@@ -3,18 +3,14 @@
 
 use gpui::{
     BackdropFilter, Bounds, ContentMask, DevicePixels, PlatformHeadlessRenderer, ScaledPixels,
-    Scene, WallpaperImage, WallpaperPaint, WallpaperPass, point, size,
+    Scene, Size, WallpaperClock, WallpaperImage, WallpaperPaint, WallpaperPass, point, size,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;
 
-#[test]
-fn intro_resting_print_clears_card_and_keeps_edge_ink() {
-    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
-    let target = size(DevicePixels(1200), DevicePixels(900));
-    let css = [1200.0_f32, 900.0_f32];
+fn intro_resting_scene(target: Size<DevicePixels>, card: [f32; 4]) -> Scene {
+    let css = [target.width.0 as f32, target.height.0 as f32];
     let density = [(css[0] / 4.0).ceil() as u32, (css[1] / 4.0).ceil() as u32];
-    let card = [390.0, 180.0, 420.0, 344.0];
     let mut density_uniforms = [[0.0; 4]; 15];
     density_uniforms[1] = [density[0] as f32, density[1] as f32, 1.0, 2.9];
     density_uniforms[4] = [css[0], css[1], 0.0, 0.0];
@@ -82,6 +78,15 @@ fn intro_resting_print_clears_card_and_keeps_edge_ink() {
         }),
     });
     scene.finish();
+    scene
+}
+
+#[test]
+fn intro_resting_print_clears_card_and_keeps_edge_ink() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let target = size(DevicePixels(1200), DevicePixels(900));
+    let card = [390.0, 180.0, 420.0, 344.0];
+    let mut scene = intro_resting_scene(target, card);
     let image = renderer
         .render_scene_to_image(&scene, target)
         .expect("render intro resting print");
@@ -143,6 +148,65 @@ fn intro_resting_print_clears_card_and_keeps_edge_ink() {
         .render_scene_to_image(&scene, target)
         .expect("render intro resting print again");
     assert_eq!(image.as_raw(), repeated.as_raw());
+}
+
+#[test]
+fn intro_timeline_matches_the_resting_print_and_writes_the_ring() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let target = size(DevicePixels(1200), DevicePixels(900));
+    let card = [390.0, 180.0, 420.0, 344.0];
+    let resting_scene = intro_resting_scene(target, card);
+    let resting = renderer
+        .render_scene_to_image(&resting_scene, target)
+        .expect("render intro resting print");
+
+    let mut timed_scene = intro_resting_scene(target, card);
+    let wallpaper = timed_scene.backdrop_filters[0].wallpaper.as_mut().unwrap();
+    wallpaper.key = 2;
+    wallpaper.clock = Some(WallpaperClock {
+        start_ms: 0,
+        start_s: 0.0,
+        fps: 240,
+        period_s: 1.0,
+        animated_from: 0,
+        end_s: Some(2.9),
+    });
+    wallpaper.passes[0].module = 19;
+    wallpaper.passes[0].uniforms[10..].fill([0.0; 4]);
+    wallpaper.passes[0].uniforms[10] = [600.0, 236.0, 0.0, 0.0];
+    wallpaper.passes[1].module = 20;
+    wallpaper.passes[1].uniforms[10] = [600.0, 236.0, 0.0, 0.0];
+
+    renderer.set_animation_time_ms(3000);
+    let finished = renderer
+        .render_scene_to_image(&timed_scene, target)
+        .expect("render finished intro");
+    for (index, (&actual, &expected)) in finished.as_raw().iter().zip(resting.as_raw()).enumerate()
+    {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "finished intro channel {index}: {actual} vs {expected}"
+        );
+    }
+
+    timed_scene.backdrop_filters[0]
+        .wallpaper
+        .as_mut()
+        .unwrap()
+        .key = 3;
+    renderer.set_animation_time_ms(1000);
+    let writing = renderer
+        .render_scene_to_image(&timed_scene, target)
+        .expect("render intro while writing the ring");
+    // Sample the centre pixel at each point on the ring (CSS radius 240 * 435 / 1200).
+    let radius = 240 * 435 / 1200;
+    let right = writing.get_pixel(600 + radius, 414);
+    let left = writing.get_pixel(600 - radius, 414);
+    assert!(
+        right.0[..3].iter().all(|&channel| channel < 60),
+        "{right:?}"
+    );
+    assert!(left.0[..3].iter().any(|&channel| channel >= 60), "{left:?}");
 }
 
 // Manifest-order parameter packing: colors occupy complete vec4s, scalar values fill xyzw.
