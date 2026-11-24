@@ -172,9 +172,11 @@ fn intro_timeline_matches_the_resting_print_and_writes_the_ring() {
         end_s: Some(2.9),
     });
     wallpaper.passes[0].module = 19;
+    wallpaper.passes[0].uniforms[1][3] = 0.0;
     wallpaper.passes[0].uniforms[10..].fill([0.0; 4]);
     wallpaper.passes[0].uniforms[10] = [600.0, 236.0, 0.0, 0.0];
     wallpaper.passes[1].module = 20;
+    wallpaper.passes[1].uniforms[1][3] = 0.0;
     wallpaper.passes[1].uniforms[10] = [600.0, 236.0, 0.0, 0.0];
 
     renderer.set_animation_time_ms(3000);
@@ -198,15 +200,22 @@ fn intro_timeline_matches_the_resting_print_and_writes_the_ring() {
     let writing = renderer
         .render_scene_to_image(&timed_scene, target)
         .expect("render intro while writing the ring");
-    // Sample the centre pixel at each point on the ring (CSS radius 240 * 435 / 1200).
-    let radius = 240 * 435 / 1200;
-    let right = writing.get_pixel(600 + radius, 414);
-    let left = writing.get_pixel(600 - radius, 414);
+    // At 3 o'clock the key ink has dried behind the pen. At 0.97 of a turn the ring is unwritten.
+    let radius: f32 = 240.0 * 435.0 / 1200.0;
+    let right = writing.get_pixel((600.0 + radius).round() as u32, 414);
+    let angle = 0.97 * std::f32::consts::TAU;
+    let unwritten = writing.get_pixel(
+        (600.0 + radius * angle.sin()).round() as u32,
+        (414.0 - radius * angle.cos()).round() as u32,
+    );
     assert!(
         right.0[..3].iter().all(|&channel| channel < 60),
         "{right:?}"
     );
-    assert!(left.0[..3].iter().any(|&channel| channel >= 60), "{left:?}");
+    assert!(
+        unwritten.0[..3].iter().any(|&channel| channel >= 60),
+        "{unwritten:?}"
+    );
 }
 
 // Manifest-order parameter packing: colors occupy complete vec4s, scalar values fill xyzw.
