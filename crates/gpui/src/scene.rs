@@ -1750,6 +1750,9 @@ pub struct WallpaperClock {
     pub animated_from: usize,
     /// `Some(end)`: the clock plays once, from `start_s` to `end` seconds, then holds `end`
     /// and asks for no more frames. `None`: it loops over `period_s`.
+    /// The animation clock is a wrapping `u32` of milliseconds, so a one-shot clock is only
+    /// defined for less than 2^31 ms (about 24 days) after `start_ms`. A caller that keeps the
+    /// wallpaper longer paints it without the clock once the animation ends.
     pub end_s: Option<f32>,
 }
 
@@ -1774,6 +1777,7 @@ impl WallpaperClock {
     pub fn time_s(&self, slot: u32) -> f32 {
         let time = self.start_s + slot as f32 / self.fps as f32;
         match self.end_s {
+            Some(end) if self.last_slot().is_some_and(|last| slot >= last) => end,
             Some(end) => time.min(end),
             None => time.rem_euclid(self.period_s),
         }
@@ -2436,6 +2440,16 @@ mod tests {
         assert_eq!(clock.next_slot_ms(3899), Some(3900));
         assert_eq!(clock.next_slot_ms(3900), None);
         assert_eq!(clock.next_slot_ms(61_000), None);
+
+        let clock = WallpaperClock {
+            start_ms: 0,
+            start_s: 0.1,
+            fps: 60,
+            period_s: 1.0,
+            animated_from: 0,
+            end_s: Some(0.3),
+        };
+        assert_eq!(clock.time_s(clock.slot(10_000)), 0.3);
     }
 
     fn scaled(value: f32) -> ScaledPixels {

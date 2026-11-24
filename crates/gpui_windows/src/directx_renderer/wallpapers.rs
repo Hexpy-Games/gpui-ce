@@ -10,6 +10,7 @@ use super::*;
 struct DxEntry {
     generation: u64,
     slot: Option<u32>,
+    clock: Option<WallpaperClock>,
     passes: Vec<(u32, u32, ColorTarget)>,
     image: Option<(u64, Option<ID3D11ShaderResourceView>)>,
     last_used: u64,
@@ -153,6 +154,7 @@ impl DirectXRenderer {
             let entry = cache.entries.entry(paint.key).or_insert_with(|| DxEntry {
                 generation: u64::MAX,
                 slot: None,
+                clock: None,
                 passes: Vec::new(),
                 image: None,
                 last_used: 0,
@@ -182,15 +184,14 @@ impl DirectXRenderer {
             }
             let redraw_from = if entry.generation != paint.generation {
                 0
-            } else if entry.slot != slot {
-                paint
-                    .clock
-                    .map_or(paint.passes.len(), |clock| clock.animated_from)
+            } else if entry.slot != slot || entry.clock != paint.clock {
+                paint.clock.map_or(0, |clock| clock.animated_from)
             } else {
                 paint.passes.len()
             };
             entry.generation = paint.generation;
             entry.slot = slot;
+            entry.clock = paint.clock;
             let targets: Vec<(
                 Option<ID3D11RenderTargetView>,
                 Option<ID3D11ShaderResourceView>,
@@ -334,9 +335,12 @@ fn image_view(
 
 impl DxWallpaperCache {
     pub(super) fn slot_changed(&self, paint: &WallpaperPaint, now_ms: u32) -> bool {
-        paint.clock.is_some_and(|clock| {
-            self.entries.get(&paint.key).and_then(|entry| entry.slot) != Some(clock.slot(now_ms))
-        })
+        match self.entries.get(&paint.key) {
+            Some(entry) => {
+                entry.clock != paint.clock || entry.slot != paint.clock.map(|c| c.slot(now_ms))
+            }
+            None => paint.clock.is_some(),
+        }
     }
 
     fn release_image(&mut self, id: u64) {

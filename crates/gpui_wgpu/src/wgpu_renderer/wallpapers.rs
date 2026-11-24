@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use gpui::{BackdropFilter, WallpaperImage, WallpaperPaint};
+use gpui::{BackdropFilter, WallpaperClock, WallpaperImage, WallpaperPaint};
 use gpui_render::{blur::FilterCompositeClip, shaders::blur::BlurUniforms};
 
 use super::WgpuRenderer;
@@ -38,6 +38,7 @@ pub(super) fn wallpaper_noise(print: bool) -> Vec<u8> {
 struct Entry {
     generation: u64,
     slot: Option<u32>,
+    clock: Option<WallpaperClock>,
     passes: Vec<(u32, u32, wgpu::Texture, wgpu::TextureView)>,
     image: Option<(u64, wgpu::TextureView)>,
     last_used: u64,
@@ -164,6 +165,7 @@ impl WgpuRenderer {
             let entry = cache.entries.entry(paint.key).or_insert_with(|| Entry {
                 generation: u64::MAX,
                 slot: None,
+                clock: None,
                 passes: Vec::new(),
                 image: None,
                 last_used: 0,
@@ -199,15 +201,14 @@ impl WgpuRenderer {
             }
             let redraw_from = if entry.generation != paint.generation {
                 0
-            } else if entry.slot != slot {
-                paint
-                    .clock
-                    .map_or(paint.passes.len(), |clock| clock.animated_from)
+            } else if entry.slot != slot || entry.clock != paint.clock {
+                paint.clock.map_or(0, |clock| clock.animated_from)
             } else {
                 paint.passes.len()
             };
             entry.generation = paint.generation;
             entry.slot = slot;
+            entry.clock = paint.clock;
             let views: Vec<wgpu::TextureView> = entry.passes.iter().map(|e| e.3.clone()).collect();
             let image = entry.image.as_ref().map(|image| image.1.clone());
             (
@@ -395,9 +396,12 @@ fn image_mip(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 
 impl WallpaperCache {
     pub(super) fn slot_changed(&self, paint: &WallpaperPaint, now_ms: u32) -> bool {
-        paint.clock.is_some_and(|clock| {
-            self.entries.get(&paint.key).and_then(|entry| entry.slot) != Some(clock.slot(now_ms))
-        })
+        match self.entries.get(&paint.key) {
+            Some(entry) => {
+                entry.clock != paint.clock || entry.slot != paint.clock.map(|c| c.slot(now_ms))
+            }
+            None => paint.clock.is_some(),
+        }
     }
 
     fn release_image(&mut self, id: u64) {
