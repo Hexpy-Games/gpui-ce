@@ -8262,6 +8262,33 @@ impl Window {
         self.refresh();
     }
 
+    /// Exposes the element `global_id` to assistive technology as the holder of `focus_handle`:
+    /// focusable, and the focused node while the handle is focused. `track_focus` elements report
+    /// through this; an element that keeps its own focus handle calls it from its prepaint.
+    pub fn report_a11y_focusable(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        focus_handle: &FocusHandle,
+    ) {
+        if !self.a11y.is_active() {
+            return;
+        }
+        let focused = focus_handle.is_focused(self);
+        match global_id {
+            Some(global_id) => {
+                let node_id = global_id.accesskit_node_id();
+                self.a11y.set_focusable(node_id, focus_handle.id);
+                if focused {
+                    self.a11y.set_focus(node_id);
+                }
+            }
+            None if focused => self
+                .a11y
+                .note_focus_without_node(focus_handle.id, "it has no element id"),
+            None => {}
+        }
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
