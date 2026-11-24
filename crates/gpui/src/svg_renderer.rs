@@ -1,6 +1,6 @@
 use crate::{
-    AssetRegistry, DevicePixels, FRAME_GUTTER, IsZero, RenderImage, Result, SharedString, Size,
-    swap_rgba_pa_to_bgra,
+    AssetRegistry, DevicePixels, FRAME_GUTTER, IsZero, RenderImage, Result, ScaledPixels,
+    SharedString, Size, swap_rgba_pa_to_bgra,
 };
 use image::Frame;
 use resvg::tiny_skia::Pixmap;
@@ -81,6 +81,10 @@ fn select_emoji_font(
 /// When rendering SVGs, we render them at twice the size to get a higher-quality result.
 pub const SMOOTH_SVG_SCALE_FACTOR: f32 = 2.;
 
+pub(crate) fn svg_raster_size(size: Size<ScaledPixels>) -> Size<DevicePixels> {
+    size.map(|pixels| DevicePixels::from((pixels.0 * SMOOTH_SVG_SCALE_FACTOR).ceil() as i32))
+}
+
 #[derive(Clone, PartialEq, Hash, Eq)]
 #[expect(missing_docs)]
 pub struct RenderSvgParams {
@@ -102,6 +106,28 @@ pub struct SvgRenderer {
 /// to paths, so callers that need to rasterize the same SVG at multiple
 /// scales should retain this value to avoid re-paying the parse cost.
 pub struct ParsedSvg(usvg::Tree);
+
+impl ParsedSvg {
+    pub(crate) fn rasterize_bgra(
+        &self,
+        size: Size<DevicePixels>,
+    ) -> Result<Option<(Size<DevicePixels>, Vec<u8>)>> {
+        if size.is_zero() {
+            return Ok(None);
+        }
+
+        let pixmap = rasterize_tree(&self.0, SvgSize::ExactSize(size))?;
+        let size = Size::new(
+            DevicePixels(pixmap.width() as i32),
+            DevicePixels(pixmap.height() as i32),
+        );
+        let mut bytes = pixmap.take();
+        for pixel in bytes.chunks_exact_mut(4) {
+            swap_rgba_pa_to_bgra(pixel);
+        }
+        Ok(Some((size, bytes)))
+    }
+}
 
 /// The size in which to rasterize the SVG.
 #[derive(Clone, Copy)]
@@ -200,6 +226,14 @@ impl SvgRenderer {
         svg: &ParsedSvg,
         size: impl Into<SvgSize>,
     ) -> Result<Arc<RenderImage>, usvg::Error> {
+        self.render_parsed_image(svg, size).map(Arc::new)
+    }
+
+    fn render_parsed_image(
+        &self,
+        svg: &ParsedSvg,
+        size: impl Into<SvgSize>,
+    ) -> Result<RenderImage, usvg::Error> {
         let (size, image_scale_factor) = match size.into() {
             SvgSize::Size(size) => (SvgSize::Size(size), 1.0),
             SvgSize::ExactSize(size) => (SvgSize::ExactSize(size), 1.0),
@@ -218,7 +252,7 @@ impl SvgRenderer {
 
         let mut image = RenderImage::new(SmallVec::from_const([Frame::new(buffer)]));
         image.scale_factor = image_scale_factor;
-        Ok(Arc::new(image))
+        Ok(image)
     }
 
     /// Renders the given bytes into an image buffer.
@@ -227,8 +261,10 @@ impl SvgRenderer {
         bytes: &[u8],
         scale_factor: f32,
     ) -> Result<Arc<RenderImage>, usvg::Error> {
-        let svg = self.parse_svg(bytes)?;
-        self.render_parsed(&svg, scale_factor)
+        let svg = Arc::new(self.parse_svg(bytes)?);
+        let mut image = self.render_parsed_image(&svg, scale_factor)?;
+        image.svg = Some(svg);
+        Ok(Arc::new(image))
     }
 
     pub(crate) fn render_alpha_mask(
@@ -425,6 +461,39 @@ fn fix_generic_font_families(db: &mut usvg::fontdb::Database) {
 mod tests {
     use super::*;
     use usvg::fontdb::{Database, Family, Query};
+
+    #[test]
+    fn svg_raster_size() {
+        let logical_size = Size::new(crate::px(14.0), crate::px(14.0));
+        assert_eq!(
+            super::svg_raster_size(logical_size.scale(1.0)),
+            Size::new(DevicePixels(28), DevicePixels(28))
+        );
+        assert_eq!(
+            super::svg_raster_size(logical_size.scale(1.5)),
+            Size::new(DevicePixels(42), DevicePixels(42))
+        );
+        assert_eq!(
+            super::svg_raster_size(Size::new(ScaledPixels(10.3), ScaledPixels(10.3))),
+            Size::new(DevicePixels(21), DevicePixels(21))
+        );
+    }
+
+    #[test]
+    fn render_single_frame() -> Result<()> {
+        let renderer = SvgRenderer::new(Arc::new(AssetRegistry::default()));
+        let image = renderer.render_single_frame(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"></svg>"#,
+            1.0,
+        )?;
+        let svg = image.svg.as_ref().expect("parsed SVG should be retained");
+        assert_eq!(image.size(0), Size::new(DevicePixels(48), DevicePixels(48)));
+        let requested_size = Size::new(DevicePixels(28), DevicePixels(28));
+        let (size, bytes) = svg.rasterize_bgra(requested_size)?.expect("SVG raster");
+        assert_eq!(size, requested_size);
+        assert_eq!(bytes.len(), 3136);
+        Ok(())
+    }
 
     #[test]
     fn renders_parsed_svg_at_requested_size() -> Result<()> {

@@ -6,7 +6,7 @@ use crate::{
     Background, BorderStyle, Bounds, BoxMorph, BoxShadow, Capslock, Context, Corners,
     CursorHideMode, CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId,
     DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
-    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs,
+    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, ImageId,
     InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, LiveLayer, LivePaint, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
@@ -25,6 +25,7 @@ use crate::{
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
     point, px, rems, size,
+    svg_renderer::svg_raster_size,
     taffy::Measured,
     transparent_black,
     util::{
@@ -1343,6 +1344,7 @@ pub struct Window {
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
     pyramid_jobs: PyramidJobs,
+    svg_image_sizes: FxHashMap<ImageId, SmallVec<[Size<DevicePixels>; 2]>>,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<WindowTextSystem>,
@@ -2156,6 +2158,7 @@ impl Window {
             is_minimizable,
             sprite_atlas,
             pyramid_jobs: PyramidJobs::default(),
+            svg_image_sizes: FxHashMap::default(),
             background_executor: cx.background_executor().clone(),
             foreground_executor: cx.foreground_executor().clone(),
             text_system,
@@ -5921,9 +5924,7 @@ impl Window {
 
         let params = RenderSvgParams {
             path,
-            size: bounds.size.map(|pixels| {
-                DevicePixels::from((pixels.0 * SMOOTH_SVG_SCALE_FACTOR).ceil() as i32)
-            }),
+            size: svg_raster_size(bounds.size),
         };
 
         let Some(tile) =
@@ -6104,6 +6105,29 @@ impl Window {
             return Ok(());
         }
 
+        let mut tile = None;
+        if let Some(svg) = &data.svg
+            && frame_index == 0
+        {
+            let size = svg_raster_size(self.snap_bounds(image_bounds).size);
+            let key = AtlasKey::SvgImage {
+                image_id: data.id,
+                size,
+            };
+            let mut cache_miss = false;
+            tile = self.sprite_atlas.get_or_insert_with(&key, &mut || {
+                cache_miss = true;
+                Ok(svg
+                    .rasterize_bgra(size)
+                    .ok()
+                    .flatten()
+                    .map(|(size, bytes)| (size, Cow::Owned(bytes))))
+            })?;
+            if cache_miss && tile.is_some() {
+                self.svg_image_sizes.entry(data.id).or_default().push(size);
+            }
+        }
+
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
@@ -6116,9 +6140,8 @@ impl Window {
             .map(|axis| axis.0);
         let sizes = level_sizes(src);
         let level = select_level(src, dst, sizes.len());
-        let mut tile = None;
         let mut background_fallback = false;
-        if level > 0 {
+        if tile.is_none() && level > 0 {
             let key = AtlasKey::ImageLevel {
                 params: params.clone(),
                 level: level as u8,
@@ -6291,6 +6314,14 @@ impl Window {
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         self.pyramid_jobs.cancel(data.id);
+        if let Some(sizes) = self.svg_image_sizes.remove(&data.id) {
+            for size in sizes {
+                self.sprite_atlas.remove(&AtlasKey::SvgImage {
+                    image_id: data.id,
+                    size,
+                });
+            }
+        }
         for frame_index in 0..data.frame_count() {
             let params = RenderImageParams {
                 image_id: data.id,
