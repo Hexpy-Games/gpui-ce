@@ -556,6 +556,7 @@ impl Element for EditableTextElement {
                 }
             },
         );
+        window.report_a11y_focusable(global_id, &focus_handle);
 
         // Edits reveal the caret in the frame that first lays out the edited text.
         let overflow = &self.interactivity.base_style.overflow;
@@ -2265,6 +2266,42 @@ mod tests {
         let mut node = accesskit::Node::new(accesskit::Role::TextInput);
         input.write_a11y_info(&mut node);
         assert_eq!(node.label(), Some("Search"));
+    }
+
+    // test-category: pure-logic
+    #[test]
+    fn focused_editable_text_is_the_accessibility_focus() {
+        let mut cx = HeadlessAppContext::new(Arc::new(TestTextSystem));
+        let window = cx
+            .open_window(size(px(420.0), px(260.0)), |_window, cx| {
+                let input = cx.new(|cx| EditableTextState::new(StringStorage::from("ab"), cx));
+                cx.new(|_| CenteredEditableTextView { extent: 0.0, input })
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |view, window, cx| {
+                window.activate();
+                window.set_a11y_forced(true);
+                let focus_handle = view.input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |_view, window, _cx| {
+                let tree = window.a11y_tree().expect("the forced tree was built");
+                let focused = tree
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.focus)
+                    .map(|(_, node)| node.role());
+                assert_eq!(focused, Some(accesskit::Role::TextInput));
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |_view, window, cx| window.blur(cx))
+            .unwrap();
+        cx.run_until_parked();
     }
 
     // test-category: pure-logic

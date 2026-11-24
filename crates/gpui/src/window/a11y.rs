@@ -179,6 +179,9 @@ pub(crate) struct A11y {
     /// The focus id we most recently reported as having no accessibility node,
     /// used to log at most once per focus change rather than every frame.
     last_focus_without_node: Option<FocusId>,
+    /// This frame's focused element that reported no accessibility node, judged in `end_frame`
+    /// once every element has reported.
+    pending_focus_without_node: Option<(FocusId, &'static str)>,
     /// Retains the last tree update (and, in debug builds, per-node provenance)
     /// so it can be dumped via [`crate::Window::debug_a11y_tree_json`].
     debug: debug::A11yDebug,
@@ -204,26 +207,20 @@ impl A11y {
             last: A11yRecord::default(),
             window_title,
             last_focus_without_node: None,
+            pending_focus_without_node: None,
             debug: debug::A11yDebug::default(),
             #[cfg(debug_assertions)]
             view_type_names: FxHashMap::default(),
         }
     }
 
-    /// Logs (once per focus change) that the focused element is not exposed to
-    /// assistive technology because it has no accessibility node. When this
-    /// happens, screen readers fall back to announcing the whole window instead
-    /// of the focused element. The fix is to give the element both an
-    /// `.id(...)` and a `.role(...)`.
-    pub(crate) fn note_focus_without_node(&mut self, focus_id: FocusId, reason: &str) {
-        if self.last_focus_without_node != Some(focus_id) {
-            self.last_focus_without_node = Some(focus_id);
-            log::info!(
-                "a11y: focused element ({focus_id:?}) has no accessibility node \
-                 ({reason}); assistive technology will announce the whole window \
-                 instead. Give it both an `.id(...)` and a `.role(...)` to expose it."
-            );
-        }
+    /// Records that the focused element reported no accessibility node; [`Self::end_frame`] logs it
+    /// once per focus change if no other element exposed that focus. Without a node, screen readers
+    /// fall back to announcing the whole window instead of the focused element. The fix is to give
+    /// the element both an `.id(...)` and a `.role(...)`.
+    pub(crate) fn note_focus_without_node(&mut self, focus_id: FocusId, reason: &'static str) {
+        self.pending_focus_without_node
+            .get_or_insert((focus_id, reason));
     }
 
     pub(crate) fn set_window_title(&mut self, title: impl Into<SharedString>) {
@@ -270,9 +267,6 @@ impl A11y {
             }
         }
         if self.nodes.has_node(node_id) {
-            // The focused element is properly exposed; reset the dedup so a
-            // later focus on a node-less element logs again.
-            self.last_focus_without_node = None;
             self.nodes.set_focus(node_id);
             self.record.focus_ops.push(A11yFocusOp::Focus(node_id));
         } else {
@@ -317,6 +311,19 @@ impl A11y {
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
+        let pending = self.pending_focus_without_node.take();
+        if self.nodes.focus.is_some() {
+            self.last_focus_without_node = None;
+        } else if let Some((focus_id, reason)) = pending
+            && self.last_focus_without_node != Some(focus_id)
+        {
+            self.last_focus_without_node = Some(focus_id);
+            log::info!(
+                "a11y: focused element ({focus_id:?}) has no accessibility node \
+                 ({reason}); assistive technology will announce the whole window \
+                 instead. Give it both an `.id(...)` and a `.role(...)` to expose it."
+            );
+        }
         let update = self.nodes.finalize(&self.record);
         self.debug.capture(
             &update,
