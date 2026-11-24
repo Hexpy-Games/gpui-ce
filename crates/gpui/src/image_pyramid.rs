@@ -88,6 +88,7 @@ pub(crate) type ReadyPyramid = (ImageId, usize, Vec<(Size<DevicePixels>, Vec<u8>
 #[derive(Default)]
 pub(crate) struct PyramidJobs {
     pending: FxHashSet<(ImageId, usize)>,
+    pub(crate) standins: FxHashSet<(ImageId, usize)>,
     pub(crate) ready: Rc<RefCell<Vec<ReadyPyramid>>>,
 }
 
@@ -98,6 +99,11 @@ impl PyramidJobs {
 
     pub(crate) fn cancel(&mut self, image_id: ImageId) {
         self.pending.retain(|(id, _)| *id != image_id);
+        self.standins.retain(|(id, _)| *id != image_id);
+    }
+
+    pub(crate) fn take_standin(&mut self, key: (ImageId, usize)) -> bool {
+        self.standins.remove(&key)
     }
 
     pub(crate) fn take_ready(&mut self) -> Vec<ReadyPyramid> {
@@ -163,7 +169,12 @@ mod tests {
         let id = ImageId(0);
         assert!(jobs.begin((id, 0)));
         assert!(!jobs.begin((id, 0)));
+        jobs.standins.insert((id, 0));
+        assert!(jobs.take_standin((id, 0)));
+        assert!(!jobs.take_standin((id, 0)));
+        jobs.standins.insert((id, 0));
         jobs.cancel(id);
+        assert!(!jobs.take_standin((id, 0)));
         jobs.ready.borrow_mut().push((id, 0, Vec::new()));
         assert!(jobs.take_ready().is_empty());
     }

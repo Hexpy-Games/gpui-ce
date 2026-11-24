@@ -3668,6 +3668,9 @@ impl Window {
                     self.refreshing = true;
                 }
             }
+            if self.pyramid_jobs.take_standin((image_id, frame_index)) {
+                self.sprite_atlas.remove(&AtlasKey::Image(params));
+            }
         }
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
@@ -6113,6 +6116,7 @@ impl Window {
         let sizes = level_sizes(src);
         let level = select_level(src, dst, sizes.len());
         let mut tile = None;
+        let mut background_fallback = false;
         if level > 0 {
             let key = AtlasKey::ImageLevel {
                 params: params.clone(),
@@ -6173,24 +6177,33 @@ impl Window {
                             break;
                         }
                     }
+                    background_fallback = true;
                 }
             }
         }
 
         let tile = match tile {
             Some(tile) => tile,
-            None => self
-                .sprite_atlas
-                .get_or_insert_with(&params.into(), &mut || {
-                    Ok(Some((
-                        data.size(frame_index),
-                        Cow::Borrowed(
-                            data.as_bytes(frame_index)
-                                .expect("It's the caller's job to pass a valid frame index"),
-                        ),
-                    )))
-                })?
-                .expect("Callback above only returns Some"),
+            None => {
+                let mut uploaded = false;
+                let tile = self
+                    .sprite_atlas
+                    .get_or_insert_with(&AtlasKey::Image(params), &mut || {
+                        uploaded = true;
+                        Ok(Some((
+                            data.size(frame_index),
+                            Cow::Borrowed(
+                                data.as_bytes(frame_index)
+                                    .expect("It's the caller's job to pass a valid frame index"),
+                            ),
+                        )))
+                    })?
+                    .expect("Callback above only returns Some");
+                if background_fallback && uploaded {
+                    self.pyramid_jobs.standins.insert((data.id, frame_index));
+                }
+                tile
+            }
         };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
