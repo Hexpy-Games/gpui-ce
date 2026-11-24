@@ -306,16 +306,20 @@ fn stepped_group_between_steps_matches_full_redraw() {
         content_mask,
         ..glass(group_bounds)
     });
+    let sprite = a.monochrome_sprites[0];
+    a.insert_primitive(MonochromeSprite {
+        bounds: group_bounds,
+        content_mask,
+        frames: FrameLoop {
+            period_ms: 200,
+            ..sprite.frames
+        },
+        ..sprite
+    });
     a.finish();
 
     let mut b = Scene::default();
     b.replay(0..a.len(), &a);
-    b.insert_primitive(Quad {
-        bounds: bounds(164.0, 8.0, 8.0, 8.0),
-        content_mask,
-        background: solid_background(color(0xffc040)),
-        ..Default::default()
-    });
     b.finish_over(&a);
 
     renderer.set_animation_time_ms(125);

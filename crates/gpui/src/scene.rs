@@ -933,7 +933,13 @@ impl Scene {
             self,
             seed,
             changed,
-            |motion| motion.changes_between(drawn_ms, now_ms),
+            |motion| {
+                if motion.moves_content() {
+                    motion.is_animated()
+                } else {
+                    motion.changes_between(drawn_ms, now_ms)
+                }
+            },
             |motion| motion.is_active(now_ms) || motion.is_active(drawn_ms),
         )))
     }

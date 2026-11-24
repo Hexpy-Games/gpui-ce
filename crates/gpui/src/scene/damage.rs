@@ -1017,6 +1017,17 @@ mod tests {
             panic!("expected a partial redraw");
         };
         assert_eq!(plan.rect.intersect(&window), window);
+
+        for boundary in &mut b.filter_boundaries {
+            boundary.motion.offset = (point(px(0.0), px(0.0)), point(px(100.0), px(0.0)));
+        }
+        let moving_same_step = b
+            .damage_plan_with_wallpapers(Some(b.generation()), 150, 125, |_| false)
+            .unwrap();
+        let DamagePlan::Partial(plan) = moving_same_step.as_ref() else {
+            panic!("expected a partial redraw");
+        };
+        assert_eq!(plan.rect.intersect(&window), window);
     }
 
     #[test]
@@ -1700,6 +1711,14 @@ mod tests {
         });
         assert!(!scene.changes_between(100, 400));
         assert!(scene.changes_between(400, 600));
+        assert!(
+            LayerMotion {
+                easing: MotionEasing::Steps(3),
+                visible: (0.0, 0.5),
+                ..scene.filter_boundaries[0].motion
+            }
+            .changes_between(400, 600)
+        );
         scene.filter_boundaries[0].motion = LayerMotion {
             duration_ms: 200,
             ..LayerMotion::NONE

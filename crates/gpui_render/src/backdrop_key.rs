@@ -3,8 +3,8 @@
 
 use crate::{path_types::rasterization_vertices, shaders::interface::bytes_of};
 use gpui::{
-    BackdropFilter, Bounds, Corners, DevicePixels, DrawOrder, MotionEasing, PaintedBounds,
-    ScaledPixels, Scene, Size, backdrop_presence,
+    BackdropFilter, Bounds, Corners, DevicePixels, DrawOrder, FilterBoundary, MotionEasing,
+    PaintedBounds, ScaledPixels, Scene, Size, backdrop_presence,
 };
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -19,24 +19,29 @@ const TAG_FILTER: u8 = 7;
 const TAG_BOUNDARY: u8 = 8;
 
 /// Identity of a scene's keys at `now_ms`, including its generation, running appear motions,
-/// and the sampled steps or active state of motion groups.
+/// and the sampled composites or active state of motion groups.
 pub fn keys_epoch(scene: &Scene, now_ms: u32) -> u64 {
     let running = scene
         .backdrop_filters
         .iter()
         .filter(|filter| filter.appear.is_some_and(|a| a.motion.is_active(now_ms)))
         .count() as u64;
-    let mut epoch = scene.generation() ^ (running << 48);
+    let mut hasher = DefaultHasher::new();
+    scene.generation().hash(&mut hasher);
+    running.hash(&mut hasher);
     for boundary in &scene.filter_boundaries {
         if boundary.is_start && boundary.motion.is_animated() {
-            let sample = match boundary.motion.easing {
-                MotionEasing::Steps(_) => u64::from(boundary.motion.progress(now_ms).to_bits()),
-                _ => u64::from(boundary.motion.is_active(now_ms)),
-            };
-            epoch = epoch.rotate_left(1) ^ sample;
+            let active = boundary.motion.is_active(now_ms);
+            let continuous = !matches!(boundary.motion.easing, MotionEasing::Steps(_)) && active;
+            continuous.hash(&mut hasher);
+            if continuous {
+                active.hash(&mut hasher);
+            } else {
+                hash_motion_sample(&mut hasher, boundary, scene.scale_factor, now_ms);
+            }
         }
     }
-    epoch
+    hasher.finish()
 }
 
 /// Cache identity of each `scene.backdrop_filters[i]`'s blurred backdrop for a `target`-sized
@@ -188,21 +193,7 @@ fn filter_key(
             boundary.scale.to_bits().hash(&mut hasher);
             boundary.scale_origin.x.0.to_bits().hash(&mut hasher);
             boundary.scale_origin.y.0.to_bits().hash(&mut hasher);
-            let s = boundary
-                .motion
-                .sample(now_ms, scene.scale_factor, boundary.motion_bounds);
-            s.opacity.to_bits().hash(&mut hasher);
-            s.offset.x.0.to_bits().hash(&mut hasher);
-            s.offset.y.0.to_bits().hash(&mut hasher);
-            s.scale.to_bits().hash(&mut hasher);
-            s.rotation.to_bits().hash(&mut hasher);
-            s.clip.is_some().hash(&mut hasher);
-            if let Some((bounds, radii)) = s.clip {
-                hash_bounds(&mut hasher, &bounds);
-                hash_corners(&mut hasher, &radii);
-            }
-            boundary.motion.origin.x.to_bits().hash(&mut hasher);
-            boundary.motion.origin.y.to_bits().hash(&mut hasher);
+            hash_motion_sample(&mut hasher, boundary, scene.scale_factor, now_ms);
             boundary.is_start.hash(&mut hasher);
             boundary.inline.hash(&mut hasher);
             entries.push((boundary.order, TAG_BOUNDARY, hasher.finish()));
@@ -224,6 +215,29 @@ fn filter_key(
         hash.hash(&mut hasher);
     }
     Some(hasher.finish())
+}
+
+fn hash_motion_sample(
+    hasher: &mut DefaultHasher,
+    boundary: &FilterBoundary,
+    scale_factor: f32,
+    now_ms: u32,
+) {
+    let s = boundary
+        .motion
+        .sample(now_ms, scale_factor, boundary.motion_bounds);
+    s.opacity.to_bits().hash(hasher);
+    s.offset.x.0.to_bits().hash(hasher);
+    s.offset.y.0.to_bits().hash(hasher);
+    s.scale.to_bits().hash(hasher);
+    s.rotation.to_bits().hash(hasher);
+    s.clip.is_some().hash(hasher);
+    if let Some((bounds, radii)) = s.clip {
+        hash_bounds(hasher, &bounds);
+        hash_corners(hasher, &radii);
+    }
+    boundary.motion.origin.x.to_bits().hash(hasher);
+    boundary.motion.origin.y.to_bits().hash(hasher);
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
