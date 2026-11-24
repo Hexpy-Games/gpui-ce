@@ -207,6 +207,13 @@ impl DirectXRenderer {
                 redraw_from,
             )
         };
+        // The passes fill their own targets: the frame's damage scissor (window pixels) does not
+        // apply to them. The composite below draws into the frame and follows it again.
+        unsafe {
+            devices
+                .device_context
+                .RSSetState(&self.pipelines.plain_rasterizer);
+        }
         for (index, pass) in paint.passes.iter().enumerate().skip(redraw_from) {
             let mut uniforms = BlurUniforms::wallpaper_pass(pass);
             if let Some(clock) = paint.clock.filter(|clock| index >= clock.animated_from) {
@@ -221,6 +228,9 @@ impl DirectXRenderer {
             let image = if pass.image { &image } else { source };
             let ctx = &devices.device_context;
             unsafe {
+                // Direct3D 11 nulls an input that is still bound for output: the previous pass's
+                // target has to leave the output merger before it is bound as this pass's input.
+                ctx.OMSetRenderTargets(Some(slice::from_ref(&targets[index].0)), None);
                 ctx.PSSetShaderResources(5, Some(&[previous.clone(), image.clone()]));
                 ctx.PSSetSamplers(7, Some(slice::from_ref(&self.globals.sampler)));
             }
@@ -248,6 +258,7 @@ impl DirectXRenderer {
                 ctx.PSSetShaderResources(5, Some(&[None, None]));
             }
         }
+        self.restore_rasterizer();
         let last = paint.passes.last().expect("passes");
         let size = [last.width as f32, last.height as f32];
         let uniforms = BlurUniforms::composite(
