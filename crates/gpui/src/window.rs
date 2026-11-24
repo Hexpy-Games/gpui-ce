@@ -1387,7 +1387,6 @@ pub struct Window {
     slow_animation_streak: u32,
     pending_motion_wake: Option<(u32, Task<()>)>,
     layout_transition_until: Cell<u32>,
-    layout_transition_start: Cell<Option<u32>>,
     covered_live_keys: FxHashSet<u64>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
@@ -2189,7 +2188,6 @@ impl Window {
             slow_animation_streak: 0,
             pending_motion_wake: None,
             layout_transition_until: Cell::new(0),
-            layout_transition_start: Cell::new(None),
             covered_live_keys: FxHashSet::default(),
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -4651,36 +4649,16 @@ impl Window {
             || until.wrapping_sub(current) < 1 << 31
         {
             self.layout_transition_until.set(until);
-            self.layout_transition_start.set(None);
         }
     }
 
-    /// Like [`Self::animate_layout`] for a transition that began at `start_ms` on the animation
-    /// clock, usually one refresh period before the frame that first shows it (the frame in which
-    /// the input was handled), as a CSS transition's start is the last frame tick before the style
-    /// change. Layout motions created in the frame that opens the transition start then, so that
-    /// frame already shows progress.
-    pub fn animate_layout_from(&self, start_ms: u32, duration_ms: u32) {
-        let until = start_ms.wrapping_add(duration_ms);
-        let current = self.layout_transition_until.get();
-        if !self.layout_transition_active(crate::animation_time_ms())
-            || until.wrapping_sub(current) < 1 << 31
-        {
-            self.layout_transition_until.set(until);
-            self.layout_transition_start.set(Some(start_ms));
-        }
-    }
-
-    pub(crate) fn layout_motion_start(&self, now_ms: u32) -> u32 {
-        self.layout_transition_start
-            .get()
-            .filter(|&start_ms| {
-                let max_age_ms = self
-                    .frame_vsync()
-                    .map_or(34, |vsync| vsync.period_ns.saturating_mul(2) / 1_000_000);
-                u64::from(now_ms.wrapping_sub(start_ms)) <= max_age_ms
-            })
-            .unwrap_or(now_ms)
+    /// A layout motion starts at the frame tick under which the layout change happened.
+    /// That tick is one refresh period before `now_ms` when the platform reports vsync.
+    pub(crate) fn layout_change_time_ms(&self, now_ms: u32) -> u32 {
+        self.frame_vsync().map_or(now_ms, |vsync| {
+            let period_ms = (vsync.period_ns + 500_000) / 1_000_000;
+            now_ms.wrapping_sub(period_ms as u32)
+        })
     }
 
     /// Whether a layout transition started by [`Self::animate_layout`] is open at `now_ms`.

@@ -3347,9 +3347,10 @@ impl Interactivity {
                                 .into_iter()
                                 .any(|delta| delta.abs() > px(0.5))
                             {
+                                let start = window.layout_change_time_ms(now);
                                 let sample = previous.active.map(|motion| {
                                     motion.sample(
-                                        now,
+                                        start,
                                         window.scale_factor(),
                                         previous.rest.scale(window.scale_factor()),
                                     )
@@ -3375,7 +3376,7 @@ impl Interactivity {
                                 );
                                 let growth = rest.size - from_size;
                                 active = Some(crate::LayerMotion {
-                                    start_ms: window.layout_motion_start(now),
+                                    start_ms: start,
                                     duration_ms: config.duration_ms,
                                     repeat: crate::MotionRepeat::Once,
                                     easing: config.easing,
@@ -5779,6 +5780,7 @@ mod tests {
                 .first()
                 .unwrap()
                 .clone();
+            // The test window reports no vsync. The refresh period requires a real-window check.
             assert_eq!(second.timing.start_ms, crate::animation_time_ms());
             assert_eq!(
                 second.delta,
@@ -5797,31 +5799,6 @@ mod tests {
                 (third.delta, third.radii_delta, third.timing),
                 (second.delta, second.radii_delta, second.timing),
             );
-            crate::set_animation_clock(None);
-        })
-        .unwrap();
-    }
-
-    #[gpui::test]
-    fn layout_motion_uses_the_earlier_transition_start(cx: &mut TestAppContext) {
-        let top_height = Rc::new(Cell::new(px(20.0)));
-        let view = cx.add_window({
-            let top_height = top_height.clone();
-            move |_, _| LayoutMotionTestView {
-                top_height,
-                scroll: ScrollHandle::new(),
-            }
-        });
-        cx.update_window(view.into(), |_, window, cx| {
-            crate::set_animation_clock(Some(1000));
-            window.draw(cx).clear(cx);
-            top_height.set(px(50.0));
-            let start_ms = crate::animation_time_ms().wrapping_sub(16);
-            window.animate_layout_from(start_ms, 1000);
-            window.refresh();
-            window.draw(cx).clear(cx);
-            let morph = window.rendered_frame.scene.box_morphs.first().unwrap();
-            assert_eq!(morph.timing.start_ms, start_ms);
             crate::set_animation_clock(None);
         })
         .unwrap();
