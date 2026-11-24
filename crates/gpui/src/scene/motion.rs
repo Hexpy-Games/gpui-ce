@@ -162,8 +162,7 @@ impl LayerMotion {
         }
     }
 
-    /// Whether the layer is painted at now_ms.
-    pub fn visible_at(&self, now_ms: u32) -> bool {
+    fn visible_at(&self, now_ms: u32) -> bool {
         let x = self.linear_progress(now_ms);
         self.visible.0 <= x
             && (x < self.visible.1 || (x <= self.visible.1 && self.visible.1 >= 1.0))

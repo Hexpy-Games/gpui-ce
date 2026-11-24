@@ -188,8 +188,21 @@ fn filter_key(
             boundary.scale.to_bits().hash(&mut hasher);
             boundary.scale_origin.x.0.to_bits().hash(&mut hasher);
             boundary.scale_origin.y.0.to_bits().hash(&mut hasher);
-            boundary.motion.progress(now_ms).to_bits().hash(&mut hasher);
-            boundary.motion.visible_at(now_ms).hash(&mut hasher);
+            let s = boundary
+                .motion
+                .sample(now_ms, scene.scale_factor, boundary.motion_bounds);
+            s.opacity.to_bits().hash(&mut hasher);
+            s.offset.x.0.to_bits().hash(&mut hasher);
+            s.offset.y.0.to_bits().hash(&mut hasher);
+            s.scale.to_bits().hash(&mut hasher);
+            s.rotation.to_bits().hash(&mut hasher);
+            s.clip.is_some().hash(&mut hasher);
+            if let Some((bounds, radii)) = s.clip {
+                hash_bounds(&mut hasher, &bounds);
+                hash_corners(&mut hasher, &radii);
+            }
+            boundary.motion.origin.x.to_bits().hash(&mut hasher);
+            boundary.motion.origin.y.to_bits().hash(&mut hasher);
             boundary.is_start.hash(&mut hasher);
             boundary.inline.hash(&mut hasher);
             entries.push((boundary.order, TAG_BOUNDARY, hasher.finish()));
@@ -359,52 +372,56 @@ mod tests {
             ..Default::default()
         };
         let group_bounds = scaled_bounds(110.0, 110.0, 50.0);
-        let [stepped, continuous] =
-            [MotionEasing::Steps(4), LayerMotion::NONE.easing].map(|easing| {
-                let mut scene = Scene::default();
-                let boundary = FilterBoundary {
-                    order: 0,
-                    bounds: group_bounds,
-                    content_mask: mask,
-                    corner_radii: Default::default(),
-                    corner_smoothing: 0.0,
-                    filters: Default::default(),
-                    opacity: 1.0,
-                    scale: 1.0,
-                    scale_origin: Default::default(),
-                    motion_bounds: group_bounds,
-                    motion: LayerMotion {
-                        duration_ms: 400,
-                        easing,
-                        opacity: (0.0, 1.0),
-                        ..LayerMotion::NONE
-                    },
-                    is_start: true,
-                    inline: false,
-                };
-                scene.insert_primitive(boundary.clone());
-                scene.insert_primitive(Quad {
-                    bounds: group_bounds,
-                    content_mask: mask,
-                    background: solid_background(red()),
-                    ..Default::default()
-                });
-                scene.insert_primitive(FilterBoundary {
-                    is_start: false,
-                    ..boundary
-                });
-                scene.insert_primitive(BackdropFilter {
-                    bounds: scaled_bounds(100.0, 100.0, 100.0),
-                    content_mask: mask,
-                    filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
-                        .into_iter()
-                        .collect(),
-                    opacity: 1.0,
-                    ..Default::default()
-                });
-                scene.finish();
-                scene
+        let [stepped, continuous, different_opacity] = [
+            (MotionEasing::Steps(4), (0.0, 1.0)),
+            (LayerMotion::NONE.easing, (0.0, 1.0)),
+            (MotionEasing::Steps(4), (0.5, 1.0)),
+        ]
+        .map(|(easing, opacity)| {
+            let mut scene = Scene::default();
+            let boundary = FilterBoundary {
+                order: 0,
+                bounds: group_bounds,
+                content_mask: mask,
+                corner_radii: Default::default(),
+                corner_smoothing: 0.0,
+                filters: Default::default(),
+                opacity: 1.0,
+                scale: 1.0,
+                scale_origin: Default::default(),
+                motion_bounds: group_bounds,
+                motion: LayerMotion {
+                    duration_ms: 400,
+                    easing,
+                    opacity,
+                    ..LayerMotion::NONE
+                },
+                is_start: true,
+                inline: false,
+            };
+            scene.insert_primitive(boundary.clone());
+            scene.insert_primitive(Quad {
+                bounds: group_bounds,
+                content_mask: mask,
+                background: solid_background(red()),
+                ..Default::default()
             });
+            scene.insert_primitive(FilterBoundary {
+                is_start: false,
+                ..boundary
+            });
+            scene.insert_primitive(BackdropFilter {
+                bounds: scaled_bounds(100.0, 100.0, 100.0),
+                content_mask: mask,
+                filters: [ScaledFilter::Blur(ScaledPixels(4.0))]
+                    .into_iter()
+                    .collect(),
+                opacity: 1.0,
+                ..Default::default()
+            });
+            scene.finish();
+            scene
+        });
         let target = size(DevicePixels(1000), DevicePixels(1000));
         let first = backdrop_keys(&stepped, target, 125)[0];
         let same_step = backdrop_keys(&stepped, target, 150)[0];
@@ -412,6 +429,7 @@ mod tests {
         assert!(first.is_some() && next_step.is_some());
         assert_eq!(first, same_step);
         assert_ne!(first, next_step);
+        assert_ne!(first, backdrop_keys(&different_opacity, target, 125)[0]);
         assert!(backdrop_keys(&continuous, target, 125)[0].is_none());
     }
 
