@@ -1117,7 +1117,18 @@ impl DirectXRenderer {
             let (width, height) = (live.size.width.0 as u32, live.size.height.0 as u32);
             let pixels = rasterize_live(&canvas.ops, width, height);
             let mut offset = POINT::default();
-            let texture: ID3D11Texture2D = unsafe { live.surface.BeginDraw(None, &mut offset)? };
+            let texture: ID3D11Texture2D =
+                match unsafe { live.surface.BeginDraw(None, &mut offset) } {
+                    Ok(texture) => texture,
+                    Err(error) => {
+                        log::warn!(
+                            "dcomp: live layer BeginDraw {:?} key {:?}: {error}",
+                            error.code(),
+                            layer.key
+                        );
+                        continue;
+                    }
+                };
             unsafe {
                 devices.device_context.UpdateSubresource(
                     &texture,
@@ -1134,7 +1145,13 @@ impl DirectXRenderer {
                     width * 4,
                     0,
                 );
-                live.surface.EndDraw()?;
+                if let Err(error) = live.surface.EndDraw() {
+                    log::warn!(
+                        "dcomp: live layer EndDraw {:?} key {:?}: {error}",
+                        error.code(),
+                        layer.key
+                    );
+                }
             }
         }
         unsafe { composition.comp_device.Commit()? };
