@@ -215,10 +215,9 @@ impl A11y {
     }
 
     /// Records that the focused element reported no accessibility node; [`Self::end_frame`] logs it
-    /// assistive technology because it has no accessibility node. When this
-    /// happens, screen readers fall back to announcing the whole window instead
-    /// of the focused element. The fix is to give the element both an
-    /// `.id(...)` and a `.role(...)`.
+    /// once per focus change if no other element exposed that focus. Without a node, screen readers
+    /// fall back to announcing the whole window instead of the focused element. The fix is to give
+    /// the element both an `.id(...)` and a `.role(...)`.
     pub(crate) fn note_focus_without_node(&mut self, focus_id: FocusId, reason: &'static str) {
         self.pending_focus_without_node
             .get_or_insert((focus_id, reason));
