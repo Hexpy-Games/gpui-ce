@@ -290,6 +290,10 @@ pub(super) fn operation_hash(operation: &PaintOperation) -> u64 {
                             clock.fps.hash(&mut hash);
                             bytes!(hash, clock.period_s);
                             clock.animated_from.hash(&mut hash);
+                            clock.end_s.is_some().hash(&mut hash);
+                            if let Some(end) = clock.end_s {
+                                bytes!(hash, end);
+                            }
                         }
                         wallpaper.passes.len().hash(&mut hash);
                         for pass in &wallpaper.passes {

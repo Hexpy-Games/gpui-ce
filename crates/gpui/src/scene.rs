@@ -789,7 +789,9 @@ impl Scene {
                 .as_ref()
                 .and_then(|paint| paint.clock.as_ref())
         }) {
-            let next = clock.next_slot_ms(now_ms);
+            let Some(next) = clock.next_slot_ms(now_ms) else {
+                continue;
+            };
             if demand
                 .next_start_ms
                 .is_none_or(|start| next.wrapping_sub(now_ms) < start.wrapping_sub(now_ms))
@@ -1731,7 +1733,9 @@ impl WallpaperImage {
     }
 }
 
-/// A capped clock for wallpaper passes that read time. `fps` and `period_s` must be positive.
+/// A clock for wallpaper passes that read time. A looping clock is capped at `fps`.
+/// A one-shot clock with `fps` at or above the display's refresh rate advances on every frame.
+/// `fps` and `period_s` must be positive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WallpaperClock {
     /// Animation clock at which the time is `start_s`.
@@ -1744,24 +1748,48 @@ pub struct WallpaperClock {
     pub period_s: f32,
     /// First pass that reads time; earlier passes depend only on generation.
     pub animated_from: usize,
+    /// `Some(end)`: the clock plays once, from `start_s` to `end` seconds, then holds `end`
+    /// and asks for no more frames. `None`: it loops over `period_s`.
+    pub end_s: Option<f32>,
 }
 
 impl WallpaperClock {
+    fn last_slot(&self) -> Option<u32> {
+        self.end_s
+            .map(|end| ((end - self.start_s).max(0.0) * self.fps as f32).ceil() as u32)
+    }
+
     /// Frame slot at this wrapping animation clock value.
     pub fn slot(&self, now_ms: u32) -> u32 {
-        (u64::from(now_ms.wrapping_sub(self.start_ms)) * u64::from(self.fps) / 1000) as u32
+        let elapsed_ms = now_ms.wrapping_sub(self.start_ms);
+        let slot = u64::from(elapsed_ms) * u64::from(self.fps) / 1000;
+        match self.last_slot() {
+            Some(_) if elapsed_ms >= 1 << 31 => 0,
+            Some(last) => slot.min(u64::from(last)) as u32,
+            None => slot as u32,
+        }
     }
 
-    /// Non-negative looping shader time at a frame slot.
+    /// Shader time at a frame slot.
     pub fn time_s(&self, slot: u32) -> f32 {
-        (self.start_s + slot as f32 / self.fps as f32).rem_euclid(self.period_s)
+        let time = self.start_s + slot as f32 / self.fps as f32;
+        match self.end_s {
+            Some(end) => time.min(end),
+            None => time.rem_euclid(self.period_s),
+        }
     }
 
-    /// First slot boundary strictly after this animation clock value.
-    pub fn next_slot_ms(&self, now_ms: u32) -> u32 {
-        let next = u64::from(self.slot(now_ms)) + 1;
-        self.start_ms
-            .wrapping_add((next * 1000).div_ceil(u64::from(self.fps)) as u32)
+    /// First slot boundary after this animation clock value, if another slot follows.
+    pub fn next_slot_ms(&self, now_ms: u32) -> Option<u32> {
+        let slot = self.slot(now_ms);
+        if self.last_slot() == Some(slot) {
+            return None;
+        }
+        let next = u64::from(slot) + 1;
+        Some(
+            self.start_ms
+                .wrapping_add((next * 1000).div_ceil(u64::from(self.fps)) as u32),
+        )
     }
 }
 
@@ -2375,19 +2403,39 @@ mod tests {
             fps: 20,
             period_s: 10.0,
             animated_from: 0,
+            end_s: None,
         };
         assert_eq!(clock.slot(1000), 0);
         assert_eq!(clock.slot(1049), 0);
         assert_eq!(clock.slot(1050), 1);
         assert_eq!(clock.time_s(1), 2.05);
         assert_eq!(clock.time_s(160), 0.0);
-        assert_eq!(clock.next_slot_ms(1049), 1050);
-        assert_eq!(clock.next_slot_ms(1050), 1100);
+        assert_eq!(clock.next_slot_ms(1049), Some(1050));
+        assert_eq!(clock.next_slot_ms(1050), Some(1100));
         let clock = WallpaperClock {
             start_ms: u32::MAX - 10,
             ..clock
         };
         assert_eq!(clock.slot(clock.start_ms.wrapping_add(60)), 1);
+
+        let clock = WallpaperClock {
+            start_ms: 1000,
+            start_s: 0.0,
+            fps: 240,
+            period_s: 1.0,
+            animated_from: 0,
+            end_s: Some(2.9),
+        };
+        assert_eq!(clock.slot(900), 0);
+        assert_eq!(clock.slot(1000), 0);
+        assert_eq!(clock.slot(2000), 240);
+        assert_eq!(clock.slot(1000 + 2900), 696);
+        assert_eq!(clock.slot(1000 + 60_000), 696);
+        assert_eq!(clock.time_s(696), 2.9);
+        assert_eq!(clock.time_s(240), 1.0);
+        assert_eq!(clock.next_slot_ms(3899), Some(3900));
+        assert_eq!(clock.next_slot_ms(3900), None);
+        assert_eq!(clock.next_slot_ms(61_000), None);
     }
 
     fn scaled(value: f32) -> ScaledPixels {

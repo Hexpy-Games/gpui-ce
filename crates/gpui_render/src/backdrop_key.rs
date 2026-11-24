@@ -541,6 +541,7 @@ mod tests {
             fps: 20,
             period_s: 10.0,
             animated_from: 0,
+            end_s: None,
         }));
         assert!(keys[1].is_none());
     }
