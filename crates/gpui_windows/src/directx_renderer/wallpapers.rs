@@ -207,6 +207,13 @@ impl DirectXRenderer {
                 redraw_from,
             )
         };
+        // The passes fill their own targets: the frame's damage scissor (window pixels) does not
+        // apply to them. The composite below draws into the frame and follows it again.
+        unsafe {
+            devices
+                .device_context
+                .RSSetState(&self.pipelines.plain_rasterizer);
+        }
         for (index, pass) in paint.passes.iter().enumerate().skip(redraw_from) {
             let mut uniforms = BlurUniforms::wallpaper_pass(pass);
             if let Some(clock) = paint.clock.filter(|clock| index >= clock.animated_from) {
@@ -251,6 +258,7 @@ impl DirectXRenderer {
                 ctx.PSSetShaderResources(5, Some(&[None, None]));
             }
         }
+        self.restore_rasterizer();
         let last = paint.passes.last().expect("passes");
         let size = [last.width as f32, last.height as f32];
         let uniforms = BlurUniforms::composite(
