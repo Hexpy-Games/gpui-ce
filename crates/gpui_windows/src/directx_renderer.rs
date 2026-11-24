@@ -618,6 +618,11 @@ struct LiveSurface {
     size: Size<DevicePixels>,
 }
 
+fn live_surface_size(bounds: gpui::Bounds<gpui::ScaledPixels>) -> Option<Size<DevicePixels>> {
+    let size = bounds.size.map(|value| DevicePixels(value.0.ceil() as i32));
+    (size.width.0 > 0 && size.height.0 > 0).then_some(size)
+}
+
 struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
@@ -950,104 +955,135 @@ impl DirectXRenderer {
         }
         self.begin_frame_at(gpui::animation_time_ms());
         self.retain_surfaces(scene);
-        if !self.render_damage(scene)? {
-            self.render(scene, background_appearance, true)?;
+        let frame = match self.render_damage(scene) {
+            Ok(true) => Ok(()),
+            Ok(false) => self.render(scene, background_appearance, true),
+            Err(e) => Err(e),
         }
-        self.present()?;
-        let live_changed = self.sync_live_layers(scene)?;
-        if let Some(composition) = &self.direct_composition {
-            let device_context = &self
-                .devices
-                .as_ref()
-                .context("devices missing")?
-                .device_context;
-            if self
-                .compositor
-                .update(composition, device_context, &sprites, &keys, &self.atlas)?
-                || live_changed
+        .and_then(|()| self.present());
+        let live_changed = self.sync_live_layers(scene);
+        if let (Some(composition), Some(devices)) = (&self.direct_composition, &self.devices) {
+            if self.compositor.update(
+                composition,
+                &devices.device_context,
+                &sprites,
+                &keys,
+                &self.atlas,
+            ) || live_changed
             {
                 // Include visual changes in the commit after live surface uploads.
                 self.last_live_frame_ms =
                     self.animation_time_ms.wrapping_sub(gpui::LIVE_FRAME_MIN_MS);
             }
         }
-        self.draw_live_layers(scene)?;
-        Ok(())
+        let live = self.draw_live_layers(scene); // it commits, so removals reach the screen
+        frame.and(live)
     }
 
-    fn sync_live_layers(&mut self, scene: &Scene) -> Result<bool> {
+    fn sync_live_layers(&mut self, scene: &Scene) -> bool {
         let Some(composition) = &self.direct_composition else {
-            return Ok(false);
+            return false;
         };
         let mut changed = false;
         let stale: Vec<_> = self
             .live
             .keys()
             .copied()
-            .filter(|key| !scene.live_layers().iter().any(|layer| layer.key == *key))
+            .filter(|key| {
+                !scene
+                    .live_layers()
+                    .iter()
+                    .any(|layer| layer.key == *key && live_surface_size(layer.bounds).is_some())
+            })
             .collect();
         for key in stale {
-            let live = self.live.remove(&key).unwrap();
+            match unsafe { composition.comp_visual.RemoveVisual(&self.live[&key].clip) } {
+                Ok(()) => {
+                    self.live.remove(&key);
+                    changed = true;
+                }
+                Err(error) if error.code() == windows::Win32::Foundation::E_INVALIDARG => {
+                    self.live.remove(&key);
+                }
+                Err(error) => log::warn!(
+                    "dcomp: RemoveVisual {:?} live layer key {key:?}, kept for retry: {error}",
+                    error.code()
+                ),
+            }
+        }
+        for layer in scene.live_layers() {
+            let Some(size) = live_surface_size(layer.bounds) else {
+                continue;
+            };
+            match Self::sync_live_layer(&mut self.live, composition, layer, size) {
+                Ok(layer_changed) => changed |= layer_changed,
+                Err(error) => log::warn!(
+                    "dcomp: live layer skipped, {:?} key {:?} bounds {:?}: {error:#}",
+                    compositor::hresult(&error),
+                    layer.key,
+                    layer.bounds
+                ),
+            }
+        }
+        changed
+    }
+
+    fn sync_live_layer(
+        live: &mut FxHashMap<u64, LiveSurface>,
+        composition: &DirectComposition,
+        layer: &LiveLayer,
+        size: Size<DevicePixels>,
+    ) -> Result<bool> {
+        let mut changed = false;
+        if let std::collections::hash_map::Entry::Vacant(entry) = live.entry(layer.key) {
             unsafe {
-                composition.comp_visual.RemoveVisual(&live.clip)?;
+                let surface = composition.comp_device.CreateSurface(
+                    size.width.0 as u32,
+                    size.height.0 as u32,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )?;
+                let clip = composition.comp_device.CreateVisual()?;
+                let visual = composition.comp_device.CreateVisual()?;
+                visual.SetContent(&surface)?;
+                clip.AddVisual(&visual, true, None)?;
+                composition.comp_visual.AddVisual(&clip, true, None)?;
+                entry.insert(LiveSurface {
+                    surface,
+                    clip,
+                    visual,
+                    size,
+                });
             }
             changed = true;
         }
-        for layer in scene.live_layers() {
-            let size = layer
-                .bounds
-                .size
-                .map(|value| DevicePixels(value.0.ceil() as i32));
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.live.entry(layer.key) {
-                unsafe {
-                    let surface = composition.comp_device.CreateSurface(
-                        size.width.0 as u32,
-                        size.height.0 as u32,
-                        DXGI_FORMAT_B8G8R8A8_UNORM,
-                        DXGI_ALPHA_MODE_PREMULTIPLIED,
-                    )?;
-                    let clip = composition.comp_device.CreateVisual()?;
-                    let visual = composition.comp_device.CreateVisual()?;
-                    visual.SetContent(&surface)?;
-                    clip.AddVisual(&visual, true, None)?;
-                    composition.comp_visual.AddVisual(&clip, true, None)?;
-                    entry.insert(LiveSurface {
-                        surface,
-                        clip,
-                        visual,
-                        size,
-                    });
-                }
-                changed = true;
-            }
-            let live = self.live.get_mut(&layer.key).unwrap();
-            if live.size != size {
-                unsafe {
-                    live.surface = composition.comp_device.CreateSurface(
-                        size.width.0 as u32,
-                        size.height.0 as u32,
-                        DXGI_FORMAT_B8G8R8A8_UNORM,
-                        DXGI_ALPHA_MODE_PREMULTIPLIED,
-                    )?;
-                    live.visual.SetContent(&live.surface)?;
-                }
-                live.size = size;
-            }
-            let clip = layer.content_mask.bounds;
+        let live = live.get_mut(&layer.key).unwrap();
+        if live.size != size {
             unsafe {
-                live.clip.SetOffsetX2(clip.origin.x.0)?;
-                live.clip.SetOffsetY2(clip.origin.y.0)?;
-                let rect = composition.comp_device.CreateRectangleClip()?;
-                rect.SetLeft2(0.0)?;
-                rect.SetTop2(0.0)?;
-                rect.SetRight2(clip.size.width.0)?;
-                rect.SetBottom2(clip.size.height.0)?;
-                live.clip.SetClip(&rect)?;
-                live.visual
-                    .SetOffsetX2(layer.bounds.origin.x.0 - clip.origin.x.0)?;
-                live.visual
-                    .SetOffsetY2(layer.bounds.origin.y.0 - clip.origin.y.0)?;
+                live.surface = composition.comp_device.CreateSurface(
+                    size.width.0 as u32,
+                    size.height.0 as u32,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )?;
+                live.visual.SetContent(&live.surface)?;
             }
+            live.size = size;
+        }
+        let clip = layer.content_mask.bounds;
+        unsafe {
+            live.clip.SetOffsetX2(clip.origin.x.0)?;
+            live.clip.SetOffsetY2(clip.origin.y.0)?;
+            let rect = composition.comp_device.CreateRectangleClip()?;
+            rect.SetLeft2(0.0)?;
+            rect.SetTop2(0.0)?;
+            rect.SetRight2(clip.size.width.0)?;
+            rect.SetBottom2(clip.size.height.0)?;
+            live.clip.SetClip(&rect)?;
+            live.visual
+                .SetOffsetX2(layer.bounds.origin.x.0 - clip.origin.x.0)?;
+            live.visual
+                .SetOffsetY2(layer.bounds.origin.y.0 - clip.origin.y.0)?;
         }
         Ok(changed)
     }
@@ -1063,7 +1099,9 @@ impl DirectXRenderer {
         };
         let devices = self.devices.as_ref().context("devices missing")?;
         for layer in scene.live_layers() {
-            let live = self.live.get(&layer.key).context("live surface missing")?;
+            let Some(live) = self.live.get(&layer.key) else {
+                continue;
+            };
             let mut canvas = LiveCanvas {
                 ops: Vec::new(),
                 scale_factor: scene.scale_factor,
@@ -1079,7 +1117,18 @@ impl DirectXRenderer {
             let (width, height) = (live.size.width.0 as u32, live.size.height.0 as u32);
             let pixels = rasterize_live(&canvas.ops, width, height);
             let mut offset = POINT::default();
-            let texture: ID3D11Texture2D = unsafe { live.surface.BeginDraw(None, &mut offset)? };
+            let texture: ID3D11Texture2D =
+                match unsafe { live.surface.BeginDraw(None, &mut offset) } {
+                    Ok(texture) => texture,
+                    Err(error) => {
+                        log::warn!(
+                            "dcomp: live layer BeginDraw {:?} key {:?}: {error}",
+                            error.code(),
+                            layer.key
+                        );
+                        continue;
+                    }
+                };
             unsafe {
                 devices.device_context.UpdateSubresource(
                     &texture,
@@ -1096,7 +1145,13 @@ impl DirectXRenderer {
                     width * 4,
                     0,
                 );
-                live.surface.EndDraw()?;
+                if let Err(error) = live.surface.EndDraw() {
+                    log::warn!(
+                        "dcomp: live layer EndDraw {:?} key {:?}: {error}",
+                        error.code(),
+                        layer.key
+                    );
+                }
             }
         }
         unsafe { composition.comp_device.Commit()? };
