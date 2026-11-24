@@ -2677,15 +2677,24 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
+        // The adapter goes on gpui's view: it is the first responder and covers the content, so
+        // AppKit's focus and hit-test queries reach it.
         let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
+            accesskit_macos::SubclassingAdapter::new(
+                lock.native_view.as_ptr() as *mut c_void,
                 activation_handler,
                 action_handler,
             )
         };
-
-        lock.accesskit_adapter = Some(adapter);
+        let is_key = unsafe { lock.native_window.isKeyWindow() == Bool::new(true) };
+        let events = lock
+            .accesskit_adapter
+            .insert(adapter)
+            .update_view_focus_state(is_key);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
