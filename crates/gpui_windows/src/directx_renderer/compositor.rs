@@ -310,13 +310,15 @@ fn make_visuals(
                     motion,
                     (f32::from(from.left), f32::from(to.left)),
                     now_ms,
-                )?;
+                )
+                .context("clip left animation")?;
                 let top = motion_animation(
                     device,
                     motion,
                     (f32::from(from.top), f32::from(to.top)),
                     now_ms,
-                )?;
+                )
+                .context("clip top animation")?;
                 let right = motion_animation(
                     device,
                     motion,
@@ -325,7 +327,8 @@ fn make_visuals(
                         bounds.size.width.0 - f32::from(to.right),
                     ),
                     now_ms,
-                )?;
+                )
+                .context("clip right animation")?;
                 let bottom = motion_animation(
                     device,
                     motion,
@@ -334,13 +337,15 @@ fn make_visuals(
                         bounds.size.height.0 - f32::from(to.bottom),
                     ),
                     now_ms,
-                )?;
+                )
+                .context("clip bottom animation")?;
                 window_rect.SetLeft(&left)?;
                 window_rect.SetTop(&top)?;
                 window_rect.SetRight(&right)?;
                 window_rect.SetBottom(&bottom)?;
             }
-            let opacity = motion_animation(device, motion, motion.opacity, now_ms)?;
+            let opacity = motion_animation(device, motion, motion.opacity, now_ms)
+                .context("opacity animation")?;
             let effect = device.CreateEffectGroup()?;
             effect.SetOpacity(&opacity)?;
             window.SetEffect(&effect)?;
@@ -352,7 +357,8 @@ fn make_visuals(
                     bounds.origin.x.0 - clip_bounds.origin.x.0 + f32::from(motion.offset.1.x),
                 ),
                 now_ms,
-            )?;
+            )
+            .context("offset x animation")?;
             let y = motion_animation(
                 device,
                 motion,
@@ -361,13 +367,15 @@ fn make_visuals(
                     bounds.origin.y.0 - clip_bounds.origin.y.0 + f32::from(motion.offset.1.y),
                 ),
                 now_ms,
-            )?;
+            )
+            .context("offset y animation")?;
             window.SetOffsetX(&x)?;
             window.SetOffsetY(&y)?;
             let scale = device.CreateScaleTransform()?;
             scale.SetCenterX2(bounds.size.width.0 * motion.origin.x)?;
             scale.SetCenterY2(bounds.size.height.0 * motion.origin.y)?;
-            let animation = motion_animation(device, motion, motion.scale, now_ms)?;
+            let animation = motion_animation(device, motion, motion.scale, now_ms)
+                .context("scale animation")?;
             scale.SetScaleX(&animation)?;
             scale.SetScaleY(&animation)?;
             let rotate = device.CreateRotateTransform()?;
@@ -381,7 +389,8 @@ fn make_visuals(
                     motion.rotation.1.to_degrees(),
                 ),
                 now_ms,
-            )?;
+            )
+            .context("rotation animation")?;
             rotate.SetAngle(&animation)?;
             let transform =
                 device.CreateTransformGroup(&[Some(scale.cast()?), Some(rotate.cast()?)])?;
@@ -457,6 +466,10 @@ fn motion_animation(
             for pair in points[..usize::from(len)].windows(2) {
                 let [(x0, y0), (x1, y1)] = [pair[0], pair[1]];
                 let length = f64::from(x1 - x0) * duration;
+                // A repeated x is a jump (CSS linear()); the next segment starts at the new value.
+                if length <= 0.0 {
+                    continue;
+                }
                 segments.push((
                     f64::from(x0) * duration,
                     length,
