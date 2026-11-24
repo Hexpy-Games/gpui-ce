@@ -46,11 +46,11 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, ForegroundExecutor, FrameVsync, GlyphAtlasEntry, GlyphId, GpuSpecs,
-    ImageSource, InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures,
-    PlatformInput, Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
-    RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    ScaledPixels, Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
-    ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
+    ImageId, ImageSource, InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels,
+    PlatformGestures, PlatformInput, Point, PreparedRasterStyle, Priority, RasterStyleRequest,
+    RasterizedGlyph, RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, ScaledPixels, Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task,
+    TextLayoutRequest, ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -1950,6 +1950,10 @@ pub enum AtlasKey {
         format: RasterizedGlyphFormat,
     },
     Svg(RenderSvgParams),
+    SvgImage {
+        image_id: ImageId,
+        size: Size<DevicePixels>,
+    },
     Image(RenderImageParams),
     ImageLevel {
         params: RenderImageParams,
@@ -1988,7 +1992,9 @@ impl AtlasKey {
                 RasterizedGlyphFormat::BgraColor => AtlasTextureKind::Polychrome,
             },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
-            AtlasKey::Image(_) | AtlasKey::ImageLevel { .. } => AtlasTextureKind::Polychrome,
+            AtlasKey::SvgImage { .. } | AtlasKey::Image(_) | AtlasKey::ImageLevel { .. } => {
+                AtlasTextureKind::Polychrome
+            }
             AtlasKey::Frames(params) if params.polychrome => AtlasTextureKind::Polychrome,
             AtlasKey::Frames(_) => AtlasTextureKind::Monochrome,
         }

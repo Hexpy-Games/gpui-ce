@@ -1,4 +1,4 @@
-use crate::{DevicePixels, Pixels, Result, SharedString, Size, size};
+use crate::{DevicePixels, ParsedSvg, Pixels, Result, SharedString, Size, size};
 use gpui_util::ResultExt;
 use smallvec::SmallVec;
 
@@ -222,6 +222,7 @@ pub struct RenderImage {
     pub id: ImageId,
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
+    pub(crate) svg: Option<Arc<ParsedSvg>>,
     data: SmallVec<[Frame; 1]>,
 }
 
@@ -241,6 +242,7 @@ impl RenderImage {
         Self {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
+            svg: None,
             data: data.into(),
         }
     }
