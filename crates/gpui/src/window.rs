@@ -4652,13 +4652,13 @@ impl Window {
         }
     }
 
-    /// A layout motion starts at the frame tick under which the layout change happened.
-    /// That tick is one refresh period before `now_ms` when the platform reports vsync.
+    /// The start of a layout motion first observed in the frame at `now_ms`: one refresh period
+    /// earlier, the tick of the frame before, under which the input or update that changed the
+    /// layout ran. A CSS transition starts the same way, so the first presented frame is one
+    /// period in. A change made inside the observing frame itself also gets this start.
+    /// Platforms that report no vsync keep `now_ms`.
     pub(crate) fn layout_change_time_ms(&self, now_ms: u32) -> u32 {
-        self.frame_vsync().map_or(now_ms, |vsync| {
-            let period_ms = (vsync.period_ns + 500_000) / 1_000_000;
-            now_ms.wrapping_sub(period_ms as u32)
-        })
+        layout_change_time(now_ms, self.frame_vsync().map(|vsync| vsync.period_ns))
     }
 
     /// Whether a layout transition started by [`Self::animate_layout`] is open at `now_ms`.
@@ -9283,6 +9283,13 @@ pub fn outline(
         .border_style(border_style)
 }
 
+fn layout_change_time(now_ms: u32, period_ns: Option<u64>) -> u32 {
+    period_ns.map_or(now_ms, |period_ns| {
+        let period_ms = (u128::from(period_ns) + 500_000) / 1_000_000;
+        now_ms.wrapping_sub(period_ms as u32)
+    })
+}
+
 #[cfg(test)]
 mod pointer_tests;
 
@@ -9303,6 +9310,20 @@ mod tests {
     use proptest::prelude::*;
     use smallvec::smallvec;
     use std::{path::PathBuf, sync::Mutex as StdMutex};
+
+    // test-category: pure-logic
+    #[test]
+    fn layout_change_time_uses_the_previous_frame_tick() {
+        let now_ms = 100;
+        assert_eq!(layout_change_time(now_ms, Some(16_666_667)), now_ms - 17);
+        assert_eq!(layout_change_time(now_ms, Some(8_333_333)), now_ms - 8);
+        assert_eq!(layout_change_time(now_ms, None), now_ms);
+        assert_eq!(layout_change_time(now_ms, Some(0)), now_ms);
+        assert_eq!(
+            layout_change_time(5, Some(16_666_667)),
+            5u32.wrapping_sub(17)
+        );
+    }
 
     #[test]
     fn hit_test_preserves_inline_regions_occlusion_and_metadata() {

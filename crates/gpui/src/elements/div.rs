@@ -5727,38 +5727,38 @@ mod tests {
         assert_eq!(opted.offset(), point(px(-30.), px(0.)));
     }
 
-    struct LayoutMotionTestView {
-        top_height: Rc<Cell<Pixels>>,
-        scroll: ScrollHandle,
-    }
-
-    impl Render for LayoutMotionTestView {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .id("scroller")
-                .size(px(100.0))
-                .flex()
-                .flex_col()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .child(div().h(self.top_height.get()).flex_shrink_0())
-                .child(
-                    div()
-                        .id("moving-box")
-                        .h(px(200.0))
-                        .w_full()
-                        .flex_shrink_0()
-                        .bg(crate::red())
-                        .layout_motion(crate::LayoutMotion {
-                            duration_ms: 1000,
-                            easing: crate::MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
-                        }),
-                )
-        }
-    }
-
     #[gpui::test]
     fn layout_motion_animates_layout_changes_but_not_scroll(cx: &mut TestAppContext) {
+        struct LayoutMotionTestView {
+            top_height: Rc<Cell<Pixels>>,
+            scroll: ScrollHandle,
+        }
+
+        impl Render for LayoutMotionTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("scroller")
+                    .size(px(100.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(div().h(self.top_height.get()).flex_shrink_0())
+                    .child(
+                        div()
+                            .id("moving-box")
+                            .h(px(200.0))
+                            .w_full()
+                            .flex_shrink_0()
+                            .bg(crate::red())
+                            .layout_motion(crate::LayoutMotion {
+                                duration_ms: 1000,
+                                easing: crate::MotionEasing::CubicBezier([0.0, 0.0, 1.0, 1.0]),
+                            }),
+                    )
+            }
+        }
+
         let top_height = Rc::new(Cell::new(px(20.0)));
         let scroll = ScrollHandle::new();
         let view = cx.add_window({
@@ -5767,7 +5767,6 @@ mod tests {
             move |_, _| LayoutMotionTestView { top_height, scroll }
         });
         cx.update_window(view.into(), |_, window, cx| {
-            crate::set_animation_clock(Some(1000));
             window.draw(cx).clear(cx);
             top_height.set(px(50.0));
             window.animate_layout(1000);
@@ -5780,8 +5779,6 @@ mod tests {
                 .first()
                 .unwrap()
                 .clone();
-            // The test window reports no vsync. The refresh period requires a real-window check.
-            assert_eq!(second.timing.start_ms, crate::animation_time_ms());
             assert_eq!(
                 second.delta,
                 crate::Edges {
@@ -5799,7 +5796,6 @@ mod tests {
                 (third.delta, third.radii_delta, third.timing),
                 (second.delta, second.radii_delta, second.timing),
             );
-            crate::set_animation_clock(None);
         })
         .unwrap();
     }
