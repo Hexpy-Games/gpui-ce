@@ -3670,6 +3670,7 @@ impl Window {
             }
             if self.pyramid_jobs.take_standin((image_id, frame_index)) {
                 self.sprite_atlas.remove(&AtlasKey::Image(params));
+                self.refreshing = true;
             }
         }
         self.invalidator.set_dirty(false);
