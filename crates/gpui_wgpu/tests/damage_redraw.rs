@@ -322,6 +322,10 @@ fn stepped_group_between_steps_matches_full_redraw() {
     b.replay(0..a.len(), &a);
     b.finish_over(&a);
 
+    // The reference renderer has its own empty backdrop cache; the same tiles land in its atlas.
+    let mut reference = WgpuHeadlessRenderer::new().expect("reference renderer");
+    animated_scene(&reference, color(0xffffff));
+
     renderer.set_animation_time_ms(125);
     renderer
         .render_scene_to_image(&a, target)
@@ -331,7 +335,8 @@ fn stepped_group_between_steps_matches_full_redraw() {
         let damage = renderer
             .render_animation_frame_to_image(&b, target)
             .expect("scene B must use the damage path");
-        let full = renderer
+        reference.set_animation_time_ms(now);
+        let full = reference
             .render_scene_to_image(&b, target)
             .expect("full scene B");
         assert_eq!(damage.as_raw(), full.as_raw());
