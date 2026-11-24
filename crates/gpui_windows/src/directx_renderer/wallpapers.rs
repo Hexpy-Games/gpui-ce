@@ -221,6 +221,9 @@ impl DirectXRenderer {
             let image = if pass.image { &image } else { source };
             let ctx = &devices.device_context;
             unsafe {
+                // Direct3D 11 nulls an input that is still bound for output: the previous pass's
+                // target has to leave the output merger before it is bound as this pass's input.
+                ctx.OMSetRenderTargets(Some(slice::from_ref(&targets[index].0)), None);
                 ctx.PSSetShaderResources(5, Some(&[previous.clone(), image.clone()]));
                 ctx.PSSetSamplers(7, Some(slice::from_ref(&self.globals.sampler)));
             }
